@@ -318,7 +318,7 @@ impl HostAdmissionFacade<'_> {
                         + '_,
                 >,
             > = Box::pin(database.converge_session_git_evidence(
-                &SystemGit,
+                std::sync::Arc::new(SystemGit),
                 self.authorities.project_root.as_deref(),
             ));
             let convergence = git_evidence.await;

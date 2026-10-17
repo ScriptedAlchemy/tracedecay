@@ -736,6 +736,20 @@ changes a file that holds memory.
     storage finding naming the holders.
   Step 7 moves this policy onto lanes unchanged; only the 100 ms interval and the
   hard limit become the class soft limits.
+- Step 6, snapshot lifetimes (2026-10-17, branch `refactor/storage-snapshot-deadlines`).
+  Every read snapshot ends itself when it has sat 30 s with no statement running
+  (`READ_SNAPSHOT_IDLE_LIMIT`) or 1 hour after it began (`READ_SNAPSHOT_LIFETIME`),
+  whichever comes first. The reader worker rolls it back with the same machinery
+  the fence uses to revoke one, and every statement on it also stops at the
+  1-hour end. So a forgotten snapshot, or one held across unrelated work, frees the
+  WAL within 30 s, while a legitimately long read of a 5.5 GB store (a convergence
+  audit, a dbstat walk of 64-95 s, a paged rebuild) keeps working as long as it
+  keeps issuing statements; each single statement keeps its own budget (30 s per
+  request statement, none for convergence). A fixed 30 s total lifetime was
+  considered and rejected: it would fail legitimate multi-statement reads on large
+  profiles. The session temporal refresh dropped its verification snapshot before
+  its commit phase, which it used to hold through. The design's 2 s and 5 s
+  deadlines apply to read jobs, which arrive with the executor (step 7).
 - Step 6, foreign readers (2026-10-17, branch `fix/storage-report-header-free-pages`).
   The storage report sized each registered store's free pages by opening its own
   read-only SQLite connection, a reader outside the daemon's pool on a live file.

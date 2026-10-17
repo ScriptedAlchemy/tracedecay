@@ -1146,7 +1146,6 @@ fn count_installed_thread_collect() {
 const COUNTING_RELEASE: ProcessAllocatorReleaseV1 = ProcessAllocatorReleaseV1 {
     release: count_installed_release,
     collect_calling_thread: count_installed_thread_collect,
-    owner_heaps: None,
 };
 
 /// The allocator the composition root installed is released: glibc's

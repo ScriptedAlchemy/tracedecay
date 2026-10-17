@@ -8,7 +8,6 @@ use parking_lot::{
     RawRwLock, RwLock as ParkingRwLock, RwLockUpgradableReadGuard,
     RwLockWriteGuard as ParkingRwLockWriteGuard,
 };
-use tracedecay_domain::process_heap::OwnerHeapV1;
 
 use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
@@ -90,10 +89,6 @@ pub(crate) struct Inner {
     serving_pins: AtomicUsize,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
-    /// The heap a lazily opened engine was built in and the bytes of the
-    /// pages it occupied when the open returned. Declared after `database`,
-    /// so dropping the engine empties the heap before the heap is deleted.
-    engine_heap: Mutex<Option<(OwnerHeapV1, u64)>>,
     engine_usage_bytes: Mutex<Option<u64>>,
 }
 
@@ -217,23 +212,6 @@ impl Inner {
             + self.adjacency_ids.heap_bytes()
             + self.projection_approvals.heap_bytes()
     }
-
-    /// Bytes of the pages the engine's open left in its own heap.
-    fn engine_heap_bytes(&self) -> u64 {
-        self.engine_heap
-            .lock()
-            .map_or(0, |heap| heap.as_ref().map_or(0, |(_, bytes)| *bytes))
-    }
-
-    /// Delete the engine's heap once the engine itself is dropped, returning
-    /// every page it built on whichever thread freed it.
-    fn release_engine_heap(&self) {
-        let heap = self.engine_heap.lock().map_or_else(
-            |poisoned| poisoned.into_inner().take(),
-            |mut heap| heap.take(),
-        );
-        drop(heap);
-    }
 }
 
 pub struct GraphSnapshot {
@@ -324,7 +302,6 @@ impl GraphDb {
                 serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
-                engine_heap: Mutex::new(None),
                 engine_usage_bytes: Mutex::new(None),
             }),
         });
@@ -360,7 +337,6 @@ impl GraphDb {
                 serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
-                engine_heap: Mutex::new(None),
                 engine_usage_bytes: Mutex::new(None),
             }),
         }))
@@ -1119,7 +1095,6 @@ impl GraphDb {
             ContainerIdentity::from_engine(&database)
         };
         drop(database);
-        self.inner.release_engine_heap();
         if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
@@ -1260,7 +1235,6 @@ impl GraphDb {
         test_seams::fire(test_seams::Seam::MarkerPublish);
         let closed = ContainerIdentity::from_engine(&database_to_close);
         drop(database_to_close);
-        self.inner.release_engine_heap();
         if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
@@ -1577,8 +1551,7 @@ impl GraphDb {
                     let usage = *usage.get_or_insert_with(|| {
                         u64::try_from(database.memory_usage().total_bytes).unwrap_or(u64::MAX)
                     });
-                    let engine = usage.max(self.inner.engine_heap_bytes());
-                    engine.saturating_add(
+                    usage.saturating_add(
                         u64::try_from(self.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX),
                     )
                 })
@@ -1763,12 +1736,7 @@ impl GraphDb {
                 )
             })?;
         validated.preexisting_store = persistent_store_state == PersistentGraphStoreState::Existing;
-        // The engine's long-lived state is built in a heap of its own: its
-        // pages then hold nothing else, are charged as the engine's, and are
-        // returned whole when it hibernates.
-        let (opened, heap) =
-            OwnerHeapV1::build(|| open_lazy_engine(&validated, persistent_store_state));
-        let opened = opened?;
+        let opened = open_lazy_engine(&validated, persistent_store_state)?;
         if let Some(path) = validated.config.path.as_deref() {
             crate::sealed_store::sweep_abandoned_sealed_staging(path);
         }
@@ -1790,11 +1758,6 @@ impl GraphDb {
         self.inner.markers.bind(opened.identity);
         self.inner.invalidate_store_epoch_caches();
         *database = Some(opened.database);
-        *self
-            .inner
-            .engine_heap
-            .lock()
-            .map_err(|_| GraphDbError::unavailable("graph engine heap lock is poisoned"))? = heap;
         *self
             .inner
             .lazy_store_state
