@@ -1414,7 +1414,9 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .shutdown_retirement_reapers()
         .await;
     if let Err(error) = tracing::Instrument::instrument(
-        resources.store_administration.close_stores_for_shutdown(),
+        resources.store_administration.close_stores_for_shutdown(
+            std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+        ),
         tracing::trace_span!("daemon.harness.shutdown_graph"),
     )
     .await

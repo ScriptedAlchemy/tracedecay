@@ -2036,7 +2036,9 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
         .await
         .expect("first reconciliation shuts down");
     first_registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("first graph runtime closes");
     drop(first_registry);
@@ -2134,7 +2136,9 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
         .await
         .expect("first terminal tasks shut down");
     first_registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("first session relation graph closes");
     drop(first_registry);
@@ -2180,7 +2184,9 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
         .await
         .expect("detached session relation graph task shuts down");
     reopened_registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("detached relational session owner shuts down cleanly");
 }
