@@ -996,6 +996,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 // another actor and would reset if this loop state were lost
                 // while the slot remained.
                 if publication_authority_is_terminal(&worker_convergence_park) {
+                    #[cfg(test)]
+                    Self::wait_for_terminal_suppression_gate(&worker_project_root).await;
                     sealed_successor = None;
                     let _ = Self::take_pending_arrival(
                         &worker_pending_wake,
