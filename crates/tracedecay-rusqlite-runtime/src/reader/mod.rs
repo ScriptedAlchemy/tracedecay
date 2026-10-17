@@ -22,14 +22,16 @@ pub use worker::{
 #[cfg(test)]
 mod tests;
 
-/// How long a read snapshot may stay open. Past it the worker rolls the read
-/// back and the snapshot's later reads fail as expired, so no reader pins the
-/// WAL indefinitely. One full statement budget fits inside it.
-pub const READ_SNAPSHOT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a read snapshot may sit with no statement running. Past it the
+/// worker rolls the read back and the snapshot's later reads fail as expired,
+/// so a snapshot its owner forgot, or holds across unrelated work, does not
+/// pin the WAL. A long read that keeps issuing statements is not idle.
+pub const READ_SNAPSHOT_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The lifetime of a schema-convergence audit snapshot, whose single
-/// statements scan a whole table and so carry no per-statement deadline.
-pub const CONVERGENCE_SNAPSHOT_LIFETIME: std::time::Duration = std::time::Duration::from_hours(1);
+/// The longest any read snapshot stays open, busy or not. It covers a
+/// multi-statement read of a whole multi-gigabyte store, such as a
+/// schema-convergence audit; every statement also stops at it.
+pub const READ_SNAPSHOT_LIFETIME: std::time::Duration = std::time::Duration::from_hours(1);
 
 use tracedecay_store::{
     RuntimeReadOutcomeV1, RuntimeReadRequestV1, StorageRuntimeErrorV1, UnavailableReasonV1,

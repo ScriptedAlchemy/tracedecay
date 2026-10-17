@@ -592,6 +592,8 @@ fn run<E: ReaderQueryExecutor>(
                         let end = SnapshotEnd {
                             revocation,
                             expires,
+                            idle_limit: crate::reader::READ_SNAPSHOT_IDLE_LIMIT,
+                            last_active: std::cell::Cell::new(Instant::now()),
                         };
                         if run_snapshot(transaction, commands, executor, &admission, &end) {
                             return;
@@ -769,21 +771,36 @@ fn run_snapshot<E: ReaderQueryExecutor>(
             }
             SnapshotCommand::End { .. } | SnapshotCommand::Shutdown => {}
         }
+        end.touch();
     }
 }
 
 /// When a held snapshot must end before its lease does: the checkpoint fence
-/// revoked it, or its lifetime ran out.
+/// revoked it, it sat idle too long, or its lifetime ran out.
 struct SnapshotEnd<'a> {
     revocation: &'a SnapshotRevocation,
     expires: Instant,
+    idle_limit: Duration,
+    last_active: std::cell::Cell<Instant>,
 }
 
 impl SnapshotEnd<'_> {
-    /// Rolls the snapshot back once it is revoked or expired, so its WAL read
-    /// slot is free while its lease is still out.
+    /// Revoked, past its lifetime, or idle past the idle limit.
+    fn due(&self, now: Instant) -> bool {
+        self.revocation.requested()
+            || now >= self.expires
+            || now >= self.last_active.get() + self.idle_limit
+    }
+
+    /// A command finished: the snapshot is in use, so its idle clock restarts.
+    fn touch(&self) {
+        self.last_active.set(Instant::now());
+    }
+
+    /// Rolls the snapshot back once it is due, so its WAL read slot is free
+    /// while its lease is still out.
     fn end_if_due(&self, active: &mut Option<Transaction<'_>>) {
-        if (self.revocation.requested() || Instant::now() >= self.expires)
+        if self.due(Instant::now())
             && let Some(transaction) = active.take()
         {
             // A failed rollback drops the transaction, which rolls back again.
@@ -849,6 +866,49 @@ fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1
         RuntimeInterruptionV1::Cancelled => UnavailableReasonV1::Cancelled,
         RuntimeInterruptionV1::DeadlineExceeded => UnavailableReasonV1::DeadlineExceeded,
     })
+}
+
+#[cfg(test)]
+mod snapshot_end_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{SnapshotEnd, SnapshotRevocation};
+
+    /// A snapshot that keeps issuing statements stays open up to its
+    /// lifetime; one that sits idle past the idle limit ends, and so does a
+    /// revoked one.
+    #[test]
+    fn a_snapshot_ends_when_idle_too_long_revoked_or_past_its_lifetime() {
+        let start = Instant::now();
+        let revocation = SnapshotRevocation::default();
+        let end = SnapshotEnd {
+            revocation: &revocation,
+            expires: start + Duration::from_hours(1),
+            idle_limit: Duration::from_secs(30),
+            last_active: std::cell::Cell::new(start),
+        };
+        assert!(!end.due(start + Duration::from_secs(29)));
+        assert!(
+            end.due(start + Duration::from_secs(30)),
+            "idle past the limit"
+        );
+
+        end.last_active.set(start + Duration::from_mins(50));
+        assert!(
+            !end.due(start + Duration::from_mins(50) + Duration::from_secs(29)),
+            "a busy snapshot is not idle however long it has been open"
+        );
+        assert!(
+            end.due(start + Duration::from_hours(1)),
+            "past its lifetime"
+        );
+
+        end.last_active.set(start);
+        revocation
+            .requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(end.due(start), "revoked");
+    }
 }
 
 #[cfg(test)]
