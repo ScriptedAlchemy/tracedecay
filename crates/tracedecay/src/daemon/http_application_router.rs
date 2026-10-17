@@ -5,6 +5,7 @@
 
 use super::*;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[tracing::instrument(
@@ -12,7 +13,7 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
     level = "trace",
     skip_all
 )]
-fn build_http_application_router(
+async fn build_http_application_router(
     owner: &tracedecay_runtime_core::config::ProfileRoot,
     project_id: &str,
     project_path: &Path,
@@ -22,22 +23,33 @@ fn build_http_application_router(
             message: format!("daemon HTTP project identity is invalid: {error}"),
         }
     })?;
-    let handshake = crate::daemon::handshake_for_current_client(
-        owner,
-        Some(project_path.to_path_buf()),
-        None,
-        false,
-        false,
-    )?;
-    let client = crate::daemon::invocation_client_for_current(owner, handshake)?;
-    tracedecay_daemon_service::application_surface::http_application_router(
-        client,
-        tracedecay_daemon_service::daemon_operation_event_authority(),
-        project_id.clone(),
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("could not mount daemon HTTP application routes: {error}"),
+    let owner = owner.clone();
+    let project_path = project_path.to_path_buf();
+    // The build costs 0.1-1.5 s of CPU, so it stays off the caller's poll.
+    native_runtime::spawn_blocking(move || {
+        #[cfg(test)]
+        tests::spend_injected_build_cpu(project_id.as_str());
+        let handshake = crate::daemon::handshake_for_current_client(
+            &owner,
+            Some(project_path),
+            None,
+            false,
+            false,
+        )?;
+        let client = crate::daemon::invocation_client_for_current(&owner, handshake)?;
+        tracedecay_daemon_service::application_surface::http_application_router(
+            client,
+            tracedecay_daemon_service::daemon_operation_event_authority(),
+            project_id,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("could not mount daemon HTTP application routes: {error}"),
+        })
     })
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("daemon HTTP application router build did not finish: {error}"),
+    })?
 }
 
 pub(super) fn install_http_application_cold_resolver(
@@ -104,6 +116,7 @@ pub(super) fn install_http_application_cold_resolver(
                     project_id.as_str(),
                     &canonical_root,
                 )
+                .await
                 .map(Some)
             },
             tracing::trace_span!("daemon.http.application.router_cold_resolve"),
@@ -162,6 +175,78 @@ pub(super) async fn mount_http_application_router(
     if !registry.is_active() {
         return Ok(());
     }
-    let router = build_http_application_router(owner, project_id, project_path)?;
+    let router = build_http_application_router(owner, project_id, project_path).await?;
     registry.mount(project_id, router).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, PoisonError};
+    use std::task::Poll;
+    use std::time::{Duration, Instant};
+
+    use futures_util::future::{Either, select};
+    use tracedecay_runtime_core::native_runtime;
+
+    /// CPU a router build spends before its real work, by project, standing
+    /// in for a build that runs long on a loaded host.
+    static INJECTED_BUILD_CPU: Mutex<BTreeMap<String, Duration>> = Mutex::new(BTreeMap::new());
+
+    pub(super) fn spend_injected_build_cpu(project_id: &str) {
+        let cpu = INJECTED_BUILD_CPU
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(project_id);
+        if let Some(cpu) = cpu {
+            let spun = Instant::now();
+            while spun.elapsed() < cpu {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    /// The router build is synchronous and measured 0.1-1.5 s of CPU under
+    /// load. Run inside the caller's native poll, it holds that worker and
+    /// every future polled beside it until it returns (#4056).
+    #[test]
+    fn a_router_build_longer_than_one_native_poll_leaves_the_poll() {
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let project = tempfile::tempdir().expect("project root");
+        let owner =
+            tracedecay_runtime_core::config::ProfileRoot::new(project.path().join("profile"));
+        let project_id = "http-router-build-off-native-poll";
+        INJECTED_BUILD_CPU
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(project_id.to_owned(), native_runtime::LONG_POLL * 4);
+        let peer_ran_first = native_runtime::block_on(async {
+            let build = std::pin::pin!(super::build_http_application_router(
+                &owner,
+                project_id,
+                project.path(),
+            ));
+            let mut yielded = false;
+            let peer = std::future::poll_fn(|task| {
+                if yielded {
+                    return Poll::Ready(());
+                }
+                yielded = true;
+                task.waker().wake_by_ref();
+                Poll::Pending
+            });
+            match select(build, peer).await {
+                Either::Left(_) => false,
+                Either::Right(((), build)) => {
+                    let _ = build.await;
+                    true
+                }
+            }
+        })
+        .expect("native runtime runs the build");
+        assert!(
+            peer_ran_first,
+            "a future polled beside the router build must progress while it runs"
+        );
+    }
 }

@@ -155,6 +155,38 @@ pub fn incomplete_code_index_query_lanes(search: &Value) -> Vec<&'static str> {
         .collect()
 }
 
+/// The code-index freshness a status read reports, tracked across one wait.
+///
+/// A starved daemon indexes slowly but keeps moving; a stuck one stops. A
+/// wait built on this fails only once `window` passes with no change in the
+/// reported freshness (phase, progress counters, lane states), instead of
+/// once a fixed total elapses.
+pub struct IndexProgress {
+    last: Value,
+    changed_at: Instant,
+    window: Duration,
+}
+
+impl IndexProgress {
+    pub fn new(window: Duration) -> Self {
+        Self {
+            last: Value::Null,
+            changed_at: Instant::now(),
+            window,
+        }
+    }
+
+    /// Records `status` and reports whether the index is still moving.
+    pub fn moving(&mut self, status: &Value) -> bool {
+        let freshness = &status["code_index_freshness"];
+        if *freshness != self.last {
+            self.last = freshness.clone();
+            self.changed_at = Instant::now();
+        }
+        self.changed_at.elapsed() < self.window
+    }
+}
+
 /// A throwaway user home holding one TraceDecay profile, handed explicitly to
 /// every API a fixture drives.
 ///

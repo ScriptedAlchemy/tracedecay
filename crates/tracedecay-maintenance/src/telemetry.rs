@@ -32,11 +32,59 @@ const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry
 
 const TABLE_GROWTH_STATE_DIRECTORY: &str = "maintenance";
 const TABLE_GROWTH_STATE_FILE: &str = "table-growth-v1.json";
+/// How long a walk that ran out of its deadline suppresses the next one.
+const TABLE_SIZE_WALK_REPROBE_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 
 #[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
 struct TableWatermark {
     bytes: StorageByteSizeV1,
     observed_at: UtcMicros,
+}
+
+/// The store size at which a per-table `dbstat` walk last ran out of its
+/// deadline.
+///
+/// The walk reads every page of every table, so its cost tracks the store
+/// size: a multi-gigabyte session store needs minutes. Once a walk has run
+/// out of time, repeating it on a store at least as large only spends the
+/// deadline again. A smaller store, or a day-old mark, is walked again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct OverBudgetTableSizeWalk {
+    page_count: u64,
+    observed_at: UtcMicros,
+}
+
+impl OverBudgetTableSizeWalk {
+    fn still_applies(self, page_count: u64, now: UtcMicros) -> bool {
+        page_count >= self.page_count
+            && now.0.saturating_sub(self.observed_at.0) < TABLE_SIZE_WALK_REPROBE_MICROS
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TableSizeWalk {
+    Measured(Vec<(String, u64)>),
+    OverBudget(OverBudgetTableSizeWalk),
+    Skipped,
+}
+
+/// A walk that ran out of its deadline marks the store over budget; any other
+/// failure stays a plain unavailable reason.
+fn settle_table_size_walk(
+    walked: Result<Vec<(String, u64)>, TableGrowthUnavailableReasonV1>,
+    page_count: u64,
+    observed_at: UtcMicros,
+) -> Result<TableSizeWalk, TableGrowthUnavailableReasonV1> {
+    match walked {
+        Ok(tables) => Ok(TableSizeWalk::Measured(tables)),
+        Err(TableGrowthUnavailableReasonV1::DeadlineExceeded) => {
+            Ok(TableSizeWalk::OverBudget(OverBudgetTableSizeWalk {
+                page_count,
+                observed_at,
+            }))
+        }
+        Err(reason) => Err(reason),
+    }
 }
 
 /// One store's table-growth baseline and the latest maintenance measurement.
@@ -48,6 +96,7 @@ struct TableWatermark {
 struct TableGrowthStateV1 {
     watermarks: Option<BTreeMap<TableNameV1, TableWatermark>>,
     latest: Option<TableGrowthTelemetryReadV1>,
+    over_budget: Option<OverBudgetTableSizeWalk>,
 }
 
 /// Store telemetry bound to the database's guarded read capability.
@@ -150,27 +199,56 @@ impl GuardedStoreTelemetryPort {
         let handle = self.handle.clone();
         let reader_wait = self.reader_wait;
         let context = context.clone();
-        let current = match native_runtime::spawn_blocking(move || {
-            handle.table_size_telemetry(reader_wait, || telemetry_interruption(&context))
+        let over_budget = self.table_growth_state().over_budget;
+        let walk = native_runtime::spawn_blocking(move || {
+            let interrupted = || telemetry_interruption(&context);
+            let page_count = handle
+                .store_size_telemetry(reader_wait, interrupted)
+                .map_err(|error| error.table_growth_unavailable_reason())?
+                .page_count;
+            if over_budget.is_some_and(|walk| walk.still_applies(page_count, now_micros())) {
+                return Ok(TableSizeWalk::Skipped);
+            }
+            let walked = handle
+                .table_size_telemetry(reader_wait, interrupted)
+                .map(|samples| {
+                    samples
+                        .into_iter()
+                        .map(|sample| (sample.table_name, sample.bytes))
+                        .collect()
+                })
+                .map_err(|error| error.table_growth_unavailable_reason());
+            settle_table_size_walk(walked, page_count, now_micros())
         })
-        .await
-        {
-            Ok(Ok(current)) => current,
-            Ok(Err(error)) => return unknown(error.table_growth_unavailable_reason()),
+        .await;
+        let current = match walk {
+            Ok(Ok(TableSizeWalk::Measured(current))) => current,
+            Ok(Ok(TableSizeWalk::Skipped)) => {
+                return unknown(TableGrowthUnavailableReasonV1::ExceedsMeasurementBudget);
+            }
+            Ok(Ok(TableSizeWalk::OverBudget(walk))) => {
+                self.table_growth
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .over_budget = Some(walk);
+                return unknown(TableGrowthUnavailableReasonV1::ExceedsMeasurementBudget);
+            }
+            Ok(Err(reason)) => return unknown(reason),
             Err(_) => return unknown(TableGrowthUnavailableReasonV1::StorageOther),
         };
         let observed_at = now_micros();
         let mut current_tables = BTreeMap::new();
-        for sample in current {
-            let Ok(table) = TableNameV1::new(sample.table_name) else {
+        for (table_name, bytes) in current {
+            let Ok(table) = TableNameV1::new(table_name) else {
                 return unknown(TableGrowthUnavailableReasonV1::InvalidTableName);
             };
-            current_tables.insert(table, StorageByteSizeV1(sample.bytes));
+            current_tables.insert(table, StorageByteSizeV1(bytes));
         }
         let mut state = self
             .table_growth
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.over_budget = None;
         compare_table_growth(store, current_tables, observed_at, &mut state.watermarks)
     }
 }
@@ -902,18 +980,25 @@ mod retention_tick_log_tests {
 #[allow(clippy::expect_used, clippy::panic)]
 mod table_growth_tests {
     use std::collections::BTreeSet;
-
     use std::path::Path;
+    use std::time::Duration;
 
+    use futures_util::FutureExt;
     use tracedecay_contracts::ResolvedScope;
+    use tracedecay_contracts::now_micros;
     use tracedecay_contracts::storage::{
-        TableGrowthDoctorEvidenceV1, TableGrowthTelemetryReadV1, TableGrowthUnavailableReasonV1,
-        table_growth_doctor_evidence,
+        StorageTelemetryReadV1, StoreKeyV1, StoreSizeTelemetryPort, TableGrowthDoctorEvidenceV1,
+        TableGrowthTelemetryReadV1, TableGrowthUnavailableReasonV1, table_growth_doctor_evidence,
     };
+    use tracedecay_domain::UtcMicros;
     use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracedecay_runtime_core::db::Database;
 
-    use super::{StoreTelemetrySamplingRegistry, storage_telemetry_request_context};
+    use super::{
+        GuardedStoreTelemetryPort, OverBudgetTableSizeWalk, StoreTelemetrySamplingRegistry,
+        TableGrowthStateV1, TableSizeWalk, settle_table_size_walk,
+        storage_telemetry_request_context,
+    };
 
     const GROWN_TABLE_BYTES: u64 = 80 * 1024 * 1024;
 
@@ -1016,6 +1101,210 @@ mod table_growth_tests {
                 )),
             "doctor evidence must flag the grown table"
         );
+    }
+
+    async fn fixture_port(
+        database_path: &Path,
+        reader_wait: Duration,
+    ) -> (Database, StoreKeyV1, GuardedStoreTelemetryPort) {
+        let (database, scope) = growth_fixture(database_path).await;
+        let store = StoreKeyV1::new("project.db".to_owned()).expect("store key");
+        let port = GuardedStoreTelemetryPort::new(
+            database
+                .storage_telemetry_handle()
+                .expect("telemetry handle"),
+            store.clone(),
+            scope,
+            reader_wait,
+            TableGrowthStateV1::default(),
+        );
+        (database, store, port)
+    }
+
+    #[asupersync::test]
+    async fn store_size_reports_the_exact_page_pragmas() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (_database, store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+
+        let read = port.store_size(&context, &store).await;
+
+        let StorageTelemetryReadV1::Observed { sample } = read else {
+            panic!("the mounted store's size must be observed, got {read:?}");
+        };
+        assert!(sample.page_size_bytes > 0);
+        assert!(sample.page_count > 0);
+        assert!(sample.freelist_pages <= sample.page_count);
+    }
+
+    #[asupersync::test]
+    async fn a_table_created_after_the_baseline_is_pending_rather_than_grown_from_zero() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (database, store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+        assert!(matches!(
+            port.table_growth(&context, &store).await,
+            TableGrowthTelemetryReadV1::BaselineEstablished { .. }
+        ));
+        database
+            .execute_write_batch(
+                "create a table after the baseline",
+                "CREATE TABLE created_after_baseline (payload TEXT NOT NULL); \
+                 INSERT INTO created_after_baseline VALUES ('new');",
+            )
+            .await
+            .expect("new table");
+
+        let read = port.table_growth(&context, &store).await;
+
+        let TableGrowthTelemetryReadV1::Observed {
+            samples,
+            baseline_pending,
+            ..
+        } = read
+        else {
+            panic!("the second pass compares watermarks, got {read:?}");
+        };
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.table.as_str() != "created_after_baseline"),
+            "a new table must not be compared against fabricated zero bytes"
+        );
+        let pending = baseline_pending
+            .iter()
+            .find(|pending| pending.table.as_str() == "created_after_baseline")
+            .expect("the new table is explicitly baseline-pending");
+        assert!(pending.current_bytes.get() > 0);
+    }
+
+    #[asupersync::test]
+    async fn another_store_is_denied_without_bytes() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (_database, _store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+        let other = StoreKeyV1::new("other.db".to_owned()).expect("store key");
+        let denied = TableGrowthTelemetryReadV1::Denied {
+            store: other.clone(),
+        };
+
+        assert_eq!(port.table_growth(&context, &other).await, denied);
+        assert_eq!(port.latest_table_growth(&context, &other), denied);
+        assert_eq!(
+            port.store_size(&context, &other).await,
+            StorageTelemetryReadV1::Denied { store: other }
+        );
+    }
+
+    #[asupersync::test]
+    async fn a_telemetry_wait_yields_the_polling_thread() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (database, store, port) = fixture_port(
+            &temporary.path().join("project.db"),
+            Duration::from_millis(200),
+        )
+        .await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+        let health_reader = database
+            .begin_engine_health_read_snapshot()
+            .await
+            .expect("hold the reserved health reader");
+
+        let mut read = port.table_growth(&context, &store);
+        assert!(
+            (&mut read).now_or_never().is_none(),
+            "a measurement waiting on the health reader must not block the poller"
+        );
+        assert!(matches!(
+            read.await,
+            TableGrowthTelemetryReadV1::Unknown {
+                reason: TableGrowthUnavailableReasonV1::ReaderUnavailable,
+                ..
+            }
+        ));
+        drop(health_reader);
+    }
+
+    #[test]
+    fn only_a_walk_that_ran_out_of_its_deadline_marks_the_store_over_budget() {
+        let at = UtcMicros(7);
+        assert_eq!(
+            settle_table_size_walk(
+                Err(TableGrowthUnavailableReasonV1::DeadlineExceeded),
+                42,
+                at
+            ),
+            Ok(TableSizeWalk::OverBudget(OverBudgetTableSizeWalk {
+                page_count: 42,
+                observed_at: at,
+            }))
+        );
+        assert_eq!(
+            settle_table_size_walk(
+                Err(TableGrowthUnavailableReasonV1::ReaderUnavailable),
+                42,
+                at
+            ),
+            Err(TableGrowthUnavailableReasonV1::ReaderUnavailable)
+        );
+    }
+
+    #[asupersync::test]
+    async fn an_over_budget_store_is_not_walked_until_it_shrinks_or_the_mark_ages_out() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (_database, store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+        let mark = |page_count, observed_at| {
+            port.table_growth
+                .lock()
+                .expect("table growth state")
+                .over_budget = Some(OverBudgetTableSizeWalk {
+                page_count,
+                observed_at,
+            });
+        };
+
+        mark(1, now_micros());
+        let skipped = port.table_growth(&context, &store).await;
+        assert_eq!(
+            skipped,
+            TableGrowthTelemetryReadV1::Unknown {
+                store: store.clone(),
+                reason: TableGrowthUnavailableReasonV1::ExceedsMeasurementBudget,
+            }
+        );
+        assert!(
+            port.table_growth_state().watermarks.is_none(),
+            "a store at least as large as its over-budget walk must not be walked again"
+        );
+        assert_eq!(port.latest_table_growth(&context, &store), skipped);
+
+        mark(u64::MAX, now_micros());
+        assert!(
+            matches!(
+                port.table_growth(&context, &store).await,
+                TableGrowthTelemetryReadV1::BaselineEstablished { .. }
+            ),
+            "a store smaller than its over-budget walk is walked again"
+        );
+        assert_eq!(port.table_growth_state().over_budget, None);
+
+        mark(
+            1,
+            UtcMicros(now_micros().0 - super::TABLE_SIZE_WALK_REPROBE_MICROS - 1),
+        );
+        assert!(
+            matches!(
+                port.table_growth(&context, &store).await,
+                TableGrowthTelemetryReadV1::Observed { .. }
+            ),
+            "a day-old over-budget mark is probed again"
+        );
+        assert_eq!(port.table_growth_state().over_budget, None);
     }
 }
 

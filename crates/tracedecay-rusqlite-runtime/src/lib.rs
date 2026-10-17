@@ -49,11 +49,11 @@ pub use checkpoint::{
 };
 pub use operation::{StorageOperationError, StorageOperationExecutor};
 pub use telemetry::{
-    ReaderAdmissionSnapshot, SqliteStoreSizeTelemetryPort, SqliteVmSnapshot, WalCheckpointSample,
-    WalCheckpointSnapshot, WriterBatchMetrics, WriterBatchTotals, WriterClientServiceSnapshot,
-    WriterCommitSnapshot, WriterLockWorkSnapshot, WriterOperationCounters, WriterQueueSnapshot,
-    WriterServiceCounts, WriterTelemetrySnapshot, WriterTransactionMetrics,
-    WriterTransactionOutcome, WriterTransactionTotals,
+    ReaderAdmissionSnapshot, SqliteVmSnapshot, WalCheckpointSample, WalCheckpointSnapshot,
+    WriterBatchMetrics, WriterBatchTotals, WriterClientServiceSnapshot, WriterCommitSnapshot,
+    WriterLockWorkSnapshot, WriterOperationCounters, WriterQueueSnapshot, WriterServiceCounts,
+    WriterTelemetrySnapshot, WriterTransactionMetrics, WriterTransactionOutcome,
+    WriterTransactionTotals,
 };
 pub use writer::{
     CheckpointControlError, CheckpointHandle, CheckpointRequest, CheckpointTicket,

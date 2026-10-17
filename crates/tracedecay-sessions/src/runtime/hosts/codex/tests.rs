@@ -1217,6 +1217,9 @@ mod recent_first_discovery_tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tracedecay_domain::ProjectId;
+    use tracedecay_runtime_core::native_runtime::{
+        LONG_POLL, NativeTask, NativeTaskOutcome, block_on, long_native_polls,
+    };
 
     use super::CodexSource;
     use crate::admission::test_support::MemoryHostAdmission;
@@ -1230,7 +1233,10 @@ mod recent_first_discovery_tests {
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
-    use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
+    use crate::runtime::ingest::quarantine::SourceSweep;
+    use crate::runtime::jsonl_observation_admission::{
+        SHARED_JSONL_PIN_GATES, install_test_shared_jsonl_preparation_authority,
+    };
     use crate::runtime::source::spin_until_jsonl_change_settled;
     use crate::runtime::source::{
         HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
@@ -1908,6 +1914,107 @@ mod recent_first_discovery_tests {
             result,
             Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier { .. })
         ));
+    }
+
+    /// Spawns an ingest worker's source-ledger read as a native task and names
+    /// the site its long polls are counted against.
+    #[track_caller]
+    fn native_ledger_read(
+        hub: &CodexDiscoveryHub,
+    ) -> (NativeTask<bool>, &'static std::panic::Location<'static>) {
+        let hub = hub.clone();
+        (
+            NativeTask::spawn(async move {
+                SourceSweep::new("codex", Some((&hub, "reader")))
+                    .ledger()
+                    .is_some()
+            })
+            .unwrap(),
+            std::panic::Location::caller(),
+        )
+    }
+
+    /// Holds `discover`'s page pin of `gated` open while a native worker reads
+    /// the `reader` consumer's source ledger. Long polls count against the
+    /// caller's line, so concurrent tests never share a count.
+    #[track_caller]
+    fn assert_ledger_read_never_waits_on_pinning(
+        hub: &CodexDiscoveryHub,
+        gated: &Path,
+        discover: impl FnOnce() + Send + 'static,
+    ) {
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        SHARED_JSONL_PIN_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(gated.to_path_buf(), Arc::clone(&gate));
+        let discovery = std::thread::spawn(discover);
+        gate.wait();
+        let (read, site) = native_ledger_read(hub);
+        std::thread::sleep(LONG_POLL * 3);
+        gate.wait();
+        discovery.join().unwrap();
+        assert_eq!(
+            block_on(read.wait()).unwrap(),
+            NativeTaskOutcome::Completed(true)
+        );
+        assert_eq!(
+            long_native_polls().get(site),
+            None,
+            "the ledger read held its native worker while discovery pinned pages"
+        );
+    }
+
+    #[test]
+    fn a_ledger_read_never_waits_on_a_shared_scan_pinning_pages() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().to_path_buf();
+        let rollout = write_dated_rollout(&home, ("2026", "08", "23"), "pinned");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("scanner", Some(&home));
+        hub.register("reader", Some(&home));
+
+        let scanner = hub.clone();
+        assert_ledger_read_never_waits_on_pinning(&hub, &rollout, move || {
+            scanner
+                .discover_blocking(
+                    "scanner",
+                    &CodexSource::with_home(&home),
+                    TranscriptDiscoveryBounds::from_discovered_units(8),
+                    CodexDiscoveryFrontier::initial(),
+                )
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn a_ledger_read_never_waits_on_a_replay_delivery_pinning_pages() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().to_path_buf();
+        let rollout = write_dated_rollout(&home, ("2026", "08", "23"), "replayed");
+        let hub = CodexDiscoveryHub::default();
+        let source = CodexSource::with_home(&home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let initial = CodexDiscoveryFrontier::initial();
+        hub.register("profile", Some(&home));
+        block_on(drain_hub_consumer(
+            &hub, "profile", &source, bounds, initial,
+        ))
+        .unwrap();
+        // Joining after shared discovery began, these consumers replay.
+        hub.register("replayer", Some(&home));
+        hub.register("reader", Some(&home));
+
+        let replayer = hub.clone();
+        assert_ledger_read_never_waits_on_pinning(&hub, &rollout, move || {
+            while let CodexDiscoveryDelivery::Waiting = replayer
+                .discover_blocking("replayer", &source, bounds, initial)
+                .unwrap()
+            {}
+        });
     }
 
     #[test]

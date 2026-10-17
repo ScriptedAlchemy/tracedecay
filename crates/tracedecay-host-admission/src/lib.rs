@@ -174,6 +174,14 @@ impl HostAdmissionBroker {
         self.replay_wake.notify_waiters();
     }
 
+    /// Consume the pending replay request, if any. A worker calls this as a
+    /// pass starts: the pass reads the spool after this point, so it answers
+    /// every request raised before it, and a stale request would only buy a
+    /// redundant pass.
+    pub fn clear_replay_request(&self) {
+        self.replay_requested.store(false, Ordering::Release);
+    }
+
     pub async fn wait_for_replay_request(&self) {
         self.replay_wake
             .wait_until(|| self.replay_requested.swap(false, Ordering::AcqRel))

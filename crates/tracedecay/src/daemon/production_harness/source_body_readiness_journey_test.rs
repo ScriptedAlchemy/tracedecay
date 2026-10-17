@@ -5,7 +5,7 @@ use tempfile::TempDir;
 use tracedecay_code_index::graph_projection::{
     CodeGraphCatalogReleaseV1, CodeGraphReadinessRequirement,
 };
-use tracedecay_domain::{ProjectId, SymbolOccurrenceId, UtcMicros};
+use tracedecay_domain::{ProjectId, SymbolOccurrenceId};
 use tracedecay_graph_db::NeverCancelled;
 
 use super::ProductionProjectCompositionHarnessV1;
@@ -82,13 +82,13 @@ async fn source_body_serves_while_the_released_catalog_cannot_rewarm() {
     // These point reads prove that the retained engine and occurrence are ready.
     let point = reader.symbol_summary(&occurrence, Arc::new(NeverCancelled));
     let catalog_pending = store.await_rewarm(Duration::ZERO);
-    let deadline = UtcMicros(tracedecay_contracts::now_micros().0 + 1_000_000);
+    // A read that waited on the held catalog would spend its re-warm budget
+    // and answer unavailable instead of evidence.
     let response = harness
-        .call_tool_with_deadline(
+        .call_tool(
             &project,
             "tracedecay_source_body",
             serde_json::json!({"node_id": node_id, "format": "json"}),
-            deadline,
         )
         .await;
     let still_pending = store.await_rewarm(Duration::ZERO);

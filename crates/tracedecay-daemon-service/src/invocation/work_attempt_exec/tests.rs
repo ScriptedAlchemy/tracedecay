@@ -81,16 +81,26 @@ use tracedecay_domain::test_fixtures::id;
 use tracedecay_domain::test_fixtures::digest;
 
 /// Runs `future` with no Tokio runtime anywhere on the stack, so any Tokio
-/// reactor, timer or blocking-pool call on the attempt path panics.
-fn without_tokio<F: std::future::Future>(future: F) -> F::Output {
-    let _probe = crate::invocation::NATIVE_WRITER_WAITS_PROBE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    native_runtime::block_on(async {
+/// reactor, timer or blocking-pool call on the attempt path panics. Like
+/// `spawn_for_worktree`, it polls the attempt on a blocking-pool thread, where
+/// synchronous storage ports may park without holding a native worker.
+fn without_tokio<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let outcome = native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_err());
-        future.await
+        native_runtime::NativeTask::spawn_off_native_thread(future)
+            .expect("native blocking pool available")
+            .wait()
+            .await
     })
-    .expect("native runtime available")
+    .expect("native runtime available");
+    match outcome {
+        native_runtime::NativeTaskOutcome::Completed(()) => {}
+        native_runtime::NativeTaskOutcome::Panicked(payload) => panic!("{payload}"),
+        native_runtime::NativeTaskOutcome::Cancelled => panic!("attempt task was cancelled"),
+    }
 }
 
 fn sha256_digest(bytes: &[u8]) -> ManifestDigest {
@@ -117,6 +127,9 @@ struct AttemptRows {
     /// from the terminal row alone.
     observed_states: Vec<WorkAttemptStateV1>,
     effects: BTreeMap<AttemptKey, WorkAttemptEffectHolderV1>,
+    /// When the provider was durably marked running, which is after its
+    /// spawn and before its wall budget is armed.
+    running_at: Option<UtcMicros>,
 }
 
 /// In-memory attempt rows with the same fenced compare-and-swap semantics as
@@ -129,6 +142,10 @@ struct AttemptStore {
 impl AttemptStore {
     fn observed_states(&self) -> Vec<WorkAttemptStateV1> {
         self.inner.lock().unwrap().observed_states.clone()
+    }
+
+    fn running_at(&self) -> Option<UtcMicros> {
+        self.inner.lock().unwrap().running_at
     }
 
     fn sealed_evidence(
@@ -303,6 +320,9 @@ impl WorkAttemptStoragePort for AttemptStore {
         }
         inner.rows.insert(key, payload);
         inner.observed_states.push(next.state());
+        if next.state() == WorkAttemptStateV1::Running {
+            inner.running_at = Some(now_micros());
+        }
         Ok(())
     }
 
@@ -1654,6 +1674,18 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
         })
         .await
         .expect("no-progress page");
+    // The budget is armed only once the provider runs, so a spawn that
+    // outlasts it (seen past 2 s under CPU starvation) arms nothing, and the
+    // payload contract refuses a zero budget.
+    let running_at = fixture.rows.running_at().expect("the provider ran");
+    if running_at.0 >= deadline.0 {
+        assert!(
+            page.events.is_empty(),
+            "a zero armed budget emits no terminal: {:?}",
+            page.events
+        );
+        return;
+    }
     assert_eq!(page.events.len(), 1, "exactly one no-progress terminal");
     let envelope = &page.events[0];
     assert_eq!(
