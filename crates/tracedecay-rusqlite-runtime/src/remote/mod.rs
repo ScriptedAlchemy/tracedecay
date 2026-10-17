@@ -75,7 +75,8 @@ use identity::{adopt_runtime_binding, bind_node_identity, provision_node_identit
 use promotion_gate::{promotion_pending, promotion_pending_in};
 pub use recovery_authority::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
-    RemoteRecoveryPhysicalEffectsV1, RemoteRecoverySqliteAuthorityV1,
+    RemoteRecoveryPhysicalEffectFutureV1, RemoteRecoveryPhysicalEffectsV1,
+    RemoteRecoverySqliteAuthorityV1,
 };
 pub use replay_authority::RemoteQueryAuthoritySnapshotV1;
 pub use replay_recovery::RemoteReplayStartupRecoveryV1;
