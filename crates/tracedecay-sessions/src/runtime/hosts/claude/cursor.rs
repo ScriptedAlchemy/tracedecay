@@ -1,7 +1,9 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
-use tracedecay_capture::claude::{encode_cursor_key, encode_source_id, observation_source_id};
+use tracedecay_capture::claude::{
+    encode_cursor_key, encode_source_id, observation_path_source_id, observation_source_id,
+};
 
 use crate::runtime::source::TranscriptCursorKey;
 
@@ -9,7 +11,14 @@ pub(super) fn claude_source_id(path: &Path) -> Option<String> {
     path.file_stem().map(claude_source_component)
 }
 
-pub(super) fn claude_observation_source_id(path: &Path) -> String {
+pub(super) fn claude_observation_path_source_id(projects_dir: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(projects_dir).unwrap_or(path);
+    observation_path_source_id(&tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(
+        relative.as_os_str(),
+    ))
+}
+
+pub(super) fn claude_stem_observation_source_id(path: &Path) -> String {
     let transcript_id = path.file_stem().unwrap_or(path.as_os_str());
     observation_source_id(claude_source_component(transcript_id).as_bytes())
 }

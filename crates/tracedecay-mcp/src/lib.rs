@@ -58,6 +58,7 @@ pub mod scope;
 pub mod server;
 pub mod tool_analytics;
 pub mod tool_call_deadline;
+pub mod tool_call_invoker;
 pub mod tool_context;
 pub mod tool_errors;
 pub mod tools;
@@ -80,6 +81,7 @@ pub use jsonrpc::{
 pub use tool_call_deadline::{
     caller_tool_call_deadline, caller_tool_call_deadline_from_meta, tool_call_deadline_meta,
 };
+pub use tool_call_invoker::ToolCallInvoker;
 pub use tool_context::{
     AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
     McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls,

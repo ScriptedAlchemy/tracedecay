@@ -153,10 +153,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             identity.profile_id().clone(),
         ));
         let remote_replay_transaction = Arc::new(
-            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new()
-                .map_err(|error| {
-                    session_registry_error("start remote replay transaction authority", error)
-                })?,
+            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(),
         );
         // The kernel's registry initialises profile- and session-scoped shards
         // through a fail-closed port, because the registered schema lives in
@@ -1163,13 +1160,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             })?;
         let projects = self.project_owners.ready_session_projects()?;
         for project_id in projects {
-            {
-                let _span = tracing::trace_span!(
-                    "daemon.session_registry.mount.remote_promotion_reconcile"
-                )
-                .entered();
-                recovery.reconcile_interrupted_promotions(&project_id)
-            }
+            tracing::Instrument::instrument(
+                recovery.reconcile_interrupted_promotions(&project_id),
+                tracing::trace_span!("daemon.session_registry.mount.remote_promotion_reconcile"),
+            )
+            .await
             .map_err(|error| {
                 session_registry_error(
                     "reconcile interrupted remote promotion",
@@ -1653,13 +1648,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
             .collect::<Vec<_>>();
         for recovery in recoveries {
-            {
-                let _span = tracing::trace_span!(
-                    "daemon.session_registry.mount.remote_promotion_reconcile"
-                )
-                .entered();
-                recovery.reconcile_interrupted_promotions(&project_id)
-            }
+            tracing::Instrument::instrument(
+                recovery.reconcile_interrupted_promotions(&project_id),
+                tracing::trace_span!("daemon.session_registry.mount.remote_promotion_reconcile"),
+            )
+            .await
             .map_err(|error| {
                 session_registry_error(
                     "reconcile interrupted remote promotion",

@@ -14,12 +14,12 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::SchemaId;
 
 use super::{
-    OpaqueRemoteCredential, REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolBodyV1, RemoteProtocolPortV1,
-    RemoteProtocolRequestV1, RemoteProtocolResponseV1, RemoteReplayApplicationErrorV1,
-    RemoteReplayCommitReceiptV1, RemoteReplayFindingV1, RemoteReplayOperationReceiptV1,
-    RemoteReplayOutcomeV1, RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1,
-    RemoteReplayServiceErrorV1, RemoteReplayServiceV1, RemoteReplayStateV1,
-    replay_failure_response,
+    OpaqueRemoteCredential, REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolBodyV1,
+    RemoteProtocolFutureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1, RemoteReplayApplicationErrorV1, RemoteReplayCommitReceiptV1,
+    RemoteReplayFindingV1, RemoteReplayOperationReceiptV1, RemoteReplayOutcomeV1,
+    RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1, RemoteReplayServiceErrorV1,
+    RemoteReplayServiceV1, RemoteReplayStateV1, replay_failure_response,
 };
 use crate::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, RequestId, ResolvedScope,
@@ -121,7 +121,7 @@ impl RemoteReplayServiceV1 {
     /// [`Self::replay`], stopping at the first refusal. A protocol failure
     /// returns as that frame's problem; a terminal frame outcome is reported
     /// in `stopped_at`.
-    pub fn replay_pending(
+    pub async fn replay_pending(
         &self,
         request: &RemoteProtocolRequestV1<RemoteReplayPendingRequestV1>,
         presented_credential: &OpaqueRemoteCredential,
@@ -167,7 +167,8 @@ impl RemoteReplayServiceV1 {
                 continue;
             }
             let outcome = self
-                .replay(&frame_request(request, &entry)?, presented_credential)?
+                .replay(&frame_request(request, &entry)?, presented_credential)
+                .await?
                 .outcome;
             let acknowledged = matches!(
                 outcome,
@@ -259,37 +260,39 @@ impl RemoteProtocolPortV1<RemoteReplayPendingRequestV1> for RemoteReplayProtocol
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayPendingRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let contract = remote_replay_pending_result_contract_v1()?;
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        match self.service.replay_pending(&request, &credential) {
-            // A resend commits nothing, so the step answers with a plain
-            // result rather than an effect whose commit postdates the request.
-            Ok(outcome) => RemoteProtocolResponseV1::new_or_unavailable(
-                request_id.clone(),
-                outcome.authority,
-                Ok(ApplicationEnvelope {
-                    contract: contract.clone(),
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let contract = remote_replay_pending_result_contract_v1()?;
+            let request_id = request.request_id.clone();
+            let observed_at = request.sent_at;
+            match self.service.replay_pending(&request, &credential).await {
+                // A resend commits nothing, so the step answers with a plain
+                // result rather than an effect whose commit postdates the request.
+                Ok(outcome) => RemoteProtocolResponseV1::new_or_unavailable(
+                    request_id.clone(),
+                    outcome.authority,
+                    Ok(ApplicationEnvelope {
+                        contract: contract.clone(),
+                        request_id,
+                        scope: outcome.scope,
+                        outcome: ApplicationOutcome::Result(outcome.receipt),
+                        touched_files: Vec::new(),
+                        code_graph: None,
+                        analytics: None,
+                        cost: None,
+                    }),
+                    contract,
+                    observed_at,
+                ),
+                Err(error) => replay_failure_response(
                     request_id,
-                    scope: outcome.scope,
-                    outcome: ApplicationOutcome::Result(outcome.receipt),
-                    touched_files: Vec::new(),
-                    code_graph: None,
-                    analytics: None,
-                    cost: None,
-                }),
-                contract,
-                observed_at,
-            ),
-            Err(error) => replay_failure_response(
-                request_id,
-                observed_at,
-                request.expected_authority,
-                contract,
-                error,
-            ),
-        }
+                    observed_at,
+                    request.expected_authority,
+                    contract,
+                    error,
+                ),
+            }
+        })
     }
 }
 

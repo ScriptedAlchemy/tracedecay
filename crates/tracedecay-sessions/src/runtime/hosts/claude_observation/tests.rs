@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::admission::test_support::MemoryHostAdmission;
-use crate::runtime::hosts::claude::scan_claude_source_frames;
+use crate::runtime::hosts::claude::{ClaudeSourceScanIdentity, scan_claude_source_frames};
 use crate::runtime::source::{JsonlPrefixRecovery, spin_until_jsonl_change_settled};
 
 #[path = "tests/projection.rs"]
@@ -41,6 +41,11 @@ impl Fixture {
             transcript,
             admission: MemoryHostAdmission::default(),
         }
+    }
+
+    fn identity(&self) -> ClaudeSourceScanIdentity {
+        identify_claude_source(&self.home.join(".claude/projects"), &self.transcript)
+            .expect("Claude source identity")
     }
 
     fn source(&self, session_id: &str) -> ClaudeSource {
@@ -106,8 +111,8 @@ impl Fixture {
     }
 }
 
-fn observation_source(path: &Path) -> ObservationSourceIdentityV1 {
-    let identity = identify_claude_source(path).expect("Claude source identity");
+fn observation_source(fixture: &Fixture) -> ObservationSourceIdentityV1 {
+    let identity = fixture.identity();
     ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id).unwrap(),
         SessionId::new(identity.source_id).unwrap(),
@@ -119,7 +124,7 @@ async fn assert_invalid_frame_preserves_observation_state(session_id: &str, fram
     let fixture = Fixture::new(session_id);
     fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
     let source_adapter = fixture.source(session_id);
-    let source = observation_source(&fixture.transcript);
+    let source = observation_source(&fixture);
     let before = fixture.admission.observations();
 
     let stats = fixture
@@ -149,7 +154,7 @@ async fn assert_invalid_frame_is_covered(session_id: &str, frame: &[u8]) {
     let fixture = Fixture::new(session_id);
     fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
     let source_adapter = fixture.source(session_id);
-    let source = observation_source(&fixture.transcript);
+    let source = observation_source(&fixture);
 
     let stats = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -202,7 +207,7 @@ async fn assert_invalid_suffix_preserves_valid_prefix(
     fs::write(&fixture.transcript, bytes).expect("write valid prefix and invalid suffix");
 
     let source_adapter = fixture.source(session_id);
-    let source = observation_source(&fixture.transcript);
+    let source = observation_source(&fixture);
     let first = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
         .await
@@ -219,7 +224,7 @@ async fn assert_invalid_suffix_preserves_valid_prefix(
         .unwrap()
         .expect("valid prefix source cursor");
     assert_eq!(source_cursor.byte_offset(), expected_cursor);
-    let identity = identify_claude_source(&fixture.transcript).unwrap();
+    let identity = fixture.identity();
     let cursor_path = identity.cursor_key.store_path();
     let transcript_cursor = fixture
         .admission
@@ -269,7 +274,7 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     assert_eq!(scheduled, vec![fixture.transcript.clone()]);
     assert_eq!(deferred, 0);
     assert!(!rotating);
-    let identity = identify_claude_source(&fixture.transcript).unwrap();
+    let identity = fixture.identity();
     let scan = try_scan_claude_source_frames_with_resume(
         identity,
         StoredCursor::default(),
@@ -388,7 +393,7 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
 }
 
 #[tokio::test]
-async fn native_observation_id_survives_identical_transcript_relocation() {
+async fn relocated_transcript_is_a_new_path_keyed_source_with_the_same_native_record() {
     let fixture = Fixture::new("relocated-native-session");
     fixture.write_record("relocated native observation", "relocation-secret");
     let source = fixture.source("relocated-native-session");
@@ -412,11 +417,18 @@ async fn native_observation_id_survives_identical_transcript_relocation() {
         .ingest(&source, None, ObservationCancellation::default())
         .await
         .unwrap();
-    assert_eq!(second.observations_committed, 0);
-    assert_eq!(second.observation_duplicates, 0);
+    assert_eq!(second.observations_committed, 1);
     let after = fixture.admission.observations();
-    assert_eq!(after.len(), 1);
+    assert_eq!(after.len(), 2);
     assert_eq!(after[0].observation().observation_id(), &before_id);
+    assert_ne!(
+        after[1].observation().source(),
+        after[0].observation().source()
+    );
+    assert_eq!(
+        after[1].observation().identity().native_record_id(),
+        after[0].observation().identity().native_record_id()
+    );
 }
 
 #[tokio::test]
@@ -584,7 +596,7 @@ async fn recovery_advances_large_backlog_in_bounded_batches() {
     fs::write(&fixture.transcript, transcript).unwrap();
 
     let source_adapter = fixture.source("bounded-recovery-session");
-    let source = observation_source(&fixture.transcript);
+    let source = observation_source(&fixture);
 
     let first = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -626,7 +638,7 @@ async fn commit_before_ack_retry_projects_without_rescan_or_duplicate() {
     let fixture = Fixture::new("retry-session");
     fixture.write_record("retry backfill searchable", "retry-secret");
     let source_adapter = fixture.source("retry-session");
-    let identity = identify_claude_source(&fixture.transcript).unwrap();
+    let identity = fixture.identity();
     let mut scan = scan_claude_source_frames(identity.clone(), StoredCursor::default(), None)
         .expect("scan complete retry frame");
     source_adapter
@@ -673,13 +685,13 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
     let fixture = Fixture::new(&raw_session_id);
     fixture.write_record("protected cursor restart", "restart-secret");
     let source_adapter = fixture.source(&raw_session_id);
-    let identity = identify_claude_source(&fixture.transcript).unwrap();
+    let identity = fixture.identity();
     assert_eq!(
         identity.session_id,
         "privacy.structural-id.v1.68601220e3bc942e864eafe44df7a85caa76222ef7e9ccc44d14a97ae18f705d"
     );
     assert_eq!(
-        identity.source_id,
+        identity.stem_source_id,
         "tracedecay-claude-observation-source-v1-sha256-fce043c235cd4ccd0303909de0582e927b2edcbbeadb6585f95b5775084ea77d"
     );
 
@@ -705,7 +717,7 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
     assert_eq!(second.observations_committed, 0);
     assert_eq!(second.source_bytes_scanned, 0);
 
-    let source = observation_source(&fixture.transcript);
+    let source = observation_source(&fixture);
     let cursor = reopened
         .get_source_cursor(&source, &ObservationScopeV1::Profile)
         .await
@@ -713,9 +725,15 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
         .expect("reopened protected source cursor");
     assert!(cursor.byte_offset() > 0);
     let durable = serde_json::to_string(cursor.source()).unwrap();
+    let path_key = tracedecay_capture::claude::observation_path_source_id(
+        format!("project-scope/{raw_session_id}.jsonl").as_bytes(),
+    );
+    assert_eq!(identity.source_id, path_key);
     assert_eq!(
         durable,
-        r#"{"provider":"claude","session_id":"privacy.structural-id.v1.68601220e3bc942e864eafe44df7a85caa76222ef7e9ccc44d14a97ae18f705d","source_key":"tracedecay-claude-observation-source-v1-sha256-fce043c235cd4ccd0303909de0582e927b2edcbbeadb6585f95b5775084ea77d"}"#
+        format!(
+            r#"{{"provider":"claude","session_id":"privacy.structural-id.v1.68601220e3bc942e864eafe44df7a85caa76222ef7e9ccc44d14a97ae18f705d","source_key":"{path_key}"}}"#
+        )
     );
     assert!(!durable.contains(&raw_session_id));
 }
@@ -912,7 +930,7 @@ async fn edited_middle_record_rescans_only_the_claude_bytes_after_the_edit() {
     fs::write(&fixture.transcript, lines.concat()).unwrap();
     spin_until_jsonl_change_settled(&fixture.transcript);
     let source_adapter = fixture.source(session_id);
-    let source = observation_source(&fixture.transcript);
+    let source = observation_source(&fixture);
 
     let cold = fixture
         .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -1003,4 +1021,155 @@ async fn historical_ingest_commits_every_record_on_one_worker() {
         .unwrap();
     assert_eq!(second.observations_committed, 0);
     assert_eq!(fixture.admission.observations().len(), SESSIONS * RECORDS);
+}
+
+#[tokio::test]
+async fn same_stem_transcripts_in_two_projects_keep_separate_cursors() {
+    let fixture = Fixture::new("shared-stem");
+    let other = fixture
+        .home
+        .join(".claude/projects/other-project/shared-stem.jsonl");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    for (path, uuid) in [(&fixture.transcript, "first-copy"), (&other, "second-copy")] {
+        let record = json!({
+            "type": "user",
+            "sessionId": "shared-stem",
+            "uuid": uuid,
+            "timestamp": "2026-07-15T00:00:00Z",
+            "cwd": fixture.temp.path(),
+            "message": {"role": "user", "content": format!("{uuid} body")}
+        });
+        fs::write(path, format!("{record}\n")).unwrap();
+    }
+    let source = fixture.source("shared-stem");
+
+    let first = fixture
+        .ingest(&source, None, ObservationCancellation::default())
+        .await
+        .expect("first pass over two same-stem transcripts");
+    assert_eq!(first.observations_committed, 2);
+
+    let second = fixture
+        .ingest(&source, None, ObservationCancellation::default())
+        .await
+        .expect("an unchanged second pass must not fight over one cursor");
+    assert_eq!(second.observations_committed, 0);
+    assert_eq!(second.cursor_advances, 0);
+    assert_eq!(second.source_bytes_scanned, 0);
+    assert_eq!(fixture.admission.observations().len(), 2);
+}
+
+#[tokio::test]
+async fn stem_keyed_transcript_keeps_its_key_and_a_same_stem_newcomer_gets_a_path_key() {
+    let fixture = Fixture::new("stem-keyed");
+    fixture.write_record("stem keyed body", "stem-secret");
+    let source_adapter = fixture.source("stem-keyed");
+    let identity = fixture.identity();
+    let mut scan = scan_claude_source_frames(identity.clone(), StoredCursor::default(), None)
+        .expect("scan stem-keyed frame");
+    source_adapter
+        .retain_scoped_frames(&mut scan, &fixture.profile)
+        .expect("retain stem-keyed frame");
+    let session_id = SessionId::new(identity.session_id.clone()).unwrap();
+    let stem_source = ObservationSourceIdentityV1::for_source(
+        session_id.clone(),
+        SessionId::new(identity.stem_source_id.clone()).unwrap(),
+    )
+    .unwrap();
+    let path_source = ObservationSourceIdentityV1::for_source(
+        session_id,
+        SessionId::new(identity.source_id.clone()).unwrap(),
+    )
+    .unwrap();
+    let capture = capture_frame(
+        &fixture.admission,
+        scan.frames.first_mut().expect("stem-keyed frame"),
+        None,
+        &FrameCaptureContext {
+            source: stem_source.clone(),
+            scope: ObservationScopeV1::Profile,
+            generation: ObservationSourceGenerationV1::new(scan.file_generation).unwrap(),
+            file_identity: scan.file_identity,
+            retention_class: RetentionClass::new(CLAUDE_TRANSCRIPT_RETENTION_CLASS).unwrap(),
+            cancellation: ObservationCancellation::default(),
+        },
+    )
+    .await
+    .expect("commit under the stem key as a pre-path-key daemon did");
+    assert!(matches!(capture, FrameCaptureOutcome::Persisted(_)));
+    let stem_cursor = fixture
+        .admission
+        .get_source_cursor(&stem_source, &ObservationScopeV1::Profile)
+        .await
+        .unwrap();
+    assert!(stem_cursor.is_some());
+
+    let newcomer = fixture
+        .home
+        .join(".claude/projects/other-project/stem-keyed.jsonl");
+    fs::create_dir_all(newcomer.parent().unwrap()).unwrap();
+    fs::copy(&fixture.transcript, &newcomer).unwrap();
+    let mut appended = fs::read_to_string(&newcomer).unwrap();
+    appended.push_str(
+        &json!({
+            "type": "user",
+            "sessionId": "stem-keyed",
+            "uuid": "resumed-elsewhere",
+            "timestamp": "2026-07-15T00:00:01Z",
+            "cwd": fixture.temp.path(),
+            "message": {"role": "user", "content": "resumed body"}
+        })
+        .to_string(),
+    );
+    appended.push('\n');
+    fs::write(&newcomer, appended).unwrap();
+
+    let first = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .expect("upgrade pass");
+    assert_eq!(first.observations_committed, 2, "only the newcomer commits");
+    let second = fixture
+        .ingest(&source_adapter, None, ObservationCancellation::default())
+        .await
+        .expect("steady pass");
+    assert_eq!(second.observations_committed, 0);
+    assert_eq!(second.cursor_advances, 0);
+    assert_eq!(second.source_bytes_scanned, 0);
+    assert_eq!(fixture.admission.observations().len(), 3);
+
+    assert_eq!(
+        fixture
+            .admission
+            .get_source_cursor(&stem_source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap(),
+        stem_cursor,
+        "the stem-keyed transcript keeps its cursor"
+    );
+    assert_eq!(
+        fixture
+            .admission
+            .get_source_cursor(&path_source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap(),
+        None,
+        "the stem-keyed transcript is never re-keyed"
+    );
+    let newcomer_identity =
+        identify_claude_source(&fixture.home.join(".claude/projects"), &newcomer).unwrap();
+    let newcomer_source = ObservationSourceIdentityV1::for_source(
+        SessionId::new(newcomer_identity.session_id).unwrap(),
+        SessionId::new(newcomer_identity.source_id).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        fixture
+            .admission
+            .get_source_cursor(&newcomer_source, &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .is_some(),
+        "the same-stem copy owns a path-keyed cursor"
+    );
 }

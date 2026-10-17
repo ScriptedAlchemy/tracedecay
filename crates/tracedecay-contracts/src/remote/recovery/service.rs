@@ -4,6 +4,7 @@
 //! registered durable adapter performs the effects and returns an exact receipt
 //! bound to the request, caller, authority fence, and committed state.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +21,7 @@ use crate::remote::credential_admission::{
     RemoteCredentialAdmissionPortV1, RemoteCredentialUseV1, RemoteSessionBoundProtocolBodyV1,
 };
 use crate::remote::protocol::{
-    RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolFailureV1, RemoteProtocolFutureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
     RemoteProtocolResponseV1, remote_protocol_problem,
 };
 use crate::{
@@ -158,13 +159,25 @@ pub trait RemoteRecoveryOperationPortV1: Send + Sync {
         observed_at: UtcMicros,
     ) -> CurrentRemoteAuthorityStateV1;
 
-    fn promote(
-        &self,
-        request: &RemoteProtocolRequestV1<PromotionConfirmationV1>,
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-    ) -> Result<RemoteRecoveryCommittedV1<PromotionCasReceiptV1>, RemoteRecoveryOperationErrorV1>;
+    fn promote<'a>(
+        &'a self,
+        request: &'a RemoteProtocolRequestV1<PromotionConfirmationV1>,
+        caller: &'a RemoteRecoveryCallerV1,
+        control: Arc<dyn RemoteRecoveryControlPortV1>,
+    ) -> RemoteRecoveryPromotionFutureV1<'a>;
 }
+
+pub type RemoteRecoveryPromotionFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    RemoteRecoveryCommittedV1<PromotionCasReceiptV1>,
+                    RemoteRecoveryOperationErrorV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
 
 pub struct RemoteRecoveryProtocolOwnerV1 {
     credentials: Arc<dyn RemoteCredentialAdmissionPortV1>,
@@ -458,46 +471,50 @@ macro_rules! impl_recovery_protocol {
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
                 credential: OpaqueRemoteCredential,
-            ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-                let request_id = request.request_id.clone();
-                let expected = ($expected)(&request);
-                let contract = result_contract($schema)?;
-                let (session, caller) =
-                    match self.admit(&request, &credential, $use_case, $reauthorize) {
-                        Ok(admitted) => admitted,
-                        Err(failure) => {
-                            return self.failure_response(request_id, &expected, failure, contract);
-                        }
-                    };
-                match self
-                    .operations
-                    .$method(&request, &caller, self.control.as_ref())
-                {
-                    Ok(committed) => {
-                        let authority = committed.authority.clone();
-                        let result = match self.effect_envelope(
-                            request_id.clone(),
-                            $operation,
-                            &session,
-                            committed,
-                            contract.clone(),
-                        ) {
-                            Ok(envelope) => Ok(envelope),
-                            Err(failure) => Err(remote_protocol_problem(
-                                contract.clone(),
-                                request_id.clone(),
-                                failure,
-                            )?),
+            ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+                Box::pin(async move {
+                    let request_id = request.request_id.clone();
+                    let expected = ($expected)(&request);
+                    let contract = result_contract($schema)?;
+                    let (session, caller) =
+                        match self.admit(&request, &credential, $use_case, $reauthorize) {
+                            Ok(admitted) => admitted,
+                            Err(failure) => {
+                                return self
+                                    .failure_response(request_id, &expected, failure, contract);
+                            }
                         };
-                        RemoteProtocolResponseV1::new(request_id, authority, result)
+                    match self
+                        .operations
+                        .$method(&request, &caller, Arc::clone(&self.control))
+                        .await
+                    {
+                        Ok(committed) => {
+                            let authority = committed.authority.clone();
+                            let result = match self.effect_envelope(
+                                request_id.clone(),
+                                $operation,
+                                &session,
+                                committed,
+                                contract.clone(),
+                            ) {
+                                Ok(envelope) => Ok(envelope),
+                                Err(failure) => Err(remote_protocol_problem(
+                                    contract.clone(),
+                                    request_id.clone(),
+                                    failure,
+                                )?),
+                            };
+                            RemoteProtocolResponseV1::new(request_id, authority, result)
+                        }
+                        Err(error) => self.failure_response(
+                            request_id,
+                            &expected,
+                            map_operation_error(error),
+                            contract,
+                        ),
                     }
-                    Err(error) => self.failure_response(
-                        request_id,
-                        &expected,
-                        map_operation_error(error),
-                        contract,
-                    ),
-                }
+                })
             }
         }
     };

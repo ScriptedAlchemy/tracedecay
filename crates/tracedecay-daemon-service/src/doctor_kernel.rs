@@ -536,11 +536,15 @@ async fn profile_footprint_read(
     let overrides = retention.store_soft_budgets_bytes.clone();
     let profile_root = profile_root.to_path_buf();
     tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        tracedecay_maintenance::retention::footprint::census_profile_footprint(
-            &profile_root,
-            &registered,
+        use tracedecay_maintenance::retention::footprint::{
+            census_profile_footprint, census_sqlite_temp_spill,
+        };
+        let mut footprint = census_profile_footprint(&profile_root, &registered, &overrides);
+        footprint.entries.extend(census_sqlite_temp_spill(
+            Path::new("/proc/self/fd"),
             &overrides,
-        )
+        ));
+        footprint
     })
     .await
     .ok()

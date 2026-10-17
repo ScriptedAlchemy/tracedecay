@@ -148,8 +148,8 @@ fn fixture_notify_hook_event<'a>(
     _profile: &'a ProfileRoot,
     _project_root: &'a Path,
     _event: tracedecay_hooks::DaemonHookEvent,
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(async {})
+) -> Pin<Box<dyn Future<Output = tracedecay_hooks::HookEventNotifyOutcomeV1> + Send + 'a>> {
+    Box::pin(async { tracedecay_hooks::HookEventNotifyOutcomeV1::Unavailable })
 }
 
 #[tracing::instrument(name = "runtime_ports.codex_app_server", level = "trace", skip_all)]
