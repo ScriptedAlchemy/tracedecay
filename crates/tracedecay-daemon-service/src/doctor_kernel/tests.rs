@@ -751,7 +751,8 @@ fn an_expired_wal_checkpoint_fence_is_a_finding_naming_its_holder() {
             }),
             shard(CheckpointPressure::Open),
         ],
-        aggregate: Default::default(),
+        aggregate:
+            tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryAggregate::default(),
     };
 
     let DoctorStorageFamilyReadV1::Observed { findings } = wal_checkpoint_pinned_read(&projection)

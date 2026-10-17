@@ -39,8 +39,7 @@ pub(crate) fn foreign_wal_holders(database: &Path) -> CheckpointBlockers {
             continue;
         };
         let holds = descriptors.flatten().any(|descriptor| {
-            std::fs::read_link(descriptor.path())
-                .is_ok_and(|target| targets.iter().any(|path| *path == target))
+            std::fs::read_link(descriptor.path()).is_ok_and(|target| targets.contains(&target))
         });
         if !holds {
             continue;

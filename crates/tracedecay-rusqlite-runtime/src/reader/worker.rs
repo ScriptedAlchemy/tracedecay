@@ -677,7 +677,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                     let _span = tracing::trace_span!("rusqlite.reader.execute").entered();
                     {
                         executor
-                            .execute_read(&transaction, &request)
+                            .execute_read(transaction, &request)
                             .map_err(ReaderWorkerError::Storage)
                     }
                 };
@@ -692,7 +692,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let started = Instant::now();
                 let result = {
                     let _span = tracing::trace_span!("rusqlite.reader.exact_sql").entered();
-                    execute_query(&transaction, request, budget)
+                    execute_query(transaction, request, budget)
                 };
                 admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);
