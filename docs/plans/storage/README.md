@@ -719,6 +719,16 @@ changes a file that holds memory.
   before store close could still be unwinding the tasks that held their leases,
   and `graceful_stop_truncates_profile_and_project_store_wals` failed. This is an
   interim remedy; the step 7 executor owns close.
+- Step 6, foreign readers (2026-10-17, branch `fix/storage-report-header-free-pages`).
+  The storage report sized each registered store's free pages by opening its own
+  read-only SQLite connection, a reader outside the daemon's pool on a live file.
+  It now reads the free-page and page counts from the database header with a plain
+  file read, which takes no lock and no WAL read slot. The open probe and its
+  pragma helper had no other caller and are deleted. `sqlite_read_snapshot` stays
+  for now: its remaining production uses read a private copy (the report's
+  `global.db` rows) or a store the daemon does not mount (orphan collection's
+  memory check), and neither holds a read slot on a live file. It goes with step
+  8, where a project directory describes itself and memory has its own file.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose
