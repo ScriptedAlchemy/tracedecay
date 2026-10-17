@@ -396,6 +396,7 @@ impl ExactSqlHandle {
         (self.table_size_telemetry)(reader_wait, &mut interrupted)
     }
 
+    #[track_caller]
     pub fn execute(
         &self,
         statement: ExactSqlStatement,
@@ -421,6 +422,7 @@ impl ExactSqlHandle {
 
     /// Runs one statement that returns rows on the writer actor. Once admitted,
     /// the write completes even when its caller abandons the reply waiter.
+    #[track_caller]
     pub fn execute_returning(
         &self,
         statement: ExactSqlStatement,
@@ -446,6 +448,7 @@ impl ExactSqlHandle {
         }
     }
 
+    #[track_caller]
     pub fn validate(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
         match self.dispatch_writer(SqlRequest::Validate(statement))? {
             SqlResult::Validated => Ok(()),
@@ -561,6 +564,7 @@ impl ExactSqlHandle {
         Ok(response)
     }
 
+    #[track_caller]
     pub fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows, ExactSqlError> {
         recv_writer_reply(self.enqueue_checkpoint_wal_truncate()?)
             .map_err(|_| ExactSqlError::WriterUnavailable)?
@@ -573,6 +577,7 @@ impl ExactSqlHandle {
             .map_err(|_| ExactSqlError::WriterUnavailable)?
     }
 
+    #[track_caller]
     pub fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult, ExactSqlError> {
         validate_batch(&sql)?;
         match self.dispatch_writer(SqlRequest::ExecuteBatch(sql))? {
@@ -602,6 +607,7 @@ impl ExactSqlHandle {
     /// anything reports a typed no-op instead of [`ExactSqlError::WriterUnavailable`];
     /// a reader release that *errored* is never a no-op, it propagates so
     /// the maintenance caller's degraded log fires.
+    #[track_caller]
     pub fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let readers = (self.release_reader_memory)()?;
         let writer = if self.writer.is_some() {
@@ -689,6 +695,7 @@ impl ExactSqlHandle {
     /// (vacuum, WAL truncation, a long-lease transaction) are therefore visible
     /// here as begin latency even when SQLite was never contended, which is the
     /// distinction `rusqlite.exact_sql.write_lock` exists to make.
+    #[track_caller]
     pub fn begin_immediate(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
         {
             let _span = tracing::trace_span!("rusqlite.exact_sql.begin_immediate").entered();
@@ -701,6 +708,7 @@ impl ExactSqlHandle {
             .await
     }
 
+    #[track_caller]
     pub fn begin_deferred(&self) -> Result<ExactSqlTransaction, ExactSqlError> {
         {
             let _span = tracing::trace_span!("rusqlite.begin_deferred").entered();
@@ -721,6 +729,7 @@ impl ExactSqlHandle {
     /// attach a live write authority and opt into the long-lease transaction
     /// and revalidated-batch APIs. Shutdown, idleness, and authority revocation remain
     /// progress-handler cancellation conditions.
+    #[track_caller]
     pub fn begin_authorized_long_lease_immediate(
         &self,
     ) -> Result<ExactSqlTransaction, ExactSqlError> {
@@ -797,6 +806,7 @@ impl ExactSqlHandle {
             response,
         ))
     }
+    #[track_caller]
     fn begin_transaction(
         &self,
         behavior: TransactionBehavior,
@@ -844,6 +854,7 @@ impl ExactSqlHandle {
         Ok(response)
     }
 
+    #[track_caller]
     fn dispatch_writer(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
         {
             let _span = tracing::trace_span!("rusqlite.exact_sql.dispatch").entered();
@@ -913,6 +924,7 @@ enum RollbackDispatch {
 }
 
 impl ExactSqlTransaction {
+    #[track_caller]
     pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
         let sender = self
             .commands
@@ -925,6 +937,7 @@ impl ExactSqlTransaction {
         recv_writer_reply(response).map_err(|_| transaction_terminal_error(&self.lease))?
     }
 
+    #[track_caller]
     pub fn validate(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
         match self.dispatch(SqlRequest::Validate(statement))? {
             SqlResult::Validated => Ok(()),
@@ -939,6 +952,7 @@ impl ExactSqlTransaction {
         }
     }
 
+    #[track_caller]
     pub fn execute(
         &self,
         statement: ExactSqlStatement,
@@ -959,6 +973,7 @@ impl ExactSqlTransaction {
         }
     }
 
+    #[track_caller]
     pub fn query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
         match self.dispatch(SqlRequest::Query(statement))? {
             SqlResult::Queried(result) => Ok(result),
@@ -976,6 +991,7 @@ impl ExactSqlTransaction {
         }
     }
 
+    #[track_caller]
     pub fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult, ExactSqlError> {
         if sql.trim().is_empty() {
             return Err(ExactSqlError::InvalidStatement);
@@ -1004,6 +1020,7 @@ impl ExactSqlTransaction {
     /// This is not a generic unbounded mode; it is accepted only by an
     /// authority-bound long-lease transaction. The writer actor re-verifies
     /// authority before, repeatedly during, and after execution.
+    #[track_caller]
     pub fn execute_authority_revalidated_batch(
         &self,
         sql: String,
@@ -1073,6 +1090,7 @@ impl ExactSqlTransaction {
             .map_err(|error| map_transaction_send_error(error, &self.lease))?;
         Ok(response)
     }
+    #[track_caller]
     pub fn commit(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
         let lease = Arc::clone(&self.lease);
         recv_writer_reply(self.enqueue_commit()?).map_err(|_| transaction_terminal_error(&lease))?
@@ -1115,6 +1133,7 @@ impl ExactSqlTransaction {
         }
     }
 
+    #[track_caller]
     pub fn rollback(self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
         match self.begin_rollback() {
             RollbackDispatch::Awaiting { lease, response } => recv_writer_reply(response)
@@ -1133,6 +1152,7 @@ impl ExactSqlTransaction {
         }
     }
 
+    #[track_caller]
     fn dispatch(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
         self.dispatch_with_policy(request, ExecutionPolicy::Bounded)
     }
@@ -1165,6 +1185,7 @@ impl ExactSqlTransaction {
             .map_err(|error| map_transaction_send_error(error, &self.lease))?;
         Ok(response)
     }
+    #[track_caller]
     fn dispatch_with_policy(
         &self,
         request: SqlRequest,
