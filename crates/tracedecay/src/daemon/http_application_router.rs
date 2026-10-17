@@ -5,6 +5,7 @@
 
 use super::*;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[tracing::instrument(
@@ -17,29 +18,38 @@ async fn build_http_application_router(
     project_id: &str,
     project_path: &Path,
 ) -> Result<axum::Router> {
-    #[cfg(test)]
-    tests::spend_injected_build_cpu(project_id);
     let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
         TraceDecayError::Config {
             message: format!("daemon HTTP project identity is invalid: {error}"),
         }
     })?;
-    let handshake = crate::daemon::handshake_for_current_client(
-        owner,
-        Some(project_path.to_path_buf()),
-        None,
-        false,
-        false,
-    )?;
-    let client = crate::daemon::invocation_client_for_current(owner, handshake)?;
-    tracedecay_daemon_service::application_surface::http_application_router(
-        client,
-        tracedecay_daemon_service::daemon_operation_event_authority(),
-        project_id.clone(),
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("could not mount daemon HTTP application routes: {error}"),
+    let owner = owner.clone();
+    let project_path = project_path.to_path_buf();
+    // The build costs 0.1-1.5 s of CPU, so it stays off the caller's poll.
+    native_runtime::spawn_blocking(move || {
+        #[cfg(test)]
+        tests::spend_injected_build_cpu(project_id.as_str());
+        let handshake = crate::daemon::handshake_for_current_client(
+            &owner,
+            Some(project_path),
+            None,
+            false,
+            false,
+        )?;
+        let client = crate::daemon::invocation_client_for_current(&owner, handshake)?;
+        tracedecay_daemon_service::application_surface::http_application_router(
+            client,
+            tracedecay_daemon_service::daemon_operation_event_authority(),
+            project_id,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("could not mount daemon HTTP application routes: {error}"),
+        })
     })
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("daemon HTTP application router build did not finish: {error}"),
+    })?
 }
 
 pub(super) fn install_http_application_cold_resolver(
