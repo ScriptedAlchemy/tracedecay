@@ -6,12 +6,12 @@
 //!
 //! Nothing on a pool thread may wait synchronously on a store: the task it
 //! waits for may need the very thread it holds. The synchronous waits callers
-//! use refuse on a pool thread in debug builds.
+//! use check [`on_pool`] and refuse there instead of parking.
 
 use std::{
     cell::Cell,
     future::Future,
-    panic::{AssertUnwindSafe, Location},
+    panic::AssertUnwindSafe,
     pin::{Pin, pin},
     sync::{Arc, Mutex, OnceLock, PoisonError},
     task::{Context, Poll, Wake, Waker},
@@ -66,22 +66,17 @@ fn pool() -> Result<&'static Runtime, String> {
     .map_err(Clone::clone)
 }
 
+/// Whether the calling thread is a pool thread, where a synchronous store
+/// wait must refuse: enough of them parked would leave no thread for the
+/// tasks they wait on.
 pub(crate) fn on_pool() -> bool {
     ON_POOL.get()
 }
 
-#[track_caller]
-pub(crate) fn debug_assert_off_pool() {
-    debug_assert!(
-        !on_pool(),
-        "a storage pool thread waited synchronously on a store at {}",
-        Location::caller()
-    );
-}
-
-/// A pool task panicked, or the pool dropped it before it finished.
+/// A pool task panicked, the pool dropped it before it finished, or a pool
+/// thread asked to wait for it.
 #[derive(Debug)]
-pub(crate) struct TaskPanicked;
+pub(crate) struct TaskLost;
 
 /// The completion of one pool task. Dropping it detaches the task.
 pub(crate) struct PoolTask {
@@ -89,22 +84,24 @@ pub(crate) struct PoolTask {
 }
 
 impl PoolTask {
-    /// Waits on the calling thread until the task ends.
-    #[track_caller]
-    pub(crate) fn join(self) -> Result<(), TaskPanicked> {
-        debug_assert_off_pool();
+    /// Waits on the calling thread until the task ends. Refused on a pool
+    /// thread, where the task is left to end on its own.
+    pub(crate) fn join(self) -> Result<(), TaskLost> {
+        if on_pool() {
+            return Err(TaskLost);
+        }
         completion(self.finished.recv_blocking())
     }
 
-    pub(crate) async fn finished(self) -> Result<(), TaskPanicked> {
+    pub(crate) async fn finished(self) -> Result<(), TaskLost> {
         completion(self.finished.recv().await)
     }
 }
 
-fn completion(finished: Result<bool, async_channel::RecvError>) -> Result<(), TaskPanicked> {
+fn completion(finished: Result<bool, async_channel::RecvError>) -> Result<(), TaskLost> {
     match finished {
         Ok(false) => Ok(()),
-        Ok(true) | Err(_) => Err(TaskPanicked),
+        Ok(true) | Err(_) => Err(TaskLost),
     }
 }
 
@@ -174,6 +171,12 @@ pub(crate) async fn timeout<F: Future>(duration: Duration, future: F) -> Option<
     asupersync::time::timeout(now, duration, future).await.ok()
 }
 
+/// Waits `duration` without holding the thread, on the pool's timer when
+/// polled by a pool task.
+pub(crate) async fn sleep(duration: Duration) {
+    timeout(duration, std::future::pending::<()>()).await;
+}
+
 /// Lets the other tasks queued on this thread run before the caller goes on,
 /// so a lane with a steady stream of work cannot keep a pool thread to itself.
 pub(crate) async fn yield_now() {
@@ -190,10 +193,14 @@ pub(crate) async fn yield_now() {
 }
 
 /// Polls `future` on the calling thread, parking between wakes, until it
-/// finishes or `deadline` passes.
-#[track_caller]
+/// finishes or `deadline` passes. On a pool thread it polls once and gives
+/// up as if the deadline had passed.
 pub(crate) fn wait_until<F: Future>(future: F, deadline: Option<Instant>) -> Option<F::Output> {
-    debug_assert_off_pool();
+    let deadline = if on_pool() {
+        Some(Instant::now())
+    } else {
+        deadline
+    };
     let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
     let mut context = Context::from_waker(&waker);
     let mut future = pin!(future);
@@ -217,19 +224,22 @@ pub(crate) fn wait_until<F: Future>(future: F, deadline: Option<Instant>) -> Opt
 /// A transaction a pool task keeps open across its awaits.
 ///
 /// A `rusqlite::Transaction` is `!Send` only because it holds a
-/// `&Connection`, and `Connection` is `!Sync`. This one is created from the
-/// task's exclusive borrow of a connection the same task owns, and a task is
-/// polled by one thread at a time, so the connection is never used from two
-/// threads at once wherever the task moves.
+/// `&Connection`, and `Connection` is `!Sync`. A task is polled by one thread
+/// at a time, so a transaction on a connection only that task can reach is
+/// never used from two threads at once wherever the task moves.
 pub(crate) struct TaskTransaction<'connection>(rusqlite::Transaction<'connection>);
 
-// SAFETY: see the type's documentation. Every constructor takes the
-// transaction a task began on its own connection; nothing else can reach that
-// connection while the transaction borrows it.
+// SAFETY: [`TaskTransaction::new`]'s contract keeps every other path to the
+// borrowed connection inside the task that holds the transaction.
 unsafe impl Send for TaskTransaction<'_> {}
 
 impl<'connection> TaskTransaction<'connection> {
-    pub(crate) fn new(transaction: rusqlite::Transaction<'connection>) -> Self {
+    /// # Safety
+    ///
+    /// `transaction` must borrow a connection that the calling task owns or
+    /// holds by `&mut`, and no other `&Connection` to it may outlive this
+    /// value outside that task.
+    pub(crate) unsafe fn new(transaction: rusqlite::Transaction<'connection>) -> Self {
         Self(transaction)
     }
 
@@ -260,28 +270,42 @@ impl Wake for ThreadWake {
 
 /// Gives each task its own copy of the thread-local state a store's worker
 /// kept while it owned a thread: lock-work and VM telemetry, and the test
-/// clock. Swapped in for each poll and out after it.
+/// clock. Swapped in for each poll and out after it, even when the poll
+/// panics, so no other task inherits them.
 struct TaskLocals<F> {
     work: Pin<Box<F>>,
+    locals: Locals,
+}
+
+#[derive(Default)]
+struct Locals {
     telemetry: crate::telemetry::TaskTelemetry,
     #[cfg(test)]
     clock: crate::exact_sql::TaskClock,
+}
+
+impl Locals {
+    fn swap(&mut self) {
+        self.telemetry.swap();
+        #[cfg(test)]
+        self.clock.swap();
+    }
+}
+
+struct SwappedIn<'a>(&'a mut Locals);
+
+impl Drop for SwappedIn<'_> {
+    fn drop(&mut self) {
+        self.0.swap();
+    }
 }
 
 impl<F> TaskLocals<F> {
     fn new(work: F) -> Self {
         Self {
             work: Box::pin(work),
-            telemetry: crate::telemetry::TaskTelemetry::default(),
-            #[cfg(test)]
-            clock: crate::exact_sql::TaskClock::default(),
+            locals: Locals::default(),
         }
-    }
-
-    fn swap(&mut self) {
-        self.telemetry.swap();
-        #[cfg(test)]
-        self.clock.swap();
     }
 }
 
@@ -290,9 +314,38 @@ impl<F: Future> Future for TaskLocals<F> {
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
         let this = &mut *self;
-        this.swap();
-        let polled = this.work.as_mut().poll(context);
-        this.swap();
-        polled
+        this.locals.swap();
+        let _swapped_in = SwappedIn(&mut this.locals);
+        this.work.as_mut().poll(context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pool_task_is_refused_a_synchronous_wait_instead_of_parked() {
+        let (hold, release) = async_channel::bounded::<()>(1);
+        let held = spawn(async move {
+            let _ = release.recv().await;
+        })
+        .unwrap_or_else(|_| panic!("the storage pool must start"));
+        let (report, refused) = std::sync::mpsc::channel();
+        spawn(async move {
+            let _ = report.send((
+                wait_until(std::future::pending::<()>(), None).is_none(),
+                held.join().is_err(),
+            ));
+        })
+        .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+        let refused = refused.recv_timeout(Duration::from_secs(10));
+        drop(hold);
+        assert_eq!(
+            refused,
+            Ok((true, true)),
+            "a pool thread must refuse to park on a future or a task join"
+        );
     }
 }

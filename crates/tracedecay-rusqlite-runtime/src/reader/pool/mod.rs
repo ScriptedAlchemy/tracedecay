@@ -264,12 +264,10 @@ pub(super) struct WorkerRecord {
     lane: ReaderLane,
 }
 
-/// Waits for a shut-down worker's task to end. A pool thread cannot wait on a
-/// pool task, so there the task is left to end on its own.
+/// Waits for a shut-down worker's task to end. On a pool thread the join
+/// refuses, and the task is left to end on its own.
 pub(super) fn join_worker(record: &mut WorkerRecord) {
-    if let Some(join) = record.join.take()
-        && !crate::storage_pool::on_pool()
-    {
+    if let Some(join) = record.join.take() {
         let _ = join.join();
     }
 }
@@ -940,7 +938,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     where
         F: FnMut() -> Option<UnavailableReasonV1>,
     {
-        crate::storage_pool::debug_assert_off_pool();
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderAcquireError::Worker(
+                worker::ReaderWorkerError::WorkerClosed,
+            ));
+        }
         let lane = admission.lane;
         let lease_ceiling = self.lease_ceiling(admission);
         let mut waiting = WaitingGuard::new(&self.inner, lane);

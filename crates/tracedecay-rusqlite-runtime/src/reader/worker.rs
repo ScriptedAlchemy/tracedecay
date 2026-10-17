@@ -21,6 +21,7 @@ use tracedecay_store::{
 use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
 use crate::exact_sql::{
     ExactSqlError, ExactSqlRows, ExactSqlStatement, ExactSqlStatementBudget, execute_query,
+    read_across_wal_recovery,
 };
 use crate::telemetry::{ReaderAdmissionRecorder, take_observed_vm};
 
@@ -242,9 +243,10 @@ impl WorkerClient {
 
     /// Opens a snapshot that ends itself `lifetime` after it began: the worker
     /// rolls it back and its later reads fail as expired.
-    #[track_caller]
     pub fn begin(&self, lifetime: Duration) -> Result<(), ReaderWorkerError> {
-        crate::storage_pool::debug_assert_off_pool();
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderWorkerError::WorkerClosed);
+        }
         let (reply, receive) = mpsc::sync_channel(1);
         self.sender
             .try_send(WorkerCommand::Begin { lifetime, reply })
@@ -380,6 +382,9 @@ impl WorkerClient {
     /// inside its snapshot loop, so the command has to travel that channel;
     /// an idle worker is waiting on the outer command channel.
     pub fn release_memory(&self) -> Result<WorkerMemoryRelease, ReaderWorkerError> {
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderWorkerError::WorkerClosed);
+        }
         if let Ok(sender) = self.snapshot_sender() {
             let (reply, receive) = mpsc::sync_channel(1);
             if sender
@@ -481,6 +486,9 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     mut executor: E,
     admission: Arc<ReaderAdmissionRecorder>,
 ) -> Result<SpawnedWorker, ReaderStartError> {
+    if crate::storage_pool::on_pool() {
+        return Err(ReaderStartError::RuntimeUnavailable);
+    }
     let worker_open_path = locator.worker_open_path()?;
     let (sender, receiver) = async_channel::unbounded();
     let receiver = crate::storage_pool::CommandReceiver::new(receiver);
@@ -545,7 +553,6 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
         .await;
     })
     .map_err(|_| ReaderStartError::RuntimeUnavailable)?;
-    crate::storage_pool::debug_assert_off_pool();
     let (interrupt, opened_file_identity) = startup
         .recv()
         .map_err(|_| ReaderStartError::StartupChannelClosed)??;
@@ -587,7 +594,11 @@ async fn run<E: ReaderQueryExecutor>(
                             operation: format!("begin deferred reader snapshot: {error}"),
                         })
                     })
-                    .map(crate::storage_pool::TaskTransaction::new);
+                    // SAFETY: the transaction borrows `connection` by `&mut`,
+                    // and this task owns that connection.
+                    .map(|transaction| unsafe {
+                        crate::storage_pool::TaskTransaction::new(transaction)
+                    });
                 match transaction {
                     Ok(transaction) => {
                         let (sender, commands) = async_channel::unbounded();
@@ -719,10 +730,14 @@ async fn run_snapshot<E: ReaderQueryExecutor>(
                 reply,
             } => {
                 let started = Instant::now();
-                let result = {
+                let budget = end.clamp(budget);
+                let active = &mut active;
+                let result = read_across_wal_recovery(move || {
+                    let transaction = active.as_ref().expect("only this task ends the snapshot");
                     let _span = tracing::trace_span!("rusqlite.reader.exact_sql").entered();
-                    execute_query(transaction, request, end.clamp(budget))
-                };
+                    execute_query(transaction, request.clone(), budget)
+                })
+                .await;
                 admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);
             }

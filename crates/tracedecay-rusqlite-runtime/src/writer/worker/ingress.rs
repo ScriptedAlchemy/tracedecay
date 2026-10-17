@@ -42,12 +42,12 @@ pub(super) async fn wait_for_work(
     checkpoint_closed: bool,
     deadline: Option<Instant>,
 ) -> WorkerWake {
-    let mut retry = deadline.map(|deadline| {
-        Box::pin(crate::storage_pool::timeout(
+    let arm = |deadline: Instant| {
+        Box::pin(crate::storage_pool::sleep(
             deadline.saturating_duration_since(Instant::now()),
-            std::future::pending::<()>(),
         ))
-    });
+    };
+    let mut retry = deadline.map(arm);
     std::future::poll_fn(|task_cx| {
         // Writer shutdown, rather than request cancellation, owns accepted work.
         // Every channel registers this task's waker before it yields, so
@@ -79,13 +79,19 @@ pub(super) async fn wait_for_work(
         if wake.is_ready() {
             return wake;
         }
-        // The clock decides the deadline; the timer only wakes the task for it.
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline)
-            || retry
-                .as_mut()
-                .is_some_and(|retry| retry.as_mut().poll(task_cx).is_ready())
-        {
-            return Poll::Ready(WorkerWake::CheckpointRetry);
+        // `Instant` decides the deadline. The pool timer keeps its own clock
+        // and only wakes the task, so one that fires early is armed again for
+        // the rest of the wait.
+        if let (Some(deadline), Some(retry)) = (deadline, retry.as_mut()) {
+            loop {
+                if Instant::now() >= deadline {
+                    return Poll::Ready(WorkerWake::CheckpointRetry);
+                }
+                if retry.as_mut().poll(task_cx).is_pending() {
+                    break;
+                }
+                *retry = arm(deadline);
+            }
         }
         collect_idle_thread_heap_v1();
         Poll::Pending

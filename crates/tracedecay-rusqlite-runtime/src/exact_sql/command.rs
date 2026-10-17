@@ -104,8 +104,8 @@ impl ExactSqlJobTransaction<'_> {
 
 /// Runs one write job: begin IMMEDIATE, the job's statements, then commit when
 /// the job asks for it and rollback otherwise.
-fn run_writer_job(
-    connection: &Connection,
+async fn run_writer_job(
+    connection: &mut Connection,
     job: WriterJob,
     reply: &async_channel::Sender<Result<(), ExactSqlError>>,
     authority: Option<&dyn ExactSqlWriteAuthority>,
@@ -119,6 +119,7 @@ fn run_writer_job(
         shutdown_requested,
         || reply.is_closed(),
     )
+    .await
     .map_err(|error| sqlite_error("begin exact SQL job", error))?;
     let _span = tracing::trace_span!("rusqlite.exact_sql.job").entered();
     let commit = job(&ExactSqlJobTransaction {
@@ -172,8 +173,8 @@ const _: () = assert!(
 /// wait into a single population whose mean and p95 describe neither. Keep the
 /// names distinct: the split is what says whether a slow begin was blocked by
 /// SQLite or merely by the worker being busy with something else.
-pub(super) fn begin_transaction_with_busy_retry<'connection>(
-    connection: &'connection Connection,
+pub(super) async fn begin_transaction_with_busy_retry<'connection>(
+    connection: &'connection mut Connection,
     behavior: TransactionBehavior,
     shutdown_requested: &AtomicBool,
     cancelled: impl FnMut() -> bool,
@@ -181,26 +182,28 @@ pub(super) fn begin_transaction_with_busy_retry<'connection>(
     if !matches!(behavior, TransactionBehavior::Immediate) {
         return Transaction::new_unchecked(connection, behavior);
     }
-    {
-        let _span = tracing::trace_span!("rusqlite.exact_sql.write_lock").entered();
-        {
-            retry_busy_begin(
-                || Transaction::new_unchecked(connection, behavior),
-                shutdown_requested,
-                cancelled,
-            )
-        }
-    }
+    retry_busy_begin(
+        connection,
+        |connection| Transaction::new_unchecked(connection, behavior),
+        shutdown_requested,
+        cancelled,
+    )
+    .instrument(tracing::trace_span!("rusqlite.exact_sql.write_lock"))
+    .await
 }
 
 /// Retries `begin` while `SQLite` reports the write lock busy, until the
 /// exact SQL clock reaches [`EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT`] or shutdown
-/// or cancellation is requested.
+/// or cancellation is requested. Between attempts it waits on the storage
+/// pool's timer, so a contended begin holds no pool thread.
 ///
 /// The deadline is checked between attempts, so it cannot shorten one
-/// `begin` call that blocks in the kernel.
-pub(super) fn retry_busy_begin<T>(
-    mut begin: impl FnMut() -> rusqlite::Result<T>,
+/// `begin` call that blocks in the kernel. The connection is held by `&mut`
+/// and lent shared to each attempt, so no `&Connection` crosses an await and
+/// the future stays `Send`.
+pub(super) async fn retry_busy_begin<'connection, T>(
+    connection: &'connection mut Connection,
+    mut begin: impl FnMut(&'connection Connection) -> rusqlite::Result<T>,
     shutdown_requested: &AtomicBool,
     mut cancelled: impl FnMut() -> bool,
 ) -> rusqlite::Result<T> {
@@ -212,7 +215,9 @@ pub(super) fn retry_busy_begin<T>(
         {
             return Err(original);
         }
-        match begin() {
+        // Settled before the pause: a `Transaction` held across the await
+        // would make the future `!Send`.
+        let error = match begin(&*connection) {
             Ok(value) => {
                 if (shutdown_requested.load(Ordering::Acquire) || cancelled())
                     && let Some(original) = original_busy_error
@@ -221,22 +226,18 @@ pub(super) fn retry_busy_begin<T>(
                 }
                 return Ok(value);
             }
-            Err(error) if sqlite_busy_or_locked(&error) => {
-                let exhausted = shutdown_requested.load(Ordering::Acquire)
-                    || cancelled()
-                    || clock::now() >= deadline;
-                match original_busy_error.take() {
-                    Some(original) if exhausted => return Err(original),
-                    Some(original) => original_busy_error = Some(original),
-                    None if exhausted => return Err(error),
-                    None => original_busy_error = Some(error),
-                }
-                if !exhausted {
-                    std::thread::sleep(BEGIN_BUSY_RETRY_PAUSE);
-                }
-            }
+            Err(error) if sqlite_busy_or_locked(&error) => error,
             Err(error) => return Err(error),
+        };
+        let exhausted =
+            shutdown_requested.load(Ordering::Acquire) || cancelled() || clock::now() >= deadline;
+        match original_busy_error.take() {
+            Some(original) if exhausted => return Err(original),
+            Some(original) => original_busy_error = Some(original),
+            None if exhausted => return Err(error),
+            None => original_busy_error = Some(error),
         }
+        crate::storage_pool::sleep(BEGIN_BUSY_RETRY_PAUSE).await;
     }
 }
 
@@ -440,7 +441,10 @@ pub(crate) async fn run_writer_command(
                     shutdown_requested,
                     || reply.is_closed(),
                 )
-                .map(TaskTransaction::new);
+                .await
+                // SAFETY: the transaction borrows the writer task's own
+                // connection, which `run_writer_command` holds by `&mut`.
+                .map(|transaction| unsafe { TaskTransaction::new(transaction) });
                 match begun {
                     // The whole writer hold of one interactive transaction,
                     // caller think-time included. Every queued write and
@@ -528,7 +532,8 @@ pub(crate) async fn run_writer_command(
                 &reply,
                 authority.as_deref(),
                 shutdown_requested,
-            );
+            )
+            .await;
             DeferredReply::new(reply, result)
         }
     }
