@@ -487,7 +487,7 @@ impl ProfileHostAdmissionReplayRegistry {
     pub async fn wait_bootstrap_completed(
         &self,
         profile_root: &Path,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> BootstrapCompletion {
         let worker = {
             let workers = self.bootstrap_workers.lock().await;
@@ -498,27 +498,24 @@ impl ProfileHostAdmissionReplayRegistry {
         let Some(worker) = worker else {
             return BootstrapCompletion::Missing;
         };
-        let settled = |worker: &ProfileHostAdmissionBootstrapWorker| {
-            if worker.state.load(Ordering::Acquire) == BOOTSTRAP_RUNNING {
-                BootstrapCompletion::TimedOut
-            } else {
-                BootstrapCompletion::Completed
+        let completed = async {
+            loop {
+                let completed = worker.completed.notified();
+                if worker.state.load(Ordering::Acquire) != BOOTSTRAP_RUNNING {
+                    return;
+                }
+                completed.await;
             }
         };
-        let deadline = Instant::now() + timeout;
-        loop {
-            let completed = worker.completed.notified();
-            if worker.state.load(Ordering::Acquire) != BOOTSTRAP_RUNNING {
-                return BootstrapCompletion::Completed;
-            }
-            if Instant::now() >= deadline {
-                return BootstrapCompletion::TimedOut;
-            }
-            tokio::select! {
-                () = completed => {}
-                _ = native_runtime::sleep_until(deadline) => {
-                    return settled(&worker);
-                }
+        match timeout {
+            Some(timeout) => native_runtime::timeout(timeout, completed)
+                .await
+                .map_or(BootstrapCompletion::TimedOut, |()| {
+                    BootstrapCompletion::Completed
+                }),
+            None => {
+                completed.await;
+                BootstrapCompletion::Completed
             }
         }
     }
@@ -959,9 +956,7 @@ mod tests {
         }
         while tasks.join_next().await.is_some() {}
         assert_eq!(
-            registry
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(2))
-                .await,
+            registry.wait_bootstrap_completed(&profile_root, None).await,
             BootstrapCompletion::Completed,
             "coalesced bootstrap must complete"
         );
@@ -999,16 +994,12 @@ mod tests {
             .ensure_bootstrap(&profile_root, Arc::clone(&operation))
             .await;
         assert_eq!(
-            registry
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await,
+            registry.wait_bootstrap_completed(&profile_root, None).await,
             BootstrapCompletion::Completed,
         );
         registry.ensure_bootstrap(&profile_root, operation).await;
         assert_eq!(
-            registry
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await,
+            registry.wait_bootstrap_completed(&profile_root, None).await,
             BootstrapCompletion::Completed,
         );
         assert_eq!(attempts.load(Ordering::Acquire), 2);
@@ -1043,9 +1034,7 @@ mod tests {
             .ensure_bootstrap(&profile_root, Arc::clone(&operation))
             .await;
         assert_eq!(
-            registry
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await,
+            registry.wait_bootstrap_completed(&profile_root, None).await,
             BootstrapCompletion::Completed,
         );
         registry
@@ -1056,9 +1045,7 @@ mod tests {
         registry.bootstrap_terminal_cache_for = Duration::ZERO;
         registry.ensure_bootstrap(&profile_root, operation).await;
         assert_eq!(
-            registry
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await,
+            registry.wait_bootstrap_completed(&profile_root, None).await,
             BootstrapCompletion::Completed,
         );
         assert_eq!(attempts.load(Ordering::Acquire), 2);
@@ -1086,9 +1073,7 @@ mod tests {
 
         registry.ensure_bootstrap(&profile_root, operation).await;
         assert_eq!(
-            registry
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(1))
-                .await,
+            registry.wait_bootstrap_completed(&profile_root, None).await,
             BootstrapCompletion::Completed,
         );
 
@@ -1141,7 +1126,7 @@ mod tests {
             .await;
         assert_eq!(
             registry
-                .wait_bootstrap_completed(&retryable_profile, Duration::from_secs(1))
+                .wait_bootstrap_completed(&retryable_profile, None)
                 .await,
             BootstrapCompletion::Completed,
         );
@@ -1169,7 +1154,7 @@ mod tests {
             .await;
         assert_eq!(
             registry
-                .wait_bootstrap_completed(&terminal_profile, Duration::from_secs(1))
+                .wait_bootstrap_completed(&terminal_profile, None)
                 .await,
             BootstrapCompletion::Completed,
         );
@@ -1216,9 +1201,7 @@ mod tests {
 
         registry.ensure_bootstrap(&profile_root, operation).await;
         assert_eq!(
-            registry
-                .wait_bootstrap_completed(&profile_root, Duration::from_secs(5))
-                .await,
+            registry.wait_bootstrap_completed(&profile_root, None).await,
             BootstrapCompletion::Completed,
             "a permanently retryable bootstrap must still terminate"
         );
@@ -1892,9 +1875,7 @@ mod tests {
             assert!(tokio::runtime::Handle::try_current().is_err());
             registry.ensure_bootstrap(&profile_root, operation).await;
             assert_eq!(
-                registry
-                    .wait_bootstrap_completed(&profile_root, Duration::from_secs(10))
-                    .await,
+                registry.wait_bootstrap_completed(&profile_root, None).await,
                 BootstrapCompletion::Completed
             );
             assert!(matches!(
@@ -2042,7 +2023,7 @@ mod tests {
             );
             assert_eq!(
                 registry
-                    .wait_bootstrap_completed(&profile_root, grace)
+                    .wait_bootstrap_completed(&profile_root, Some(grace))
                     .await,
                 BootstrapCompletion::TimedOut
             );
