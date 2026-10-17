@@ -303,6 +303,9 @@ pub enum TableGrowthUnavailableReasonV1 {
     InvalidTableName,
     /// The previous watermark is later than the current measurement.
     ClockRegressed,
+    /// The store is larger than the `dbstat` walk can cover within its
+    /// deadline.
+    ExceedsMeasurementBudget,
 }
 
 impl TableGrowthUnavailableReasonV1 {
@@ -318,6 +321,7 @@ impl TableGrowthUnavailableReasonV1 {
             Self::StorageOther => "storage_other",
             Self::InvalidTableName => "invalid_table_name",
             Self::ClockRegressed => "clock_regressed",
+            Self::ExceedsMeasurementBudget => "exceeds_measurement_budget",
         }
     }
 
@@ -347,6 +351,9 @@ impl TableGrowthUnavailableReasonV1 {
             }
             Self::ClockRegressed => {
                 "table payload growth is unmeasured: the clock moved behind the previous measurement"
+            }
+            Self::ExceedsMeasurementBudget => {
+                "table payload growth is unmeasured: the store is too large to walk within the measurement deadline"
             }
         }
     }

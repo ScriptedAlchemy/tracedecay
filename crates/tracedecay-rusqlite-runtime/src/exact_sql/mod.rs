@@ -32,7 +32,7 @@ const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXACT_SQL_ATTACHMENTS: i32 = 4;
 const EXACT_SQL_PROGRESS_INTERVAL_OPS: i32 = 1_000;
-const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
+pub(crate) const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
 const EXACT_SQL_TRANSACTION_IDLE_LIMIT: Duration = Duration::from_secs(30);
 const EXACT_SQL_TRANSACTION_LIMIT: Duration = Duration::from_secs(120);
 const ROW_ALLOCATION_OVERHEAD: usize =
@@ -287,7 +287,11 @@ impl ExactSqlHandle {
                             "exact SQL reader pool is closed".to_owned(),
                         )
                     })?
-                    .begin_exact_sql_snapshot(priority, max_wait)
+                    .begin_exact_sql_snapshot(
+                        priority,
+                        max_wait,
+                        crate::reader::READ_SNAPSHOT_LIFETIME,
+                    )
             }),
             health_snapshot: Arc::new(move |max_wait| {
                 health_snapshot_readers

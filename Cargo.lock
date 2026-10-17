@@ -6372,7 +6372,6 @@ dependencies = [
  "tree-sitter-rust",
  "ureq",
  "url",
- "windows-sys 0.61.2",
  "xattr",
  "zip",
 ]

@@ -4058,7 +4058,7 @@ The storage family never reports a silent overage: each subclass names one
 observable retention/size condition Doctor surfaces over canonical size
 observability read models. The set is closed and grows only through a future
 versioned enum, never by widening an existing subclass. */
-export const DoctorStorageFindingKindV1Schema: z.ZodUnion<[z.ZodLiteral<"over_budget_store">, z.ZodLiteral<"orphan_store">, z.ZodLiteral<"incident_debris_present">, z.ZodLiteral<"retention_backlog">, z.ZodLiteral<"table_growth">, z.ZodLiteral<"pending_schema_migration">]> = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth"), z.literal("pending_schema_migration")]);
+export const DoctorStorageFindingKindV1Schema: z.ZodUnion<[z.ZodLiteral<"over_budget_store">, z.ZodLiteral<"orphan_store">, z.ZodLiteral<"incident_debris_present">, z.ZodLiteral<"retention_backlog">, z.ZodLiteral<"table_growth">, z.ZodLiteral<"pending_schema_migration">, z.ZodLiteral<"wal_checkpoint_pinned">]> = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth"), z.literal("pending_schema_migration"), z.literal("wal_checkpoint_pinned")]);
 
 export const DuplicateEffectOutcomeV1Schema: z.ZodEnum<{ "committed": "committed"; "not_applicable": "not_applicable"; "prevented": "prevented"; "unknown": "unknown" }> = z.enum(["committed", "not_applicable", "prevented", "unknown"]);
 

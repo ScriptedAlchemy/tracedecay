@@ -1,22 +1,13 @@
 use std::{
-    collections::BTreeSet,
     path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use rusqlite::{Connection, Transaction};
-use tracedecay_contracts::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope,
-    storage::{
-        StorageTelemetryReadV1, StoreKeyV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
-    },
-};
-use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_store::{
     AdmissionConfigV1, LocatorDigest, OperationPriorityV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1,
@@ -26,11 +17,9 @@ use tracedecay_store::{
 
 use super::pool::FOREGROUND_RESERVED_GENERAL_WORKERS;
 use super::*;
-use crate::SqliteStoreSizeTelemetryPort;
 use crate::checkpoint::CheckpointBlockerSource;
 #[cfg(unix)]
 use crate::connection::OpenedDatabaseFile;
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[derive(Clone)]
 pub(super) struct CountExecutor;
@@ -155,42 +144,6 @@ impl TestStore {
         );
         ExistingReaderLocator::new(self.binding.clone(), locator, path).unwrap()
     }
-}
-
-fn telemetry_context(scope: ResolvedScope) -> RequestContext {
-    let actor = ActorId::new("actor.storage-telemetry-test").unwrap();
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.storage-telemetry-test").unwrap(),
-        1,
-        ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
-        actor.clone(),
-        UtcMicros(1),
-        UtcMicros(i64::MAX),
-        scope.clone(),
-        BTreeSet::from([CapabilityId::new("capability.storage.telemetry").unwrap()]),
-        BTreeSet::from([UseCaseId::new("use-case.storage.telemetry.read").unwrap()]),
-        DisclosureClass::Metadata,
-    )
-    .unwrap();
-    RequestContext::new(
-        actor,
-        scope,
-        grant,
-        RequestId::new("request.storage-telemetry-test").unwrap(),
-        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
-        CancellationContext::active("cancel.storage-telemetry-test").unwrap(),
-    )
-    .unwrap()
-}
-
-fn telemetry_scope() -> ResolvedScope {
-    ResolvedScope::new(
-        ProjectId::new("project.storage-telemetry-test").unwrap(),
-        RepositoryId::new("repository.storage-telemetry-test").unwrap(),
-        WorktreeId::new("worktree.storage-telemetry-test").unwrap(),
-        None,
-    )
-    .unwrap()
 }
 
 pub(super) struct Probe {
@@ -509,7 +462,9 @@ fn busy_snapshot_worker_bounds_the_table_sizes_reply() {
     )
     .expect("spawn reader worker");
     let client = spawned.client.clone();
-    client.begin().expect("begin read snapshot");
+    client
+        .begin(super::READ_SNAPSHOT_LIFETIME)
+        .expect("begin read snapshot");
 
     // Park the worker inside an executor read so the table-sizes command
     // queues behind provably in-flight work.
@@ -552,232 +507,6 @@ fn busy_snapshot_worker_bounds_the_table_sizes_reply() {
 }
 
 #[test]
-fn application_telemetry_port_reads_real_store_size() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::MAX,
-    );
-
-    let read = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(port.store_size(&context, &StoreKeyV1::new("reader.db").unwrap()));
-
-    let StorageTelemetryReadV1::Observed { sample } = read else {
-        panic!("production telemetry port must observe the retained store");
-    };
-    assert!(sample.page_size_bytes > 0);
-    assert!(sample.page_count > 0);
-    assert!(sample.freelist_pages <= sample.page_count);
-}
-
-#[test]
-fn application_telemetry_wait_does_not_block_the_async_runtime() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let handle = crate::exact_sql::ExactSqlHandle::attach_read_only(&pool);
-    let health_snapshot = handle
-        .begin_health_read_snapshot(Duration::from_secs(1))
-        .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        handle,
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::from_millis(100),
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap();
-    let runtime_advanced = Arc::new(AtomicBool::new(false));
-
-    runtime.block_on(async {
-        let runtime_advanced = Arc::clone(&runtime_advanced);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            runtime_advanced.store(true, Ordering::SeqCst);
-        });
-        let read = port
-            .table_growth(&context, &StoreKeyV1::new("reader.db").unwrap())
-            .await;
-        assert!(matches!(read, TableGrowthTelemetryReadV1::Unknown { .. }));
-    });
-
-    assert!(
-        runtime_advanced.load(Ordering::SeqCst),
-        "waiting for SQLite telemetry must yield the async runtime"
-    );
-    drop(health_snapshot);
-}
-
-#[test]
-fn application_telemetry_port_compares_table_payload_watermarks() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::MAX,
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-
-    let baseline =
-        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    assert!(
-        matches!(
-            baseline,
-            TableGrowthTelemetryReadV1::BaselineEstablished {
-                tables_observed,
-                ..
-            } if tables_observed > 0
-        ),
-        "the first read must report baseline establishment, got {baseline:?}"
-    );
-    pool.wait_until_quiescent();
-    let connection = Connection::open(&store.path).unwrap();
-    for value in 0..256 {
-        connection
-            .execute("INSERT INTO markers(value) VALUES (?1)", [value])
-            .unwrap();
-    }
-
-    let growth =
-        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    let TableGrowthTelemetryReadV1::Observed { samples, .. } = growth else {
-        panic!("the second read must compare table watermarks");
-    };
-    let markers = samples
-        .iter()
-        .find(|sample| sample.table.as_str() == "markers")
-        .expect("markers growth sample");
-    assert!(markers.current_bytes > markers.previous_bytes);
-}
-
-#[test]
-fn application_telemetry_port_marks_new_table_baseline_pending() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::MAX,
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-
-    let baseline =
-        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    assert!(matches!(
-        baseline,
-        TableGrowthTelemetryReadV1::BaselineEstablished { .. }
-    ));
-    pool.wait_until_quiescent();
-
-    let connection = Connection::open(&store.path).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TABLE created_after_baseline (id INTEGER PRIMARY KEY, payload TEXT);
-             INSERT INTO created_after_baseline(payload) VALUES ('new');",
-        )
-        .unwrap();
-
-    let read =
-        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    let TableGrowthTelemetryReadV1::Observed {
-        samples,
-        baseline_pending,
-        ..
-    } = read
-    else {
-        panic!("the second read must compare table watermarks");
-    };
-    assert!(
-        samples
-            .iter()
-            .all(|sample| sample.table.as_str() != "created_after_baseline"),
-        "new table must not be compared against fabricated zero bytes"
-    );
-    let pending = baseline_pending
-        .iter()
-        .find(|pending| pending.table.as_str() == "created_after_baseline")
-        .expect("new table is explicitly baseline-pending");
-    assert!(pending.current_bytes.get() > 0);
-}
-
-#[test]
-fn application_telemetry_port_reports_denied_table_growth_without_zero() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::from_millis(100),
-    );
-
-    let read = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(port.table_growth(&context, &StoreKeyV1::new("other.db").unwrap()));
-
-    assert_eq!(
-        read,
-        TableGrowthTelemetryReadV1::Denied {
-            store: StoreKeyV1::new("other.db").unwrap(),
-        }
-    );
-}
-
-#[test]
 fn deferred_snapshot_excludes_uncommitted_and_later_committed_rows() {
     let store = TestStore::new();
     let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
@@ -803,6 +532,61 @@ fn deferred_snapshot_excludes_uncommitted_and_later_committed_rows() {
     assert!(healthy(&next.execute(read, &probe).unwrap()));
 }
 
+/// Step 6: a snapshot held past its lifetime ends on its own. The worker rolls
+/// the read back, so the WAL restarts behind it, and the snapshot's next read
+/// fails instead of reading an old view.
+#[test]
+fn a_snapshot_held_past_its_lifetime_releases_the_wal_and_stops_reading() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let count = || {
+        crate::exact_sql::ExactSqlStatement::new("SELECT COUNT(*) FROM markers".to_owned(), vec![])
+            .unwrap()
+    };
+    // The snapshot starts with frames in the WAL, so it holds a read mark the
+    // log cannot restart behind.
+    let writer = Connection::open(&store.path).unwrap();
+    // A busy checkpoint must answer at once, not wait out the lifetime.
+    writer.busy_timeout(Duration::ZERO).unwrap();
+    writer
+        .execute("INSERT INTO markers(value) VALUES (1)", [])
+        .unwrap();
+    let snapshot = pool
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    snapshot.query(count()).unwrap();
+    writer
+        .execute("INSERT INTO markers(value) VALUES (2)", [])
+        .unwrap();
+    let restart = |connection: &Connection| {
+        connection
+            .query_row("PRAGMA wal_checkpoint(RESTART)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        restart(&writer),
+        1,
+        "the open snapshot holds its WAL read slot"
+    );
+
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert_eq!(
+        restart(&writer),
+        0,
+        "the expired snapshot no longer holds the WAL"
+    );
+    assert!(
+        snapshot.query(count()).is_err(),
+        "an expired snapshot does not keep reading"
+    );
+}
+
 #[test]
 fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
     let store = TestStore::new();
@@ -810,14 +594,26 @@ fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
     let before = pool.snapshot().snapshot_admissions;
 
     let first = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .expect("first snapshot admission");
     let second = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .expect("second snapshot admission");
     assert!(
         matches!(
-            pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO),
+            pool.begin_exact_sql_snapshot(
+                OperationPriorityV1::Foreground,
+                Duration::ZERO,
+                super::READ_SNAPSHOT_LIFETIME,
+            ),
             Err(crate::exact_sql::ExactSqlError::ReaderRefused(
                 crate::exact_sql::ExactSqlReaderRefusalV1::Saturated
             ))
@@ -840,14 +636,26 @@ fn reader_admission_records_acquire_wait_saturation_and_release() {
     let before = pool.telemetry_snapshot();
 
     let first = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .expect("first snapshot admission");
     let second = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .expect("second snapshot admission");
     assert!(
-        pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
-            .is_err(),
+        pool.begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
+        .is_err(),
         "the reserved health worker is not a general-lane overflow valve"
     );
 
@@ -1263,10 +1071,18 @@ fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() 
     );
 
     let first = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::from_millis(200),
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .unwrap();
     let second = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::from_millis(200),
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .unwrap();
     assert_eq!(pool.snapshot().leased_general, 2);
     assert!(

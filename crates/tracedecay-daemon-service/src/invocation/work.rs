@@ -541,9 +541,6 @@ mod native_activity_tests {
     fn background_task_activity_publishes_without_a_tokio_runtime() {
         let profile = tempfile::tempdir().expect("profile root");
         let project = tempfile::tempdir().expect("project root");
-        let _probe = crate::invocation::NATIVE_WRITER_WAITS_PROBE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
         native_runtime::block_on(async {
             assert!(tokio::runtime::Handle::try_current().is_err());
