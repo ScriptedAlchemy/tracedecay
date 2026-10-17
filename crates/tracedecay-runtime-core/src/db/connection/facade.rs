@@ -157,11 +157,16 @@ impl DatabaseEngineReadConnection {
     pub async fn convergence_snapshot(
         &self,
     ) -> crate::db::engine::Result<DatabaseEngineReadSnapshot> {
-        let mut snapshot = self.background().read_snapshot().await?;
-        snapshot.snapshot = snapshot
-            .snapshot
+        let snapshot = self
+            .conn
+            .background()
+            .read_snapshot_for(tracedecay_rusqlite_runtime::reader::CONVERGENCE_SNAPSHOT_LIFETIME)
+            .await?
             .with_budget(ExactSqlStatementBudget::Convergence);
-        Ok(snapshot)
+        Ok(DatabaseEngineReadSnapshot {
+            snapshot,
+            _client_guard: self._client_guard.clone(),
+        })
     }
 
     /// Live reader-pool occupancy for this exact database runtime.

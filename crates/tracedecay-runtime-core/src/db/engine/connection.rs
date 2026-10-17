@@ -235,10 +235,16 @@ impl Connection {
 
     #[tracing::instrument(name = "runtime_core.db.snapshot.read", level = "trace", skip_all)]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
+        self.read_snapshot_for(tracedecay_rusqlite_runtime::reader::READ_SNAPSHOT_LIFETIME)
+            .await
+    }
+
+    /// A read snapshot that ends itself `lifetime` after it began.
+    pub(crate) async fn read_snapshot_for(&self, lifetime: Duration) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
         run_blocking("SQL snapshot", join_error, move || {
-            runtime.begin_read_snapshot_with_priority(priority, READER_WAIT)
+            runtime.begin_read_snapshot_for(priority, READER_WAIT, lifetime)
         })
         .await?
         .map(ReadSnapshot::from_runtime)

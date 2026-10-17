@@ -1289,6 +1289,9 @@ async fn drain_staged_completions<'a>(
             }
         }
     }
+    // The commit below is a writer phase; the verification snapshot must not
+    // hold its WAL read slot through it.
+    drop(snapshot);
     if applied.is_empty() {
         return;
     }

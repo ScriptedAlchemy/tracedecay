@@ -736,6 +736,17 @@ changes a file that holds memory.
     storage finding naming the holders.
   Step 7 moves this policy onto lanes unchanged; only the 100 ms interval and the
   hard limit become the class soft limits.
+- Step 6, snapshot lifetimes (2026-10-17, branch `refactor/storage-snapshot-deadlines`,
+  stacked on the bounded-drain slice). Every read snapshot ends itself: 30 s after
+  it began (`READ_SNAPSHOT_LIFETIME`, one full statement budget), or 1 hour for a
+  schema-convergence audit, whose single statements scan a whole table. The reader
+  worker rolls an expired snapshot back with the same machinery the fence uses to
+  revoke one, and every statement on it stops at the snapshot's end as well as at
+  its own budget. So no snapshot pins the WAL past its lifetime, under pressure or
+  not. The session temporal refresh dropped its verification snapshot before its
+  commit phase, which it used to hold through. The design's 2 s and 5 s deadlines
+  apply to read jobs, which arrive with the executor (step 7); until then a
+  snapshot spans several statements, so its lifetime is the statement budget.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose

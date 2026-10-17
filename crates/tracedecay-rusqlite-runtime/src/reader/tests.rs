@@ -509,7 +509,9 @@ fn busy_snapshot_worker_bounds_the_table_sizes_reply() {
     )
     .expect("spawn reader worker");
     let client = spawned.client.clone();
-    client.begin().expect("begin read snapshot");
+    client
+        .begin(super::READ_SNAPSHOT_LIFETIME)
+        .expect("begin read snapshot");
 
     // Park the worker inside an executor read so the table-sizes command
     // queues behind provably in-flight work.
@@ -803,6 +805,59 @@ fn deferred_snapshot_excludes_uncommitted_and_later_committed_rows() {
     assert!(healthy(&next.execute(read, &probe).unwrap()));
 }
 
+/// Step 6: a snapshot held past its lifetime ends on its own. The worker rolls
+/// the read back, so the WAL restarts behind it, and the snapshot's next read
+/// fails instead of reading an old view.
+#[test]
+fn a_snapshot_held_past_its_lifetime_releases_the_wal_and_stops_reading() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let count = || {
+        crate::exact_sql::ExactSqlStatement::new("SELECT COUNT(*) FROM markers".to_owned(), vec![])
+            .unwrap()
+    };
+    // The snapshot starts with frames in the WAL, so it holds a read mark the
+    // log cannot restart behind.
+    let writer = Connection::open(&store.path).unwrap();
+    writer
+        .execute("INSERT INTO markers(value) VALUES (1)", [])
+        .unwrap();
+    let snapshot = pool
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    snapshot.query(count()).unwrap();
+    writer
+        .execute("INSERT INTO markers(value) VALUES (2)", [])
+        .unwrap();
+    let restart = |connection: &Connection| {
+        connection
+            .query_row("PRAGMA wal_checkpoint(RESTART)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        restart(&writer),
+        1,
+        "the open snapshot holds its WAL read slot"
+    );
+
+    std::thread::sleep(Duration::from_millis(2_500));
+    assert_eq!(
+        restart(&writer),
+        0,
+        "the expired snapshot no longer holds the WAL"
+    );
+    assert!(
+        snapshot.query(count()).is_err(),
+        "an expired snapshot does not keep reading"
+    );
+}
+
 #[test]
 fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
     let store = TestStore::new();
@@ -810,14 +865,26 @@ fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
     let before = pool.snapshot().snapshot_admissions;
 
     let first = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .expect("first snapshot admission");
     let second = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .expect("second snapshot admission");
     assert!(
         matches!(
-            pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO),
+            pool.begin_exact_sql_snapshot(
+                OperationPriorityV1::Foreground,
+                Duration::ZERO,
+                super::READ_SNAPSHOT_LIFETIME,
+            ),
             Err(crate::exact_sql::ExactSqlError::ReaderRefused(
                 crate::exact_sql::ExactSqlReaderRefusalV1::Saturated
             ))
@@ -840,14 +907,26 @@ fn reader_admission_records_acquire_wait_saturation_and_release() {
     let before = pool.telemetry_snapshot();
 
     let first = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .expect("first snapshot admission");
     let second = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .expect("second snapshot admission");
     assert!(
-        pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
-            .is_err(),
+        pool.begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::ZERO,
+            super::READ_SNAPSHOT_LIFETIME,
+        )
+        .is_err(),
         "the reserved health worker is not a general-lane overflow valve"
     );
 
@@ -1263,10 +1342,18 @@ fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() 
     );
 
     let first = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::from_millis(200),
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .unwrap();
     let second = pool
-        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
+        .begin_exact_sql_snapshot(
+            OperationPriorityV1::Foreground,
+            Duration::from_millis(200),
+            super::READ_SNAPSHOT_LIFETIME,
+        )
         .unwrap();
     assert_eq!(pool.snapshot().leased_general, 2);
     assert!(

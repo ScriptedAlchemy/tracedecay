@@ -32,7 +32,7 @@ const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXACT_SQL_ATTACHMENTS: i32 = 4;
 const EXACT_SQL_PROGRESS_INTERVAL_OPS: i32 = 1_000;
-const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
+pub(crate) const EXACT_SQL_EXECUTION_LIMIT: Duration = Duration::from_secs(30);
 const EXACT_SQL_TRANSACTION_IDLE_LIMIT: Duration = Duration::from_secs(30);
 const EXACT_SQL_TRANSACTION_LIMIT: Duration = Duration::from_secs(120);
 const ROW_ALLOCATION_OVERHEAD: usize =
@@ -65,7 +65,7 @@ use guard::{AuthorizedDatabaseOperation, ExactSqlAuthority, with_exact_sql_guard
 type ExactSqlQuery = dyn Fn(ExactSqlStatement, OperationPriorityV1, Duration) -> Result<ExactSqlRows, ExactSqlError>
     + Send
     + Sync;
-type ExactSqlSnapshotFactory = dyn Fn(OperationPriorityV1, Duration) -> Result<ExactSqlReadSnapshot, ExactSqlError>
+type ExactSqlSnapshotFactory = dyn Fn(OperationPriorityV1, Duration, Duration) -> Result<ExactSqlReadSnapshot, ExactSqlError>
     + Send
     + Sync;
 type ExactSqlHealthSnapshotFactory =
@@ -278,7 +278,7 @@ impl ExactSqlHandle {
                     })?
                     .execute_exact_sql_query(statement, priority, max_wait)
             }),
-            snapshot: Arc::new(move |priority, max_wait| {
+            snapshot: Arc::new(move |priority, max_wait, lifetime| {
                 snapshot_readers
                     .upgrade()
                     .ok_or_else(|| {
@@ -286,7 +286,7 @@ impl ExactSqlHandle {
                             "exact SQL reader pool is closed".to_owned(),
                         )
                     })?
-                    .begin_exact_sql_snapshot(priority, max_wait)
+                    .begin_exact_sql_snapshot(priority, max_wait, lifetime)
             }),
             health_snapshot: Arc::new(move |max_wait| {
                 health_snapshot_readers
@@ -666,8 +666,20 @@ impl ExactSqlHandle {
         priority: OperationPriorityV1,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
+        self.begin_read_snapshot_for(priority, max_wait, crate::reader::READ_SNAPSHOT_LIFETIME)
+    }
+
+    /// Read snapshot that ends itself `lifetime` after it began (see
+    /// [`crate::reader::READ_SNAPSHOT_LIFETIME`]).
+    #[track_caller]
+    pub fn begin_read_snapshot_for(
+        &self,
+        priority: OperationPriorityV1,
+        max_wait: Duration,
+        lifetime: Duration,
+    ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
         note_native_thread_reader_wait();
-        (self.snapshot)(priority, max_wait)
+        (self.snapshot)(priority, max_wait, lifetime)
     }
 
     #[track_caller]

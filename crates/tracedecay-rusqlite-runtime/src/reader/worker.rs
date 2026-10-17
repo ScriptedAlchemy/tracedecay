@@ -175,6 +175,7 @@ impl Error for ReaderWorkerError {
 
 enum WorkerCommand {
     Begin {
+        lifetime: Duration,
         reply: SyncSender<Result<(), ReaderWorkerError>>,
     },
     ReleaseMemory {
@@ -236,10 +237,12 @@ impl WorkerClient {
         }
     }
 
-    pub fn begin(&self) -> Result<(), ReaderWorkerError> {
+    /// Opens a snapshot that ends itself `lifetime` after it began: the worker
+    /// rolls it back and its later reads fail as expired.
+    pub fn begin(&self, lifetime: Duration) -> Result<(), ReaderWorkerError> {
         let (reply, receive) = mpsc::sync_channel(1);
         self.sender
-            .send(WorkerCommand::Begin { reply })
+            .send(WorkerCommand::Begin { lifetime, reply })
             .map_err(|_| ReaderWorkerError::WorkerClosed)?;
         receive
             .recv()
@@ -566,8 +569,9 @@ fn run<E: ReaderQueryExecutor>(
             WorkerCommand::ReleaseMemory { reply } => {
                 let _ = reply.send(shrink_connection_memory(&connection));
             }
-            WorkerCommand::Begin { reply } => {
+            WorkerCommand::Begin { lifetime, reply } => {
                 revocation.reset();
+                let expires = Instant::now() + lifetime;
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Deferred)
                     .map_err(|error| {
@@ -585,7 +589,11 @@ fn run<E: ReaderQueryExecutor>(
                         if reply.send(Ok(())).is_err() {
                             return;
                         }
-                        if run_snapshot(transaction, commands, executor, &admission, revocation) {
+                        let end = SnapshotEnd {
+                            revocation,
+                            expires,
+                        };
+                        if run_snapshot(transaction, commands, executor, &admission, &end) {
                             return;
                         }
                         // Clear the flag before the sender: a release that
@@ -624,19 +632,19 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     commands: Receiver<SnapshotCommand>,
     executor: &mut E,
     admission: &ReaderAdmissionRecorder,
-    revocation: &SnapshotRevocation,
+    end: &SnapshotEnd<'_>,
 ) -> bool {
     let mut active = Some(transaction);
     loop {
         let command = match commands.recv_timeout(REVOCATION_POLL) {
             Ok(command) => command,
             Err(RecvTimeoutError::Timeout) => {
-                end_revoked_snapshot(&mut active, revocation);
+                end.end_if_due(&mut active);
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return false,
         };
-        end_revoked_snapshot(&mut active, revocation);
+        end.end_if_due(&mut active);
         let command = match command {
             SnapshotCommand::End { reply } => {
                 let result = active.take().map_or(Ok(()), |transaction| {
@@ -692,7 +700,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let started = Instant::now();
                 let result = {
                     let _span = tracing::trace_span!("rusqlite.reader.exact_sql").entered();
-                    execute_query(&transaction, request, budget)
+                    execute_query(transaction, request, end.clamp(budget))
                 };
                 admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);
@@ -764,15 +772,37 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     }
 }
 
-/// Rolls back a snapshot the checkpoint fence revoked, so its WAL read slot
-/// is free while its lease is still out.
-fn end_revoked_snapshot(active: &mut Option<Transaction<'_>>, revocation: &SnapshotRevocation) {
-    if revocation.requested()
-        && let Some(transaction) = active.take()
-    {
-        // A failed rollback drops the transaction, which rolls back again.
-        let _ = transaction.rollback();
-        revocation.rolled_back.store(true, Ordering::Release);
+/// When a held snapshot must end before its lease does: the checkpoint fence
+/// revoked it, or its lifetime ran out.
+struct SnapshotEnd<'a> {
+    revocation: &'a SnapshotRevocation,
+    expires: Instant,
+}
+
+impl SnapshotEnd<'_> {
+    /// Rolls the snapshot back once it is revoked or expired, so its WAL read
+    /// slot is free while its lease is still out.
+    fn end_if_due(&self, active: &mut Option<Transaction<'_>>) {
+        if (self.revocation.requested() || Instant::now() >= self.expires)
+            && let Some(transaction) = active.take()
+        {
+            // A failed rollback drops the transaction, which rolls back again.
+            let _ = transaction.rollback();
+            self.revocation.rolled_back.store(true, Ordering::Release);
+        }
+    }
+
+    /// A statement on this snapshot stops at the snapshot's end as well as at
+    /// its own budget.
+    fn clamp(&self, budget: ExactSqlStatementBudget) -> ExactSqlStatementBudget {
+        let until = match budget {
+            ExactSqlStatementBudget::Until(deadline) => deadline,
+            ExactSqlStatementBudget::Request => {
+                Instant::now() + crate::exact_sql::EXACT_SQL_EXECUTION_LIMIT
+            }
+            ExactSqlStatementBudget::Convergence => self.expires,
+        };
+        ExactSqlStatementBudget::Until(until.min(self.expires))
     }
 }
 
@@ -848,7 +878,10 @@ mod release_memory_tests {
             Arc::new(ReaderAdmissionRecorder::default()),
         )
         .unwrap();
-        spawned.client.begin().unwrap();
+        spawned
+            .client
+            .begin(crate::reader::READ_SNAPSHOT_LIFETIME)
+            .unwrap();
         let reading = thread::spawn({
             let client = spawned.client.clone();
             let read = request(&store.binding, OperationPriorityV1::Foreground);
@@ -909,7 +942,10 @@ mod release_memory_tests {
         spawned
             .client
             .sender
-            .send(WorkerCommand::Begin { reply: begin })
+            .send(WorkerCommand::Begin {
+                lifetime: crate::reader::READ_SNAPSHOT_LIFETIME,
+                reply: begin,
+            })
             .unwrap();
 
         let (released, releasing) = release_in_background(&spawned.client);
