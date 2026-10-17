@@ -354,6 +354,7 @@ async fn attempt_statuses(
             .collect())
     })
     .await
+    .map_err(|_| workflow_runtime_unavailable())
 }
 
 async fn reconcile_cancelled_fan_out(
@@ -579,7 +580,7 @@ async fn request_fan_out_cancellation(
             child.attempt_identity.attempt_id().as_str()
         ))
         .map_err(|_| workflow_runtime_unavailable())?;
-        let cancelled = services
+        let cancelled = match services
             .cancel_attempt(
                 context.clone(),
                 tracedecay_contracts::CancelWorkAttemptCommand {
@@ -591,11 +592,22 @@ async fn request_fan_out_cancellation(
                 },
             )
             .await
-            .map_err(|_| workflow_runtime_unavailable())?;
+        {
+            Ok(cancelled) => cancelled,
+            // The child settled after its status was read.
+            Err(problem) if is_not_cancellable(&problem) => continue,
+            Err(_) => return Err(workflow_runtime_unavailable()),
+        };
         attempt_processes.signal_cancellation(&context.scope().worktree_id, cancelled.identity());
         cancelled_children = true;
     }
     Ok(cancelled_children)
+}
+
+pub(crate) fn is_not_cancellable(problem: &ApplicationProblem) -> bool {
+    problem
+        .diagnostic()
+        .is_some_and(|diagnostic| diagnostic.code == "application.work-attempt.not-cancellable")
 }
 
 async fn apply_scheduler_command(
@@ -824,6 +836,7 @@ async fn current_workflow_product_graph(
         }
     })
     .await
+    .map_err(|_| workflow_runtime_unavailable())
 }
 
 fn workflow_child_task_matches(
@@ -891,7 +904,8 @@ async fn apply_workflow_child_product_mutation(
                     workflow_runtime_unavailable()
                 })
         })
-        .await?
+        .await
+        .map_err(|_| workflow_runtime_unavailable())?
     };
     product
         .mutate(context.clone(), binding.clone(), mutation, revisions)
@@ -977,7 +991,8 @@ pub(super) async fn synchronize_fan_out_run_controls(
                 .map(|request| work.run_control().read(&context, request))
                 .collect::<Vec<_>>())
         })
-        .await?
+        .await
+        .map_err(|_| workflow_runtime_unavailable())?
     };
     for (child, reading) in children.into_iter().zip(readings) {
         let reading = match reading {

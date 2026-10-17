@@ -2169,6 +2169,49 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
     );
 }
 
+/// Fail-fast reads the open children, then cancels each; a child that settles
+/// in between refuses the cancellation, and the reconcile must skip it rather
+/// than abort.
+#[tokio::test]
+async fn a_child_that_settled_after_its_status_read_is_skipped_by_fail_fast() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let fixture = leased_attempt(
+        directory.path(),
+        "Settles before fail-fast cancels it.",
+        &SnapshotShape::default(),
+    );
+    settle_unstarted(
+        &fixture.steps(),
+        &fixture.context,
+        fixture.identity(),
+        &fixture.attempt,
+        WorkAttemptProviderOutcomeV1::ProviderUnavailable {
+            state: WorkProviderAvailabilityV1::Unsupported,
+        },
+        None,
+        None,
+    )
+    .await;
+    let identity = fixture.identity().clone();
+    let refused = fixture
+        .attempts
+        .request_cancellation(
+            &fixture.context,
+            CancelWorkAttemptCommand {
+                task_id: identity.task_id().clone(),
+                run_id: identity.run_id().clone(),
+                attempt_id: identity.attempt_id().clone(),
+                request_id: id("cancellation.work-attempt-exec.after-settle"),
+                occurred_at: now_micros(),
+            },
+        )
+        .expect_err("a settled attempt refuses cancellation");
+    assert!(
+        super::super::work::workflow_fan_out::is_not_cancellable(&refused),
+        "fail-fast must recognize the settled child's refusal: {refused:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Live-process ownership registry
 // ---------------------------------------------------------------------------
