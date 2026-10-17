@@ -2015,7 +2015,9 @@ async fn register_project_delivery_read_authority(
             return Ok(());
         }
     };
-    let handle = match resolve_production_github_provider_access(invocation, project_root, state) {
+    let handle = match resolve_production_github_provider_access(invocation, project_root, state)
+        .await
+    {
         Ok(access) => {
             let review_bodies = github_anchor_authorities_arc_v1(
                 state.database.clone(),
@@ -2274,43 +2276,33 @@ struct ProductionGitHubProviderAccessV1 {
     http: GitHubHttpReadConfigV1,
 }
 
-fn resolve_production_github_provider_access(
+async fn resolve_production_github_provider_access(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     state: &ProjectOpenDependentOwnerState,
 ) -> std::result::Result<ProductionGitHubProviderAccessV1, ProjectDeliveryProviderMountGateV1> {
-    let Some(remote_url) = tracedecay_runtime_core::git::git_remote_url(project_root) else {
-        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
-    };
-    let Some((owner, repository)) = github_repository_from_remote_v1(&remote_url) else {
-        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
-    };
-    let profile_id = &state.session_db.binding().shard_id.profile_id;
-    let credential = match invocation.mount_github_read_only_credential_authority_for_project(
-        profile_id,
-        &owner,
-        &repository,
-    ) {
-        // A repository the profile does not name is read as the `origin`
-        // project-open bound: with the local GitHub login when there is one,
-        // anonymously otherwise.
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public
-        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
-            public_repository_read_credential_v1(&owner, &repository)
-        }
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => {
-            return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
-        }
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {
-            match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
-                RegisteredGitHubReadOnlyCredentialV1::Verified(credential) => credential,
-                RegisteredGitHubReadOnlyCredentialV1::Missing
-                | RegisteredGitHubReadOnlyCredentialV1::Rejected => {
-                    return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
-                }
-            }
-        }
-    };
+    let blocking_invocation = invocation.clone();
+    let blocking_root = project_root.to_path_buf();
+    let profile_id = state.session_db.binding().shard_id.profile_id.clone();
+    let (owner, repository, credential) =
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            resolve_github_repository_read_credential(
+                &blocking_invocation,
+                &blocking_root,
+                &profile_id,
+            )
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                event = "github_provider_access",
+                outcome = "unavailable",
+                project = %project_root.display(),
+                reason = %error,
+                "GitHub read credential resolution did not finish"
+            );
+            Err(ProjectDeliveryProviderMountGateV1::GitHubSourceAccessUnavailable)
+        })?;
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         state.session_db.clone(),
     );
@@ -2340,6 +2332,52 @@ fn resolve_production_github_provider_access(
     })
 }
 
+/// Resolves `origin`'s GitHub repository and the credential that reads it.
+///
+/// Blocking: the remote lookup may spawn `git`, and the public-repository
+/// fallback probes `gh` and the git credential helper, each for seconds.
+fn resolve_github_repository_read_credential(
+    invocation: &DaemonInvocationState,
+    project_root: &Path,
+    profile_id: &tracedecay_domain::UserProfileId,
+) -> std::result::Result<
+    (String, String, GitHubReadOnlyCredentialV1),
+    ProjectDeliveryProviderMountGateV1,
+> {
+    let Some(remote_url) = tracedecay_runtime_core::git::git_remote_url(project_root) else {
+        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
+    };
+    let Some((owner, repository)) = github_repository_from_remote_v1(&remote_url) else {
+        return Err(ProjectDeliveryProviderMountGateV1::NoGitRemote);
+    };
+    let credential = match invocation.mount_github_read_only_credential_authority_for_project(
+        profile_id,
+        &owner,
+        &repository,
+    ) {
+        // A repository the profile does not name is read as the `origin`
+        // project-open bound: with the local GitHub login when there is one,
+        // anonymously otherwise.
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public
+        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured => {
+            public_repository_read_credential_v1(&owner, &repository)
+        }
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => {
+            return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
+        }
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {
+            match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
+                RegisteredGitHubReadOnlyCredentialV1::Verified(credential) => credential,
+                RegisteredGitHubReadOnlyCredentialV1::Missing
+                | RegisteredGitHubReadOnlyCredentialV1::Rejected => {
+                    return Err(ProjectDeliveryProviderMountGateV1::GitHubAccessRefused);
+                }
+            }
+        }
+    };
+    Ok((owner, repository, credential))
+}
+
 async fn resolve_production_github_provider_config(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -2354,7 +2392,7 @@ async fn resolve_production_github_provider_config(
         ci_source_access,
         target,
         http,
-    } = resolve_production_github_provider_access(invocation, project_root, state)?;
+    } = resolve_production_github_provider_access(invocation, project_root, state).await?;
     let ci = if credential.permits(GitHubReadPermissionV1::Actions)
         && credential.permits(GitHubReadPermissionV1::Checks)
     {
