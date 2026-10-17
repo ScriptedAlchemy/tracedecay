@@ -326,6 +326,7 @@ pub(crate) enum TransactionCommand {
     },
     Commit {
         reply: async_channel::Sender<Result<ExactSqlCommitReceipt, ExactSqlError>>,
+        on_commit: Option<Box<dyn FnOnce() + Send + 'static>>,
     },
     Rollback {
         reply: async_channel::Sender<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
@@ -859,7 +860,7 @@ fn run_transaction(
                 // never checked against the lease this round trip replaced.
                 let _ = reply.try_send(result);
             }
-            TransactionCommand::Commit { reply } => {
+            TransactionCommand::Commit { reply, on_commit } => {
                 if clock::now() >= transaction_deadline {
                     lease.expire();
                     let _ = reply.try_send(Err(ExactSqlError::TransactionExpired));
@@ -893,6 +894,13 @@ fn run_transaction(
                             .map_err(|error| sqlite_error("commit immediate transaction", error))
                     }
                 };
+                // Ownership settles at SQLite's commit, not at reply delivery
+                // or attachment cleanup, either of which can fail afterward.
+                if result.is_ok()
+                    && let Some(on_commit) = on_commit
+                {
+                    on_commit();
+                }
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,

@@ -64,6 +64,9 @@ impl McpRequestContext {
     }
 }
 
+// Keep retained request payloads bounded independently of handler execution.
+const MAX_PENDING_REQUESTS: usize = 8;
+
 type InFlight<'a> = Pin<Box<dyn Future<Output = Option<RequestId>> + Send + 'a>>;
 
 struct Session<'a, C: McpConnectionContext> {
@@ -151,7 +154,7 @@ impl<C: McpConnectionContext> Session<'_, C> {
         }
         match message {
             JsonRpcMessage::Request(JsonRpcRequest { id, request, .. }) => {
-                self.start_request(id, request);
+                self.start_request(id, request).await?;
             }
             JsonRpcMessage::Notification(JsonRpcNotification { notification, .. }) => {
                 self.notify(notification);
@@ -218,7 +221,7 @@ impl<C: McpConnectionContext> Session<'_, C> {
                     return Ok(self.answer(id, Err(refusal)).await?);
                 }
                 self.state = SessionState::Inline;
-                self.start_request_with_meta(id, request, meta);
+                self.start_request_with_meta(id, request, meta).await?;
                 return Ok(());
             }
         };
@@ -250,17 +253,25 @@ impl<C: McpConnectionContext> Session<'_, C> {
         self.responses.clone().send(response_message(id, result))
     }
 
-    fn start_request(&mut self, id: RequestId, mut request: ClientRequest) {
+    async fn start_request(&mut self, id: RequestId, mut request: ClientRequest) -> Result<()> {
         let meta = std::mem::take(request.get_meta_mut());
-        self.start_request_with_meta(id, request, meta);
+        self.start_request_with_meta(id, request, meta).await
     }
 
-    fn start_request_with_meta(
+    async fn start_request_with_meta(
         &mut self,
         id: RequestId,
         request: ClientRequest,
         meta: RequestMetaObject,
-    ) {
+    ) -> Result<()> {
+        if self.in_flight.len() >= MAX_PENDING_REQUESTS {
+            let refusal = ErrorData::internal_error(
+                "MCP pending request capacity reached; retry after an outstanding request completes",
+                None,
+            );
+            self.answer(id, Err(refusal)).await?;
+            return Ok(());
+        }
         let cancellation = CancellationToken::new();
         self.cancellations.insert(id.clone(), cancellation.clone());
         let context = McpRequestContext {
@@ -288,6 +299,7 @@ impl<C: McpConnectionContext> Session<'_, C> {
             }
             Some(id)
         }));
+        Ok(())
     }
 
     fn notify(&mut self, notification: ClientNotification) {
@@ -303,6 +315,10 @@ impl<C: McpConnectionContext> Session<'_, C> {
                 self.adapter.cancel_request(request_id);
             }
             ClientNotification::CustomNotification(custom) => {
+                if self.in_flight.len() >= MAX_PENDING_REQUESTS {
+                    tracing::warn!("MCP custom notification refused at pending request capacity");
+                    return;
+                }
                 let adapter = self.adapter;
                 self.in_flight.push(Box::pin(async move {
                     let dispatched = AssertUnwindSafe(
