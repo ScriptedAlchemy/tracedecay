@@ -214,9 +214,6 @@ async fn opening_a_store_with_a_projected_codex_echo_keeps_one_turn() {
         .begin_write_transaction("retire the unrelated record")
         .await
         .unwrap();
-    crate::observation_projection::ensure_projection_output_state_cache(&transaction)
-        .await
-        .unwrap();
     assert!(
         crate::observation_projection::retire_source_record(
             &transaction,

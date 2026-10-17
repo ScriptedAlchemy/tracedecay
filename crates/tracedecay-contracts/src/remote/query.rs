@@ -6,6 +6,7 @@
 //! contracts.
 
 use std::collections::BTreeSet;
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,8 @@ use super::auth::{
 use super::composition::{ExpectedRemoteShardV1, RemoteQueryCompositionV1, ShardCoverageStateV1};
 use super::protocol::{
     REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolBodyV1, RemoteProtocolFailureV1,
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
-    remote_protocol_problem,
+    RemoteProtocolFutureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1, remote_protocol_problem,
 };
 use crate::clock::try_now_micros;
 use crate::{
@@ -389,11 +390,23 @@ pub struct RemoteExactObservationQueryCommandV1 {
 }
 
 pub trait RemoteExactObservationQueryReadPortV1: Send + Sync {
-    fn read_exact_observation(
-        &self,
-        command: &RemoteExactObservationQueryCommandV1,
-    ) -> Result<RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryErrorV1>;
+    fn read_exact_observation<'a>(
+        &'a self,
+        command: &'a RemoteExactObservationQueryCommandV1,
+    ) -> RemoteExactObservationQueryReadFutureV1<'a>;
 }
+
+pub type RemoteExactObservationQueryReadFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    RemoteExactObservationQueryOutcomeV1,
+                    RemoteExactObservationQueryErrorV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
 
 pub trait RemoteQueryClockPortV1: Send + Sync {
     fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1>;
@@ -448,7 +461,7 @@ impl RemoteExactObservationQueryServiceV1 {
     }
 
     #[tracing::instrument(name = "application.remote.query", level = "trace", skip_all)]
-    pub fn query(
+    pub async fn query(
         &self,
         request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
         credential: &OpaqueRemoteCredential,
@@ -544,7 +557,7 @@ impl RemoteExactObservationQueryServiceV1 {
             budget,
             observed_at,
         };
-        let outcome = self.read.read_exact_observation(&command)?;
+        let outcome = self.read.read_exact_observation(&command).await?;
         validate_returned_authority(&outcome.authority, &command.expected_authority)?;
         let publication_observed_at = self.clock.now()?;
         if publication_observed_at > command.effective_deadline.expires_at {
@@ -807,12 +820,13 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
         &self,
         request: RemoteProtocolRequestV1<RemoteQueryRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = match self.service.now() {
-            Ok(observed_at) => observed_at,
-            Err(error) => {
-                return RemoteProtocolResponseV1::new_or_unavailable(
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let request_id = request.request_id.clone();
+            let observed_at = match self.service.now() {
+                Ok(observed_at) => observed_at,
+                Err(error) => {
+                    return RemoteProtocolResponseV1::new_or_unavailable(
                     request_id.clone(),
                     CurrentRemoteAuthorityStateV1::Unavailable {
                         reason:
@@ -827,54 +841,55 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
                     remote_exact_observation_query_result_contract_v1(),
                     request.sent_at,
                 );
-            }
-        };
-        let fallback_authority = CurrentRemoteAuthorityStateV1::Partial {
-            known_fence: Some(request.body.expected_authority.clone()),
-            missing: BTreeSet::from([
-                tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
-            ]),
-            observed_at,
-        };
-        match self.service.query(&request, &credential) {
-            Ok(outcome) => RemoteProtocolResponseV1::new_or_unavailable(
-                request_id,
-                outcome.authority,
-                Ok(outcome.result),
-                remote_exact_observation_query_result_contract_v1(),
+                }
+            };
+            let fallback_authority = CurrentRemoteAuthorityStateV1::Partial {
+                known_fence: Some(request.body.expected_authority.clone()),
+                missing: BTreeSet::from([
+                    tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                ]),
                 observed_at,
-            ),
-            Err(error) => {
-                let unread_authority = matches!(
-                    &error,
-                    RemoteExactObservationQueryErrorV1::Authentication(_)
-                        | RemoteExactObservationQueryErrorV1::Credential(
-                            RemoteEnrollmentAuthorityErrorV1::GrantNotFound
-                        )
-                        | RemoteExactObservationQueryErrorV1::WriterAuthorityUnpublished
-                );
-                let failure = query_protocol_failure(error);
-                let authority = if unread_authority {
-                    CurrentRemoteAuthorityStateV1::Unavailable {
-                        reason: failure.unavailable_reason(),
-                        observed_at,
-                    }
-                } else {
-                    fallback_authority
-                };
-                RemoteProtocolResponseV1::new_or_unavailable(
-                    request_id.clone(),
-                    authority,
-                    Err(remote_protocol_problem(
-                        remote_exact_observation_query_result_contract_v1(),
-                        request_id,
-                        failure,
-                    )?),
+            };
+            match self.service.query(&request, &credential).await {
+                Ok(outcome) => RemoteProtocolResponseV1::new_or_unavailable(
+                    request_id,
+                    outcome.authority,
+                    Ok(outcome.result),
                     remote_exact_observation_query_result_contract_v1(),
                     observed_at,
-                )
+                ),
+                Err(error) => {
+                    let unread_authority = matches!(
+                        &error,
+                        RemoteExactObservationQueryErrorV1::Authentication(_)
+                            | RemoteExactObservationQueryErrorV1::Credential(
+                                RemoteEnrollmentAuthorityErrorV1::GrantNotFound
+                            )
+                            | RemoteExactObservationQueryErrorV1::WriterAuthorityUnpublished
+                    );
+                    let failure = query_protocol_failure(error);
+                    let authority = if unread_authority {
+                        CurrentRemoteAuthorityStateV1::Unavailable {
+                            reason: failure.unavailable_reason(),
+                            observed_at,
+                        }
+                    } else {
+                        fallback_authority
+                    };
+                    RemoteProtocolResponseV1::new_or_unavailable(
+                        request_id.clone(),
+                        authority,
+                        Err(remote_protocol_problem(
+                            remote_exact_observation_query_result_contract_v1(),
+                            request_id,
+                            failure,
+                        )?),
+                        remote_exact_observation_query_result_contract_v1(),
+                        observed_at,
+                    )
+                }
             }
-        }
+        })
     }
 }
 

@@ -3,16 +3,18 @@ use std::sync::atomic::AtomicU8;
 
 use tempfile::TempDir;
 use tracedecay_contracts::RequestId;
-use tracedecay_contracts::remote::recovery::RecoveryAuthorityExpectationV1;
+use tracedecay_contracts::remote::recovery::{
+    RecoveryAuthorityExpectationV1, RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1,
+};
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::{
     AuthorityEpoch, ProjectId, RemotePlacementRevisionV1, RemoteWriterFenceV1, UtcMicros,
 };
 use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;
-use tracedecay_store::RemoteWriterFenceInstallV1;
+use tracedecay_store::{RemoteWriterFenceInstallV1, RuntimeInterruptionV1, RuntimeRequestProbeV1};
 
 use super::support::{RecoveryRuntimeProbeV1, authority_key};
-use super::{INTERRUPTION_CANCELLED, INTERRUPTION_DEADLINE, INTERRUPTION_NONE};
+use super::{INTERRUPTION_CANCELLED, INTERRUPTION_DEADLINE, INTERRUPTION_NONE, interruption_value};
 use crate::session_registry::DaemonSessionRuntimeRegistryV1;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -77,23 +79,21 @@ async fn fence_install_reports_runtime_interruptions_as_typed_recovery_errors() 
     };
     let request_id = RequestId::new("request.cancel-test").expect("request id");
 
-    let outcomes = tokio::task::spawn_blocking(move || {
-        [
-            INTERRUPTION_CANCELLED,
-            INTERRUPTION_DEADLINE,
-            INTERRUPTION_NONE,
-        ]
-        .map(|interruption| {
-            let probe =
-                RecoveryRuntimeProbeV1::new(&request_id, Arc::new(AtomicU8::new(interruption)))
-                    .expect("recovery probe");
+    let mut outcomes = Vec::new();
+    for interruption in [
+        INTERRUPTION_CANCELLED,
+        INTERRUPTION_DEADLINE,
+        INTERRUPTION_NONE,
+    ] {
+        let probe = RecoveryRuntimeProbeV1::new(&request_id, Arc::new(AtomicU8::new(interruption)))
+            .expect("recovery probe");
+        outcomes.push(
             replay
                 .install_writer_fence(project_id.clone(), install.clone(), Arc::new(probe))
-                .err()
-        })
-    })
-    .await
-    .expect("fence install thread");
+                .await
+                .err(),
+        );
+    }
 
     assert_eq!(
         outcomes,
@@ -104,5 +104,33 @@ async fn fence_install_reports_runtime_interruptions_as_typed_recovery_errors() 
             // and that failure is not an interruption.
             Some(RemoteRecoveryPhysicalEffectErrorV1::Unavailable),
         ]
+    );
+}
+
+struct CancelledCaller;
+
+impl RemoteRecoveryControlPortV1 for CancelledCaller {
+    fn interruption(&self, _request_id: &RequestId) -> Option<RemoteRecoveryInterruptionV1> {
+        Some(RemoteRecoveryInterruptionV1::Cancelled)
+    }
+}
+
+#[test]
+fn a_fence_install_probe_reports_the_callers_cancellation_when_the_writer_asks() {
+    let request_id = RequestId::new("request.cancel-test").expect("request id");
+    let latch = Arc::new(AtomicU8::new(INTERRUPTION_NONE));
+    let probe = RecoveryRuntimeProbeV1::new(&request_id, Arc::clone(&latch))
+        .expect("recovery probe")
+        .observing(Arc::new(CancelledCaller), request_id);
+
+    assert_eq!(probe.interruption(), Some(RuntimeInterruptionV1::Cancelled));
+    assert!(
+        !probe.try_begin_commit(),
+        "a cancelled caller's install never commits"
+    );
+    assert_eq!(
+        interruption_value(&latch),
+        Some(RemoteRecoveryInterruptionV1::Cancelled),
+        "the observed cancellation is latched for the promotion receipt"
     );
 }

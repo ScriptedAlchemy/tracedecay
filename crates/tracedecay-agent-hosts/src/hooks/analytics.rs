@@ -319,9 +319,10 @@ fn disposition_from_native_dispatch(
             Some(true),
             Some("hook_v2_spooled".to_owned()),
         ),
+        // Nothing spooled the event, so no replay retries it.
         HookTransportDispositionV1::CatchupRequired => HookDispositionTelemetry::from_parts(
             HostAdmissionStatus::Degraded,
-            Some(true),
+            Some(false),
             Some("hook_v2_catchup_required".to_owned()),
         ),
     }

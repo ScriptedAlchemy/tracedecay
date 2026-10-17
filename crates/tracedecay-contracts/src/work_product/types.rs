@@ -118,7 +118,7 @@ pub enum WorkProductOwnerAuthorizationErrorV1 {
 
 /// Resolves the registered profile owner and authorizes every selected
 /// project/repository relation against the request context.
-pub trait WorkProductOwnerAuthorizationPortV1: Send + Sync {
+pub trait WorkProductOwnerAuthorizationPortV1 {
     fn authorize_scope(
         &self,
         context: &RequestContext,

@@ -7,6 +7,8 @@ const PROTECTION_DOMAIN_V1: &[u8] = b"tracedecay.structural-identity-protection.
 const PROTECTION_PREFIX_V1: &str = "privacy.structural-id.v1.";
 const CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1: &str =
     "tracedecay-claude-observation-source-v1-sha256-";
+const CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V2: &str =
+    "tracedecay-claude-observation-source-v2-sha256-";
 
 #[derive(Clone, Copy, Debug)]
 pub struct StructuralIdProtectionError;
@@ -16,6 +18,7 @@ pub struct StructuralIdProtectionError;
 pub(crate) fn is_already_protected_structural_id(value: &str) -> bool {
     is_tagged_lowercase_hex(value, PROTECTION_PREFIX_V1, 64)
         || is_tagged_lowercase_hex(value, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1, 64)
+        || is_tagged_lowercase_hex(value, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V2, 64)
 }
 
 /// Replaces credential-shaped structural identifiers with a stable,
@@ -50,9 +53,9 @@ pub fn protect_optional_sensitive_structural_id(
 #[cfg(test)]
 mod tests {
     use super::{
-        CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1, PROTECTION_PREFIX_V1,
-        is_already_protected_structural_id, protect_optional_sensitive_structural_id,
-        protect_sensitive_structural_id,
+        CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V2,
+        PROTECTION_PREFIX_V1, is_already_protected_structural_id,
+        protect_optional_sensitive_structural_id, protect_sensitive_structural_id,
     };
 
     /// Split so this file never contains a contiguous credential-shaped token.
@@ -88,6 +91,14 @@ mod tests {
             protect_sensitive_structural_id(opaque_source).unwrap(),
             opaque_source
         );
+        let opaque_path_source = concat!(
+            "tracedecay-claude-observation-source-v2-sha256-",
+            "5d590176d45bdfe8395fde369964c8fc3c980d91912824a3333f84b13fb50e52"
+        );
+        assert_eq!(
+            protect_sensitive_structural_id(opaque_path_source).unwrap(),
+            opaque_path_source
+        );
     }
 
     #[test]
@@ -100,6 +111,10 @@ mod tests {
             (
                 format!("{CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1}sk-test-123456"),
                 "privacy.structural-id.v1.d7c35a12a51a3d498dd78997877d8904b1f203f5a1706f8359b86ba4ac162896",
+            ),
+            (
+                format!("{CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V2}sk-test-123456"),
+                "privacy.structural-id.v1.48bcb6a0df7b81d290220994e1c46c0c2058ea69d45776ee6ebfad132579062c",
             ),
         ];
         for (forged, expected) in cases {

@@ -83,10 +83,8 @@ fn unprovisioned_remote_registry(identity: &str) -> DaemonHttpApplicationRegistr
             UserProfileId::new(format!("profile.{identity}")).expect("profile identity"),
         ),
     );
-    let transaction = Arc::new(
-        tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new()
-            .expect("remote replay transaction authority"),
-    );
+    let transaction =
+        Arc::new(tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new());
     let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         transaction,

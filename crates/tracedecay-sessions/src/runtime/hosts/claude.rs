@@ -29,7 +29,8 @@ use cursor::claude_source_component;
 pub use frames::scan_claude_source_frames;
 pub use frames::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSourceFrame,
-    ClaudeSourceFrameScan, identify_claude_source, try_scan_claude_source_frames_with_resume,
+    ClaudeSourceFrameScan, ClaudeSourceScanIdentity, identify_claude_source,
+    try_scan_claude_source_frames_with_resume,
 };
 use source_records::record_cwd;
 pub use source_records::transcript_cwd;
@@ -78,6 +79,10 @@ impl ClaudeSource {
             user_scope: None,
             project_matchers: ProjectRootMatcherCache::default(),
         }
+    }
+
+    pub(crate) fn projects_dir(&self) -> &Path {
+        &self.projects_dir
     }
 
     /// Restricts ingestion to transcript rows that cannot be attributed to any

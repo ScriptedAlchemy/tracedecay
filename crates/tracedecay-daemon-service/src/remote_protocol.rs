@@ -25,10 +25,10 @@ use tracedecay_contracts::remote::discovery::{
 };
 use tracedecay_contracts::remote::protocol::{
     CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1,
-    RemoteProtocolExecutionControlV1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
-    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_capture_result_contract_v1,
-    remote_enrollment_result_contract_v1, remote_protocol_problem,
-    remote_replay_result_contract_v1,
+    RemoteProtocolExecutionControlV1, RemoteProtocolFailureV1, RemoteProtocolFutureV1,
+    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    remote_capture_result_contract_v1, remote_enrollment_result_contract_v1,
+    remote_protocol_problem, remote_replay_result_contract_v1,
 };
 use tracedecay_contracts::remote::protocol_owner::RemoteOperationProtocolPortsV1;
 use tracedecay_contracts::remote::recovery::{
@@ -105,6 +105,7 @@ fn report_current_authority<T>(
 impl<Request, Port> RemoteProtocolPortV1<Request> for CurrentAuthorityEnvelopeV1<Port>
 where
     Port: RemoteProtocolPortV1<Request>,
+    Port::Output: 'static,
 {
     type Output = Port::Output;
 
@@ -112,17 +113,20 @@ where
         &self,
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
         let node = self
             .credentials
             .storage_for_presented(self.use_case, &credential)
             .ok();
-        let response = self.port.execute(request, credential)?;
-        Ok(report_current_authority(
-            &self.credentials,
-            node.as_ref(),
-            response,
-        ))
+        let response = self.port.execute(request, credential);
+        let credentials = &self.credentials;
+        Box::pin(async move {
+            Ok(report_current_authority(
+                credentials,
+                node.as_ref(),
+                response.await?,
+            ))
+        })
     }
 
     fn execute_controlled(
@@ -130,17 +134,20 @@ where
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
         control: RemoteProtocolExecutionControlV1,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
         let node = self
             .credentials
             .storage_for_presented(self.use_case, &credential)
             .ok();
-        let response = self.port.execute_controlled(request, credential, control)?;
-        Ok(report_current_authority(
-            &self.credentials,
-            node.as_ref(),
-            response,
-        ))
+        let response = self.port.execute_controlled(request, credential, control);
+        let credentials = &self.credentials;
+        Box::pin(async move {
+            Ok(report_current_authority(
+                credentials,
+                node.as_ref(),
+                response.await?,
+            ))
+        })
     }
 }
 
@@ -214,39 +221,42 @@ impl RemoteProtocolPortV1<RemoteCaptureRequestV1> for DaemonRemoteCaptureProtoco
         &self,
         request: RemoteProtocolRequestV1<RemoteCaptureRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        let registered = match self
-            .credentials
-            .storage_for_presented(RemoteCredentialUseV1::CaptureOffline, &credential)
-        {
-            Ok(registered) => registered,
-            Err(_) => {
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let request_id = request.request_id.clone();
+            let observed_at = request.sent_at;
+            let registered = match self
+                .credentials
+                .storage_for_presented(RemoteCredentialUseV1::CaptureOffline, &credential)
+            {
+                Ok(registered) => registered,
+                Err(_) => {
+                    return remote_authority_unavailable_response(
+                        request_id,
+                        observed_at,
+                        remote_capture_result_contract_v1(),
+                    );
+                }
+            };
+            let Some(keyring) = presented_spool_keyring(&credential, request.enrollment_revision)
+            else {
                 return remote_authority_unavailable_response(
                     request_id,
                     observed_at,
                     remote_capture_result_contract_v1(),
                 );
-            }
-        };
-        let Some(keyring) = presented_spool_keyring(&credential, request.enrollment_revision)
-        else {
-            return remote_authority_unavailable_response(
-                request_id,
-                observed_at,
-                remote_capture_result_contract_v1(),
-            );
-        };
-        let storage = registered.storage.with_keyring(keyring);
-        let shared = Arc::new(storage.clone());
-        RemoteOfflineCaptureProtocolAdapterV1::new(RemoteOfflineCaptureProtocolServiceV1::new(
-            shared.clone(),
-            shared,
-            storage,
-            tracedecay_contracts::clock::now_micros,
-        ))
-        .execute(request, credential)
+            };
+            let storage = registered.storage.with_keyring(keyring);
+            let shared = Arc::new(storage.clone());
+            RemoteOfflineCaptureProtocolAdapterV1::new(RemoteOfflineCaptureProtocolServiceV1::new(
+                shared.clone(),
+                shared,
+                storage,
+                tracedecay_contracts::clock::now_micros,
+            ))
+            .execute(request, credential)
+            .await
+        })
     }
 }
 
@@ -262,62 +272,64 @@ impl RemoteProtocolPortV1<CurrentAuthorityRequestV1> for DaemonRemoteAuthorityDi
         &self,
         request: RemoteProtocolRequestV1<CurrentAuthorityRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        let contract = remote_authority_result_contract_v1()?;
-        let unavailable = |request_id| {
-            remote_authority_unavailable_response(request_id, observed_at, contract.clone())
-        };
-        let Ok(registered) = self
-            .credentials
-            .storage_for_presented(RemoteCredentialUseV1::DiscoverAuthority, &credential)
-        else {
-            return unavailable(request_id);
-        };
-        let Ok(fingerprint) = credential.credential_fingerprint() else {
-            return unavailable(request_id);
-        };
-        let Ok(RemoteCredentialAuthorityRecordV1::Enrollment { receipt, .. }) = registered
-            .storage
-            .credential_by_fingerprint(RemoteCredentialClassV1::Enrollment, &fingerprint)
-        else {
-            return unavailable(request_id);
-        };
-        let (authority, discovery) = match registered
-            .storage
-            .authority_discovery(*receipt, tracedecay_contracts::clock::now_micros())
-        {
-            Ok(answer) => answer,
-            Err(_) => return unavailable(request_id),
-        };
-        let result = match discovery {
-            Some(discovery) => Ok(ApplicationEnvelope {
-                contract: contract.clone(),
-                request_id: request_id.clone(),
-                scope: discovery.policy.scope.clone(),
-                outcome: ApplicationOutcome::Result(discovery),
-                touched_files: Vec::new(),
-                code_graph: None,
-                analytics: None,
-                cost: None,
-            }),
-            None => {
-                let failure = match &authority {
-                    CurrentRemoteAuthorityStateV1::Unavailable {
-                        reason: RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
-                        ..
-                    } => RemoteProtocolFailureV1::WriterAuthorityUnpublished,
-                    _ => RemoteProtocolFailureV1::AuthorityUnavailable,
-                };
-                Err(remote_protocol_problem(
-                    contract.clone(),
-                    request_id.clone(),
-                    failure,
-                )?)
-            }
-        };
-        RemoteProtocolResponseV1::new(request_id, authority, result)
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let request_id = request.request_id.clone();
+            let observed_at = request.sent_at;
+            let contract = remote_authority_result_contract_v1()?;
+            let unavailable = |request_id| {
+                remote_authority_unavailable_response(request_id, observed_at, contract.clone())
+            };
+            let Ok(registered) = self
+                .credentials
+                .storage_for_presented(RemoteCredentialUseV1::DiscoverAuthority, &credential)
+            else {
+                return unavailable(request_id);
+            };
+            let Ok(fingerprint) = credential.credential_fingerprint() else {
+                return unavailable(request_id);
+            };
+            let Ok(RemoteCredentialAuthorityRecordV1::Enrollment { receipt, .. }) = registered
+                .storage
+                .credential_by_fingerprint(RemoteCredentialClassV1::Enrollment, &fingerprint)
+            else {
+                return unavailable(request_id);
+            };
+            let (authority, discovery) = match registered
+                .storage
+                .authority_discovery(*receipt, tracedecay_contracts::clock::now_micros())
+            {
+                Ok(answer) => answer,
+                Err(_) => return unavailable(request_id),
+            };
+            let result = match discovery {
+                Some(discovery) => Ok(ApplicationEnvelope {
+                    contract: contract.clone(),
+                    request_id: request_id.clone(),
+                    scope: discovery.policy.scope.clone(),
+                    outcome: ApplicationOutcome::Result(discovery),
+                    touched_files: Vec::new(),
+                    code_graph: None,
+                    analytics: None,
+                    cost: None,
+                }),
+                None => {
+                    let failure = match &authority {
+                        CurrentRemoteAuthorityStateV1::Unavailable {
+                            reason: RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
+                            ..
+                        } => RemoteProtocolFailureV1::WriterAuthorityUnpublished,
+                        _ => RemoteProtocolFailureV1::AuthorityUnavailable,
+                    };
+                    Err(remote_protocol_problem(
+                        contract.clone(),
+                        request_id.clone(),
+                        failure,
+                    )?)
+                }
+            };
+            RemoteProtocolResponseV1::new(request_id, authority, result)
+        })
     }
 }
 
@@ -363,15 +375,17 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolP
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let Some(adapter) = self.adapter(&credential, request.enrollment_revision) else {
-            return remote_authority_unavailable_response(
-                request.request_id,
-                request.sent_at,
-                remote_replay_result_contract_v1(),
-            );
-        };
-        adapter.execute(request, credential)
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let Some(adapter) = self.adapter(&credential, request.enrollment_revision) else {
+                return remote_authority_unavailable_response(
+                    request.request_id,
+                    request.sent_at,
+                    remote_replay_result_contract_v1(),
+                );
+            };
+            adapter.execute(request, credential).await
+        })
     }
 }
 
@@ -383,15 +397,17 @@ impl RemoteProtocolPortV1<RemoteReplayPendingRequestV1> for DaemonRemoteReplayPr
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayPendingRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let Some(adapter) = self.adapter(&credential, request.enrollment_revision) else {
-            return remote_authority_unavailable_response(
-                request.request_id,
-                request.sent_at,
-                remote_replay_pending_result_contract_v1()?,
-            );
-        };
-        adapter.execute(request, credential)
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let Some(adapter) = self.adapter(&credential, request.enrollment_revision) else {
+                return remote_authority_unavailable_response(
+                    request.request_id,
+                    request.sent_at,
+                    remote_replay_pending_result_contract_v1()?,
+                );
+            };
+            adapter.execute(request, credential).await
+        })
     }
 }
 
@@ -454,28 +470,39 @@ macro_rules! impl_daemon_remote_recovery_protocol {
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
                 credential: OpaqueRemoteCredential,
-            ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-                let contract = self.$contract.clone();
-                let Some(deadline) = request.body.execution_expires_at() else {
-                    return remote_authority_unavailable_response(request.request_id, request.sent_at, contract);
-                };
-                let cancellation = match CancellationSignal::active(format!(
-                    "cancel.remote.direct.{}",
-                    request.request_id.as_str()
-                )) {
-                    Ok(cancellation) => cancellation,
-                    Err(_) => {
-                        return remote_authority_unavailable_response(request.request_id, request.sent_at, contract);
-                    }
-                };
-                self.execute_controlled(
-                    request,
-                    credential,
-                    RemoteProtocolExecutionControlV1 {
-                        deadline,
-                        cancellation,
-                    },
-                )
+            ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+                Box::pin(async move {
+                    let contract = self.$contract.clone();
+                    let Some(deadline) = request.body.execution_expires_at() else {
+                        return remote_authority_unavailable_response(
+                            request.request_id,
+                            request.sent_at,
+                            contract,
+                        );
+                    };
+                    let cancellation = match CancellationSignal::active(format!(
+                        "cancel.remote.direct.{}",
+                        request.request_id.as_str()
+                    )) {
+                        Ok(cancellation) => cancellation,
+                        Err(_) => {
+                            return remote_authority_unavailable_response(
+                                request.request_id,
+                                request.sent_at,
+                                contract,
+                            );
+                        }
+                    };
+                    self.execute_controlled(
+                        request,
+                        credential,
+                        RemoteProtocolExecutionControlV1 {
+                            deadline,
+                            cancellation,
+                        },
+                    )
+                    .await
+                })
             }
 
             #[tracing::instrument(name = "daemon.remote.recovery", level = "trace", skip_all)]
@@ -484,36 +511,46 @@ macro_rules! impl_daemon_remote_recovery_protocol {
                 request: RemoteProtocolRequestV1<$request>,
                 credential: OpaqueRemoteCredential,
                 control: RemoteProtocolExecutionControlV1,
-            ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-                let contract = self.$contract.clone();
-                let registered = match self
-                    .credentials
-                    .storage_for_presented(RemoteCredentialUseV1::Promote, &credential)
-                {
-                    Ok(registered) => registered,
-                    Err(_) => {
-                        return remote_authority_unavailable_response(request.request_id, request.sent_at, contract);
-                    }
-                };
-                let Some(recovery) = registered.recovery else {
-                    return remote_authority_unavailable_response(request.request_id, request.sent_at, contract);
-                };
-                let admission = Arc::new(RemoteCredentialAdmissionServiceV1::new(
-                    DaemonRemoteCredentialLookupV1::new(Arc::clone(&self.credentials)),
-                ));
-                let owner = RemoteRecoveryProtocolOwnerV1::new(
-                    admission,
-                    recovery,
-                    Arc::new(DaemonRemoteRecoveryControlV1 {
-                        credentials: Arc::clone(&self.credentials),
-                        cancellation: control.cancellation,
-                        deadline: control.deadline,
-                        clock: tracedecay_contracts::clock::now_micros,
-                        interruption: AtomicU8::new(0),
-                    }),
-                    tracedecay_contracts::clock::now_micros,
-                );
-                owner.execute(request, credential)
+            ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+                Box::pin(async move {
+                    let contract = self.$contract.clone();
+                    let registered = match self
+                        .credentials
+                        .storage_for_presented(RemoteCredentialUseV1::Promote, &credential)
+                    {
+                        Ok(registered) => registered,
+                        Err(_) => {
+                            return remote_authority_unavailable_response(
+                                request.request_id,
+                                request.sent_at,
+                                contract,
+                            );
+                        }
+                    };
+                    let Some(recovery) = registered.recovery else {
+                        return remote_authority_unavailable_response(
+                            request.request_id,
+                            request.sent_at,
+                            contract,
+                        );
+                    };
+                    let admission = Arc::new(RemoteCredentialAdmissionServiceV1::new(
+                        DaemonRemoteCredentialLookupV1::new(Arc::clone(&self.credentials)),
+                    ));
+                    let owner = RemoteRecoveryProtocolOwnerV1::new(
+                        admission,
+                        recovery,
+                        Arc::new(DaemonRemoteRecoveryControlV1 {
+                            credentials: Arc::clone(&self.credentials),
+                            cancellation: control.cancellation,
+                            deadline: control.deadline,
+                            clock: tracedecay_contracts::clock::now_micros,
+                            interruption: AtomicU8::new(0),
+                        }),
+                        tracedecay_contracts::clock::now_micros,
+                    );
+                    owner.execute(request, credential).await
+                })
             }
         }
     };

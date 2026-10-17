@@ -43,4 +43,14 @@ pub trait WorkSynthesisAdmissionStoragePort: WorkAttemptStoragePort {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkSynthesisAdmissionRecordV1, WorkAttemptStorageError>;
+
+    /// Commits the accepted-attempt link, the attempt row and its synthesis
+    /// record as one transaction.
+    fn admit_synthesis(
+        &self,
+        admission: &crate::WorkProductSynthesisAdmissionV1,
+    ) -> Result<
+        (crate::WorkProductEventCommitV1, WorkSynthesisInsertOutcome),
+        crate::WorkProductAttemptAdmissionErrorV1,
+    >;
 }
