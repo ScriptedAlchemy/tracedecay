@@ -498,18 +498,17 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     harness.shutdown().await;
 }
 
-/// Ingest through the session stores until the full server has mounted them,
-/// returning the first settled answer, or `None` once the bound expires.
+/// Ingest through the session stores, retrying each retryable refusal, and
+/// return the first settled answer. A server that never settles fails at the
+/// harness timeout.
 async fn settled_session_ingest(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
-) -> Option<serde_json::Value> {
+) -> serde_json::Value {
     settled_server_session_ingest(&harness.server(project).expect("mounted project")).await
 }
 
-async fn settled_server_session_ingest(
-    server: &crate::mcp::McpServer,
-) -> Option<serde_json::Value> {
+async fn settled_server_session_ingest(server: &crate::mcp::McpServer) -> serde_json::Value {
     let request = serde_json::from_value::<JsonRpcRequest>(serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -524,7 +523,6 @@ async fn settled_server_session_ingest(
         },
     }))
     .expect("hook runtime request");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let response = server
             .handle_request(&request)
@@ -535,11 +533,10 @@ async fn settled_server_session_ingest(
             "hook runtime failed: {response:?}"
         );
         let answer = response.result.expect("hook runtime result");
-        if !answer.to_string().contains("application.runtime.mounting") {
-            return Some(answer);
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
+        // Mounting is one retryable refusal; a refresh that missed its
+        // publish deadline under load is another.
+        if answer["structuredContent"]["problem"]["retryable"] != true {
+            return answer;
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
@@ -559,11 +556,7 @@ async fn shut_down_composition_releases_its_session_stores_for_an_immediate_reop
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("first production composition");
-    let first = settled_session_ingest(&harness, &project).await;
-    assert!(
-        first.is_some(),
-        "the first composition mounts its session stores"
-    );
+    settled_session_ingest(&harness, &project).await;
     let project_data_root = harness
         .project_data_root(&project)
         .await
@@ -600,11 +593,8 @@ async fn shut_down_composition_releases_its_session_stores_for_an_immediate_reop
         .await
         .expect("reopened production composition");
     let reopened = settled_session_ingest(&harness, &project).await;
-    assert_eq!(
-        reopened
-            .as_ref()
-            .map(|answer| answer.to_string().contains("accepted_for_replay")),
-        Some(true),
+    assert!(
+        reopened.to_string().contains("accepted_for_replay"),
         "the reopened composition must remount the session stores: {reopened:?}"
     );
     harness.shutdown().await;
@@ -651,12 +641,7 @@ async fn capacity_retirement_releases_session_stores_its_owner_used_on_the_first
             .unwrap_or_else(|error| {
                 panic!("project {ordinal} must open over released capacity: {error}")
             });
-        assert!(
-            settled_server_session_ingest(&opened.server)
-                .await
-                .is_some(),
-            "project {ordinal} mounts its session stores"
-        );
+        settled_server_session_ingest(&opened.server).await;
         drop(opened);
         opened_projects += 1;
     }

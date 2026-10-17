@@ -22,7 +22,6 @@ use std::sync::{Arc, Mutex, RwLock, TryLockError};
 use std::time::Instant;
 
 use tracedecay_contracts::{RequestCostReceiptV1, StorePointReadsV1};
-use tracedecay_domain::process_heap::OwnerHeapV1;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1,
     SanitizedCodeFileV1, SymbolOccurrenceId, repository_path_matches_scope,
@@ -1952,17 +1951,14 @@ impl CodeGraphInteractiveReader {
             };
             taken_over
         };
-        // Built in a heap of its own, the catalog's pages hold nothing else,
-        // are charged as the catalog's, and return whole when it is dropped.
-        let (built, heap) = {
+        let built = {
             let _span = tracing::trace_span!("code_graph.catalog.build").entered();
-            OwnerHeapV1::build(|| self.build_catalog(parent, &cancellation))
+            self.build_catalog(parent, &cancellation)
         };
-        let result = built.and_then(|mut catalog| {
+        let result = built.and_then(|catalog| {
             if cancellation.is_cancelled() {
                 Err(CodeGraphProjectionError::Cancelled)
             } else {
-                catalog.heap = heap;
                 Ok(Arc::new(catalog))
             }
         });
@@ -1984,7 +1980,7 @@ impl CodeGraphInteractiveReader {
         match result {
             Ok(catalog) => {
                 self.catalog.ready_bytes.store(
-                    catalog.resident_bytes(),
+                    catalog.retained_bytes(),
                     std::sync::atomic::Ordering::Release,
                 );
                 *state = InteractiveCatalogState::Ready(catalog);
