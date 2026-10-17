@@ -802,6 +802,109 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     );
 }
 
+/// A Work dispatch commits a job and then acts on it (publishes activity,
+/// supervises an attempt). A caller that stops waiting after the dispatch
+/// began abandons only its wait: the dispatch still runs to its last step.
+#[tokio::test]
+async fn a_work_dispatch_whose_caller_stops_waiting_still_completes() {
+    let fixture = RegisteredWorkFixture::start("dropped-caller").await;
+    let project_id = fixture.scope.project_id.clone();
+    let task_id = TaskId::new("task.work.dropped-caller").expect("task id");
+    let (initiative, plan, milestone, item) =
+        product_task("dropped-caller", task_id, UtcMicros(10));
+    let prepared = fixture
+        .invoke(
+            "request.work.dropped-caller-prepare",
+            WorkApplicationInvocationV1::PrepareGraphMutation(
+                PrepareWorkProductMutationRequestV1 {
+                    selection: WorkProductSelectionScopeV1::relations(
+                        [WorkProductAuthorizedRelationScopeV1::Repository {
+                            project_id: fixture.scope.project_id.clone(),
+                            repository_id: fixture.scope.repository_id.clone(),
+                        }]
+                        .into_iter()
+                        .collect(),
+                    )
+                    .expect("product selection"),
+                    change: WorkProductChangeDraftV1::CreateTask {
+                        initiative,
+                        plan,
+                        milestone,
+                        item: Box::new(item),
+                    },
+                    causation_event_id: None,
+                    evidence: Vec::new(),
+                },
+            ),
+        )
+        .await;
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared
+    else {
+        panic!("product task preparation must return Work evidence: {prepared:?}");
+    };
+    let project_root = fixture.project.path().to_path_buf();
+    let canonical_root = project_root.canonicalize().expect("canonical project root");
+    let registered = fixture
+        .service
+        .project_runtimes
+        .request_runtimes(Some(&project_root), Some(&canonical_root))
+        .await
+        .work
+        .expect("registered Work runtime");
+    let observability = fixture
+        .service
+        .observability_producer(Some(&project_root))
+        .await;
+    let mut created = Box::pin(execute_work_application(
+        registered,
+        Arc::clone(&fixture.service.work_attempt_processes),
+        observability,
+        Some(project_root),
+        "request.work.dropped-caller-create".to_owned(),
+        WorkApplicationInvocationV1::MutateGraph(packet.payload.expect("prepared mutation")),
+        UtcMicros(100),
+        Deadline::new(UtcMicros(1_000)).expect("deadline"),
+        CancellationContext::active("cancel.request.work.dropped-caller-create")
+            .expect("cancellation"),
+    ));
+    let pending = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(created.as_mut().poll(context).is_pending())
+    })
+    .await;
+    assert!(
+        pending,
+        "the dispatch is still committing when its caller stops waiting"
+    );
+    drop(created);
+
+    let pulses = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let records = tracedecay_session_memory::event_lane::replay_after(
+                &fixture.database,
+                project_id.as_str(),
+                None,
+            )
+            .await
+            .expect("activity replay")
+            .map_or(0, |replay| replay.records.len());
+            if records > 0 {
+                return records;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the abandoned dispatch must still commit and publish its activity");
+    assert_eq!(
+        pulses, 1,
+        "the committed mutation publishes exactly one pulse"
+    );
+}
+
 /// A profile that never created Work answers the views read, through the same
 /// daemon invocation path MCP, CLI and the dashboard use, with the typed
 /// absence under its authorized selection. A selection naming a project the
@@ -1038,16 +1141,6 @@ impl RegisteredWorkFixture {
         }
     }
 
-    async fn invoke_request(&self, request: DaemonInvocationRequest) -> DaemonInvocationOutcome {
-        invoke_registered(
-            self.service.clone(),
-            Arc::clone(&self.registry),
-            self.project.path().to_path_buf(),
-            request,
-        )
-        .await
-    }
-
     async fn invoke(
         &self,
         request_id: &'static str,
@@ -1223,12 +1316,13 @@ fn native_storage_wait_site_hits() -> BTreeMap<(&'static str, String), u64> {
         .collect()
 }
 
-/// A Workflow fan-out run served from a native runtime worker: the run
-/// starts, its child attempt settles (no provider route is mounted, so the
-/// attempt task seals a provider denial), and the attempt task reconciles the
-/// fan-out to a terminal run. Every storage write on that path is an awaited
-/// writer job and every read an awaited hop off the worker, so neither the
-/// writer nor the reader wait counter moves.
+/// A Workflow fan-out run served from a native runtime worker: the definition
+/// registers and activates, the run starts, its child attempt settles (no
+/// provider route is mounted, so the attempt task seals a provider denial),
+/// and the attempt task reconciles the fan-out to a terminal run. Every
+/// storage write on that path is an awaited writer job and every read an
+/// awaited hop off the worker, so no Work or Workflow storage call site
+/// parks a native thread.
 #[tokio::test]
 async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
     let fixture = RegisteredWorkFixture::start("native-fan-out").await;
@@ -1383,17 +1477,11 @@ async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
             ),
         ),
     ];
-    for request in setup {
-        let outcome = fixture.invoke_request(request).await;
-        assert!(
-            matches!(outcome, DaemonInvocationOutcome::WorkflowApplication { .. }),
-            "the definition must register and activate: {outcome:?}"
-        );
-    }
 
     let service = fixture.service.clone();
     let registry = Arc::clone(&fixture.registry);
     let project_root = fixture.project.path().to_path_buf();
+    let worktree_id = fixture.scope.worktree_id.clone();
     let get_run = move |attempt: u32| {
         workflow(
             &format!("request.workflow.native-fan-out.get-run-{attempt}"),
@@ -1408,25 +1496,23 @@ async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
         "request.workflow.native-fan-out.start",
         tracedecay_daemon_protocol::WorkflowApplicationInvocation::StartRun(Box::new(start)),
     );
-    let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
-    let reader_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits();
     let sites = native_storage_wait_site_hits();
     let served = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
-        let started = invoke_registered(
-            service.clone(),
-            Arc::clone(&registry),
-            project_root.clone(),
-            start,
-        )
-        .await;
-        for attempt in 0..600 {
-            let outcome = invoke_registered(
+        let invoke = |request| {
+            invoke_registered(
                 service.clone(),
                 Arc::clone(&registry),
                 project_root.clone(),
-                get_run(attempt),
+                request,
             )
-            .await;
+        };
+        let mut defined = Vec::new();
+        for request in setup {
+            defined.push(invoke(request).await);
+        }
+        let started = invoke(start).await;
+        for attempt in 0..600 {
+            let outcome = invoke(get_run(attempt)).await;
             if let DaemonInvocationOutcome::WorkflowApplication {
                 outcome:
                     tracedecay_daemon_protocol::WorkflowApplicationOutcome::GetRun(
@@ -1439,7 +1525,16 @@ async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
                     .as_ref()
                     .is_some_and(|run| run.status().is_terminal())
             {
-                return (started, outcome);
+                // The attempt task persists the census and releases the
+                // attempt only after the run turns terminal.
+                while service.work_attempt_processes.holds_worktree(&worktree_id) {
+                    tracedecay_runtime_core::native_runtime::sleep_until(
+                        std::time::Instant::now() + std::time::Duration::from_millis(50),
+                    )
+                    .await
+                    .expect("native timer");
+                }
+                return (defined, started, outcome);
             }
             tracedecay_runtime_core::native_runtime::sleep_until(
                 std::time::Instant::now() + std::time::Duration::from_millis(100),
@@ -1449,25 +1544,42 @@ async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
         }
         panic!("the fan-out run must reach a terminal status: {started:?}");
     })
-    .expect("native worker task")
-    .wait()
-    .await;
-    let tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed((started, settled)) =
-        served
+    .expect("native worker task");
+    let served = tracedecay_runtime_core::native_runtime::timeout(
+        std::time::Duration::from_secs(120),
+        served.wait(),
+    )
+    .await
+    .expect("the fan-out run settles and releases its attempt within two minutes");
+    let tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed((
+        defined,
+        started,
+        settled,
+    )) = served
     else {
         panic!("the native worker must serve the fan-out run: {served:?}");
     };
+    // The wait counters are process-wide and other tests in this binary move
+    // them, so only the Work and Workflow storage call sites are compared.
     let parked = native_storage_wait_site_hits()
         .into_iter()
-        .filter(|(site, hits)| sites.get(site) != Some(hits))
+        .filter(|(key, hits)| {
+            (key.1
+                .contains("tracedecay-daemon-service/src/invocation/work")
+                || key.1.contains("tracedecay-rusqlite-runtime/src/work"))
+                && sites.get(key) != Some(hits)
+        })
         .collect::<Vec<_>>();
     assert_eq!(
-        (
-            tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits(),
-            tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits(),
-        ),
-        (writer_waits, reader_waits),
-        "a Workflow fan-out run must not park a native worker on storage; parked at {parked:?}"
+        parked,
+        Vec::new(),
+        "a Workflow fan-out run must not park a native worker on Work or Workflow storage"
+    );
+    assert!(
+        defined
+            .iter()
+            .all(|outcome| matches!(outcome, DaemonInvocationOutcome::WorkflowApplication { .. })),
+        "the definition must register and activate: {defined:?}"
     );
     assert!(
         matches!(

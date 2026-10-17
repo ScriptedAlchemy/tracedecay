@@ -503,7 +503,7 @@ impl WorkAttemptProcessRegistryV1 {
             .is_some_and(|holder| holder.worktree_id.as_ref() == Some(worktree_id))
     }
 
-    pub(super) fn holds_worktree(&self, worktree_id: &WorktreeId) -> bool {
+    pub fn holds_worktree(&self, worktree_id: &WorktreeId) -> bool {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -744,10 +744,26 @@ async fn run_attempt(
         }
     };
 
-    match select_with_resolver(
-        &registered.proposal_routing.executable_binding_resolver,
-        &attempt,
-    ) {
+    // Resolution canonicalizes and hashes the provider binary.
+    let resolver = registered
+        .proposal_routing
+        .executable_binding_resolver
+        .clone();
+    let resolving = attempt.clone();
+    let selection =
+        native_runtime::spawn_blocking(move || select_with_resolver(&resolver, &resolving))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    task = identity.task_id().as_str(),
+                    %error,
+                    "work provider binding could not be resolved on the blocking pool"
+                );
+                Err(ProviderDenial::preferred(
+                    WorkProviderAvailabilityV1::Unavailable,
+                ))
+            });
+    match selection {
         Ok(selection) => match selection.provider.protocol {
             WorkProviderProtocol::CodexAppServerJsonRpc => {
                 execute_app_server(

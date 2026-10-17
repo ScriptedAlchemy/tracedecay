@@ -45,19 +45,21 @@ pub(crate) async fn execute_workflow_application(
     cancellation: CancellationContext,
     worktree_holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
 ) -> DaemonInvocationResponse {
-    // Keep the Workflow dispatch frame out of invocation callers.
-    Box::pin(workflow_application(
-        registered,
-        attempt_processes,
-        observability_producer,
-        project_root,
-        request_id,
-        request,
-        observed_at,
-        deadline,
-        cancellation,
-        worktree_holder_admission,
-    ))
+    super::settled_dispatch(
+        request_id.clone(),
+        Box::pin(workflow_application(
+            registered,
+            attempt_processes,
+            observability_producer,
+            project_root,
+            request_id,
+            request,
+            observed_at,
+            deadline,
+            cancellation,
+            worktree_holder_admission,
+        )),
+    )
     .await
 }
 

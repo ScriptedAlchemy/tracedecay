@@ -106,41 +106,70 @@ pub async fn execute_work_application(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
+    let refused_request_id = request_id.clone();
     let activity_database = registered.database.clone();
     let activity_root = project_root.clone();
     let mutates = work_invocation_mutates(&request);
-    // Keep the Work dispatch frame out of invocation callers.
-    let dispatched: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>> =
-        Box::pin(request_dispatch::dispatch_work_application(
-            registered,
-            attempt_processes,
-            observability_producer,
-            project_root,
-            request_id,
-            request,
-            observed_at,
-            deadline,
-            cancellation,
-        ));
-    let response = dispatched.await;
-    if mutates
-        && matches!(
-            response.outcome,
-            DaemonInvocationOutcome::WorkApplication { .. }
-        )
-        && let Some(project_root) = activity_root.as_deref()
-    {
-        tracedecay_session_memory::event_lane::publish(
-            &activity_database,
-            tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
-            project_root,
-            None,
-            1,
-            work_activity_detail(&response.outcome),
-        )
-        .await;
+    settled_dispatch(
+        refused_request_id,
+        Box::pin(async move {
+            let response = request_dispatch::dispatch_work_application(
+                registered,
+                attempt_processes,
+                observability_producer,
+                project_root,
+                request_id,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            )
+            .await;
+            if mutates
+                && matches!(
+                    response.outcome,
+                    DaemonInvocationOutcome::WorkApplication { .. }
+                )
+                && let Some(project_root) = activity_root.as_deref()
+            {
+                tracedecay_session_memory::event_lane::publish(
+                    &activity_database,
+                    tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
+                    project_root,
+                    None,
+                    1,
+                    work_activity_detail(&response.outcome),
+                )
+                .await;
+            }
+            response
+        }),
+    )
+    .await
+}
+
+/// Runs a Work or Workflow dispatch as its own native task. A dispatch commits
+/// several jobs in sequence (a leased attempt, then its supervision; a paused
+/// run, then its children's controls), so a caller that stops waiting must
+/// abandon only the wait, never the jobs still to come. Boxed so the dispatch
+/// frame stays out of invocation callers.
+async fn settled_dispatch(
+    request_id: String,
+    dispatch: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>>,
+) -> DaemonInvocationResponse {
+    let refused = |error: &dyn std::fmt::Display| {
+        tracing::error!(%error, "Work dispatch did not run to completion");
+        DaemonInvocationResponse::problem(request_id.clone(), DaemonInvocationProblem::Unavailable)
+    };
+    match tracedecay_runtime_core::native_runtime::NativeTask::spawn(dispatch) {
+        Ok(task) => match task.await {
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(response) => {
+                response
+            }
+            outcome => refused(&format!("{outcome:?}")),
+        },
+        Err(error) => refused(&error),
     }
-    response
 }
 
 fn publish_committed_task_activity_in_background(

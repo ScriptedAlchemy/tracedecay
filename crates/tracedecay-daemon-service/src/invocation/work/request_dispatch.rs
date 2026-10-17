@@ -967,7 +967,7 @@ pub(super) async fn dispatch_work_application(
         WorkApplicationInvocationV1::AdmitPlacement(command) => {
             let placement_root = project_root.clone();
             let admitted = tracing::Instrument::instrument(
-                services.admit_placement(context.clone(), command, |target| {
+                services.admit_placement(context.clone(), command, move |target| {
                     observe_placement_target(placement_root.as_deref(), target, observed_at)
                 }),
                 tracing::trace_span!("daemon.service.work.admit_placement"),
@@ -1010,7 +1010,7 @@ pub(super) async fn dispatch_work_application(
         WorkApplicationInvocationV1::ReleasePlacement(command) => {
             let placement_root = project_root.clone();
             let released = tracing::Instrument::instrument(
-                services.release_placement(context.clone(), command, |target| {
+                services.release_placement(context.clone(), command, move |target| {
                     observe_placement_target(placement_root.as_deref(), target, observed_at)
                 }),
                 tracing::trace_span!("daemon.service.work.release_placement"),
