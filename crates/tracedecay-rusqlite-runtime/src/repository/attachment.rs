@@ -925,6 +925,70 @@ mod tests {
         assert_eq!(replacement_value, "B");
     }
 
+    /// This process's threads whose name starts with `prefix`, compared on
+    /// the 15 bytes Linux keeps of a thread name.
+    #[cfg(target_os = "linux")]
+    fn threads_named(prefix: &str) -> usize {
+        let kept = &prefix[..prefix.len().min(15)];
+        fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|task| fs::read_to_string(task.ok()?.path().join("comm")).ok())
+            .filter(|name| name.trim_end().starts_with(kept))
+            .count()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sixty_four_attached_stores_run_on_the_fixed_storage_pool() {
+        let directory = TempDir::new().unwrap();
+        let binding = binding();
+        let attachments = (0..64)
+            .map(|index| {
+                let path = directory.path().join(format!("store-{index}.sqlite3"));
+                create_identity_database(&path, "seed");
+                let attachment = RepositoryPhysicalAttachmentFactory
+                    .attach(
+                        &native_runtime(),
+                        binding.clone(),
+                        locator(&binding),
+                        path.canonicalize().unwrap(),
+                        AdmissionConfigV1::default(),
+                    )
+                    .unwrap();
+                let handle = attachment.exact_sql_handle().unwrap();
+                handle
+                    .execute(statement(
+                        "INSERT INTO identity_probe (value) VALUES (?)",
+                        vec![ExactSqlValue::Text(format!("store-{index}"))],
+                    ))
+                    .unwrap();
+                let rows = handle
+                    .query(
+                        statement("SELECT count(*) FROM identity_probe", vec![]),
+                        Duration::from_secs(10),
+                    )
+                    .unwrap();
+                assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
+                attachment
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            threads_named("tracedecay-rusqlite"),
+            0,
+            "no attached store may own a writer or reader thread"
+        );
+        assert_eq!(
+            threads_named(crate::storage_pool::STORE_THREAD_PREFIX),
+            crate::storage_pool::store_threads(),
+            "every store's writer and readers run on the fixed pool"
+        );
+        for attachment in &attachments {
+            attachment.drain().unwrap();
+            attachment.close_and_join().unwrap();
+        }
+    }
+
     #[test]
     fn real_sqlite_attachment_drains_pending_wal_reopens_and_rejects_stale_handles() {
         let directory = TempDir::new().unwrap();
