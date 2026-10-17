@@ -489,3 +489,56 @@ async fn rescan_remediates_external_metadata_even_when_body_is_unavailable() {
         }
     }
 }
+
+#[asupersync::test]
+async fn rescan_keeps_provider_metadata_when_reexternalizing_a_dirty_body() {
+    let harness = RegisteredGlobalDbHarness::open("privacy-external-provider-metadata").await;
+    seed_session(&harness, "provider-session").await;
+    let mut body = (0..20_000)
+        .map(|line| format!("captured tool output line {line}\n"))
+        .collect::<String>();
+    body.push_str(&format!("leaked api_key={}\n", secret()));
+    let old_reference =
+        seed_legacy_external_row(&harness, "provider-session", "offloaded", &body).await;
+    let writer = harness.registered.writer_connection().expect("writer");
+    writer
+        .execute(
+            "UPDATE lcm_raw_messages SET role = 'tool', metadata_json = json_set(metadata_json, '$.provider_note', 'reviewed') WHERE message_id = 'offloaded'",
+            (),
+        )
+        .await
+        .expect("provider metadata");
+
+    let outcome = harness
+        .registered
+        .lcm_privacy_rescan_raw_messages()
+        .await
+        .expect("rescan dirty external body");
+    let LcmPrivacyRescanOutcomeV1::Completed(receipt) = outcome else {
+        panic!("first scan must run")
+    };
+    assert_eq!(receipt.remediated_rows, 1);
+
+    let snapshot = harness
+        .registered
+        .lcm_read_snapshot()
+        .await
+        .expect("snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT metadata_json, payload_ref, storage_kind FROM lcm_raw_messages WHERE message_id = 'offloaded'",
+            (),
+        )
+        .await
+        .expect("query");
+    let row = rows.next().await.expect("row").expect("present");
+    let metadata: Value =
+        serde_json::from_str(&row.get::<String>(0).expect("metadata")).expect("JSON");
+    let reference: String = row.get(1).expect("reference");
+    assert_eq!(row.get::<String>(2).expect("storage kind"), "external");
+    assert_ne!(reference, old_reference);
+    assert_eq!(metadata["provider_note"], json!("reviewed"));
+    assert_eq!(metadata["external_payload"], json!(true));
+    assert_eq!(metadata["payload_ref"], json!(reference));
+    assert_eq!(metadata["ingest_protection"]["redacted"], json!(true));
+}

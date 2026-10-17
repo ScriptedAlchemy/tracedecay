@@ -435,11 +435,12 @@ impl RegisteredGlobalDb {
         };
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
-        let staged = raw::stage_raw_message_with_payload_tracked(
+        let mut staged = raw::stage_raw_message_with_payload_tracked(
             storage_root,
             &record,
             &mut payload_rollback,
         )?;
+        staged.retain_provider_metadata()?;
         let replaced_payload_ref = replaced_payload_ref
             .filter(|old_ref| Some(old_ref.as_str()) != staged.external_payload_ref());
         let transaction = self

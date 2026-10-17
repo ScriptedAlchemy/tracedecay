@@ -638,7 +638,7 @@ function decodeSse(
       sequence,
       lastSequence: String(gap.last_missing_sequence),
       frontier: {
-        nextSequence: incrementDecimal(String(gap.last_missing_sequence)),
+        nextSequence: (BigInt(gap.last_missing_sequence as number) + 1n).toString(),
         ...(typeof frontier.resume_token === "string"
           ? { resumeToken: frontier.resume_token }
           : {}),

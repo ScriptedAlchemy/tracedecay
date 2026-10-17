@@ -393,6 +393,39 @@ impl StagedRawMessageIngest {
             .as_ref()
             .map(|message| message.payload_ref.payload_ref.as_str())
     }
+
+    /// Keeps the sanitized provider metadata beneath a whole-message payload
+    /// envelope. Re-ingest of an already stored row uses this so provider
+    /// fields survive; the new envelope keys always win over provider keys.
+    pub fn retain_provider_metadata(&mut self) -> Result<(), LcmError> {
+        let (Some(whole_message), Some(provider)) = (
+            self.whole_message.as_mut(),
+            self.prepared.metadata_json.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        let encoding = |error: serde_json::Error| {
+            LcmError::Db(format!("LCM metadata encoding failed: {error}"))
+        };
+        let mut merged: JsonValue = serde_json::from_str(provider).map_err(encoding)?;
+        let envelope: JsonValue =
+            serde_json::from_str(&whole_message.metadata_json).map_err(encoding)?;
+        let (Some(merged_object), JsonValue::Object(envelope)) = (merged.as_object_mut(), envelope)
+        else {
+            return Err(LcmError::Db(
+                "LCM metadata must be a JSON object".to_owned(),
+            ));
+        };
+        for (key, value) in envelope {
+            // The provider side carries the same body receipt plus the
+            // metadata receipt, so its protection envelope is the superset.
+            if key != "ingest_protection" || !merged_object.contains_key(&key) {
+                merged_object.insert(key, value);
+            }
+        }
+        whole_message.metadata_json = merged.to_string();
+        Ok(())
+    }
 }
 
 struct StagedWholeMessage {
