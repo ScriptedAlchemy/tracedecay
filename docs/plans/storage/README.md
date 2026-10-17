@@ -708,7 +708,22 @@ changes a file that holds memory.
     storage holds no `ExactSqlHandle`. Effects outside storage (Git, providers,
     other stores) stay outside the job.
   - Shipped so far: handoff grants (#4133), pause and resume of a run (#4139),
-    and the git-index store, whose actor thread is deleted (#4140).
+    the git-index store, whose actor thread is deleted (#4140), placement and
+    the leaf Work ports (#4142), native integration (#4143), remote replay with
+    its actor thread deleted (#4157), the attempt chain and product mutations
+    (#4158), and Workflow (branch `refactor/storage-workflow-jobs`).
+  - Workflow slice (2026-10-17). The Workflow ports are implemented on the Work
+    job storage itself, the design's one `JournalTx`, not on a second job type.
+    Effects, run-journal appends, artifact persists and census writes are writer
+    jobs; a workflow effect (reserve, claim, apply, commit, reconcile) is one
+    job, so a failure after the reservation now rolls the reservation back too.
+    Every Work and Workflow request now runs on the native thread that received
+    it (`off_native_worker` is deleted) and the attempt task is an ordinary
+    native task; sync reads run through a `read` helper on the blocking pool,
+    which step 7 replaces with a reader lane. Evidence retrieval stays whole on
+    the blocking pool, because its contracts service interleaves sync Work reads
+    with awaited session-evidence reads. Proof: a fan-out run driven from a
+    native worker leaves both wait counters unchanged.
   - `transact` has no operation-id ledger yet. The ledger is new schema on stores
     with no migration path, so it ships with `journal.db` in step 8. Until then
     each domain keeps its own idempotency.
@@ -777,7 +792,8 @@ changes a file that holds memory.
 
 ## Next implementation step
 
-The rest of step 5, slice by slice: placement and the leaf Work ports, the
-native-integration and remote-replay actor threads, then the attempt chain together
-with run control and Workflow. After those, delete `off_native_thread` for Work and
-the native wait counters.
+The rest of step 5: the native writer-wait counter becomes a refusal of any
+synchronous writer wait on a native thread and both counters are deleted; then
+the interactive exact-SQL transactions (56 direct sites and about 190 behind the
+runtime-core async `Transaction`) become jobs. Step 7's first slice, writers and
+readers as tasks on one fixed pool, is in progress in parallel.
