@@ -2324,14 +2324,10 @@ mod tests {
             .ensure_profile_host_admission_bootstrap(&profile_root)
             .await
             .unwrap();
-        // The worker performs a real session-runtime-registry open before it
-        // can surface the spool error, so give it a generous (still bounded)
-        // wait; completion notifies immediately, so a healthy run never
-        // sleeps this long.
         assert_eq!(
             administration
                 .profile_host_admission_replay
-                .wait_bootstrap_completed(&profile_root, Duration::from_mins(1))
+                .wait_bootstrap_completed(&profile_root, None)
                 .await,
             BootstrapCompletion::Completed,
             "production bootstrap worker must publish its terminal state"

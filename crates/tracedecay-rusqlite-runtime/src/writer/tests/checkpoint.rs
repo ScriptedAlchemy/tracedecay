@@ -145,6 +145,7 @@ fn hard_checkpoint_pressure_blocks_general_admission() {
             },
             snapshot_blockers: blockers.clone(),
             hard_drain_required: true,
+            fence_expired: false,
             elapsed: Duration::ZERO,
         },
     };

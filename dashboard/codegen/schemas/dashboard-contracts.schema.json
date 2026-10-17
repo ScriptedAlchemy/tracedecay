@@ -11451,6 +11451,11 @@
           "const": "pending_schema_migration",
           "description": "A store whose historical schema convergence has not completed: the\nmigrations whose cost scales with store size are still pending, still\nrunning, or stopped on a failure. The daemon serves while they run, so\nthis is the surface that says which store is still migrating and why.",
           "type": "string"
+        },
+        {
+          "const": "wal_checkpoint_pinned",
+          "description": "A store whose WAL checkpoint cannot restart the log because a reader\nstill holds a read slot past the checkpoint fence: a wedged reader of\nthis daemon or another process, named in the evidence. Writes run\nuntil the WAL reaches its ceiling, then wait.",
+          "type": "string"
         }
       ]
     },

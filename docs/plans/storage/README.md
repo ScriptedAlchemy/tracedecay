@@ -719,6 +719,23 @@ changes a file that holds memory.
   before store close could still be unwinding the tasks that held their leases,
   and `graceful_stop_truncates_profile_and_project_store_wals` failed. This is an
   interim remedy; the step 7 executor owns close.
+- Step 6, first slice (2026-10-17, branch `fix/storage-bounded-hard-drain`). The
+  hard-pressure drain gets the section 3 fence on today's writer, ahead of the
+  executor, because the live #4097 incident (a 229 MB WAL pending for 6.8 hours
+  through 245,264 retry wakes) cannot wait for step 7:
+  - Past one read deadline (5 s) the fence revokes this pool's snapshots that are
+    older than it: the worker interrupts any running statement, rolls the read
+    back, and the snapshot's later reads fail as `SnapshotExpired`.
+  - A fence lasts at most 6 s. Then whatever still holds the WAL is named (a
+    reader by id, or another process by command and pid from `/proc`), the fence
+    drops, writes resume, and the checkpoint retries with backoff from 1 s to
+    60 s. Past twice the hard limit (512 MiB at the default) writes wait again,
+    so the WAL stays bounded and nothing spins.
+  - The expired fence publishes `CheckpointPressure::FenceExpired`, which status
+    reports as `fence_expired` and Doctor reports as a `WalCheckpointPinned`
+    storage finding naming the holders.
+  Step 7 moves this policy onto lanes unchanged; only the 100 ms interval and the
+  hard limit become the class soft limits.
 - Step 6, foreign readers (2026-10-17, branch `fix/storage-report-header-free-pages`).
   The storage report sized each registered store's free pages by opening its own
   read-only SQLite connection, a reader outside the daemon's pool on a live file.
