@@ -258,6 +258,9 @@ fn checkpoint_snapshot(
         CheckpointPressure::BlockGeneral { wal, blockers } => {
             ("hard_drain", Some(wal.bytes), Some(blockers))
         }
+        CheckpointPressure::FenceExpired { wal, holders } => {
+            ("fence_expired", Some(wal.bytes), Some(holders))
+        }
     };
     RuntimeRegistryCheckpointSnapshot {
         pressure: pressure.to_owned(),
@@ -306,6 +309,13 @@ fn checkpoint_blocker_snapshot(
                 kind: "physical_reader".to_owned(),
                 id: reader_id.to_string(),
                 age_ms: u64::try_from(age.as_millis()).unwrap_or(u64::MAX),
+            }
+        }
+        CheckpointBlocker::ForeignConnection { pid, process } => {
+            RuntimeRegistryCheckpointBlockerSnapshot {
+                kind: "foreign_connection".to_owned(),
+                id: format!("{process}[{pid}]"),
+                age_ms: 0,
             }
         }
     }
@@ -444,6 +454,34 @@ mod tests {
         assert_eq!(snapshot.blockers[0].age_ms, 250);
         assert_eq!(snapshot.blockers_omitted, 2);
         assert_eq!(snapshot.hard_retry_wakes, 3);
+    }
+
+    #[test]
+    fn checkpoint_wire_names_the_process_holding_an_expired_fence() {
+        let writer = PhysicalWriterRuntimeSnapshot {
+            checkpoint_pressure: CheckpointPressure::FenceExpired {
+                wal: CheckpointWal {
+                    frames: 70_000,
+                    bytes: 286_720_000,
+                },
+                holders: CheckpointBlockers {
+                    blockers: vec![CheckpointBlocker::ForeignConnection {
+                        pid: 4242,
+                        process: "sqlite3".to_owned(),
+                    }],
+                    omitted: 0,
+                },
+            },
+            ..PhysicalWriterRuntimeSnapshot::default()
+        };
+
+        let snapshot = checkpoint_snapshot(&writer);
+
+        assert_eq!(snapshot.pressure, "fence_expired");
+        assert_eq!(snapshot.wal_bytes, Some(286_720_000));
+        assert_eq!(snapshot.blockers.len(), 1);
+        assert_eq!(snapshot.blockers[0].kind, "foreign_connection");
+        assert_eq!(snapshot.blockers[0].id, "sqlite3[4242]");
     }
 
     #[test]

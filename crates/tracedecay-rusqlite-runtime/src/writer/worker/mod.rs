@@ -34,7 +34,8 @@ use crate::{
     checkpoint::{
         CheckpointBlockerSource, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
         CheckpointOutcome, CheckpointPressure, CheckpointResult, CheckpointStatus, CheckpointWal,
-        RusqliteCheckpointDriver, WriterCheckpointController,
+        FENCE_READ_DEADLINE, RusqliteCheckpointDriver, WriterCheckpointController,
+        foreign_wal_holders,
     },
     connection::{self, OpenedDatabaseFile},
     exact_sql::{
@@ -66,7 +67,15 @@ use rejection::{
     reject_incremental_vacuum, reject_unauthorized,
 };
 
-const HARD_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// When the blocked writer retries its drain: the fence's short interval, or
+/// the backoff once the fence expired and the WAL passed its write ceiling.
+fn drain_retry_due(checkpoint: &WriterCheckpointController) -> Option<Instant> {
+    if checkpoint.hard_drain_required() {
+        checkpoint.retry_due(Instant::now())
+    } else {
+        None
+    }
+}
 
 /// Admission-anchored window for waiting on additional ingress. Once the
 /// worker dispatches, every compatible request already queued may share the
@@ -560,9 +569,7 @@ impl Worker {
             }
             if let Some(command) = checkpoint_queue.pop_front() {
                 self.run_requested_checkpoint(&mut checkpoint, command);
-                hard_checkpoint_retry_due = checkpoint
-                    .hard_drain_required()
-                    .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                 continue;
             }
             if checkpoint.hard_drain_required() {
@@ -573,9 +580,7 @@ impl Worker {
                 if now >= *retry_due {
                     self.telemetry.checkpoint_hard_retry();
                     self.run_scheduled_checkpoint(&mut checkpoint);
-                    hard_checkpoint_retry_due = checkpoint
-                        .hard_drain_required()
-                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                     continue;
                 }
                 let wake = wait_for_work(
@@ -594,9 +599,7 @@ impl Worker {
                 if matches!(wake, WorkerWake::CheckpointRetry) {
                     self.telemetry.checkpoint_hard_retry();
                     self.run_scheduled_checkpoint(&mut checkpoint);
-                    hard_checkpoint_retry_due = checkpoint
-                        .hard_drain_required()
-                        .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                 } else {
                     apply_wake(
                         wake,
@@ -655,9 +658,7 @@ impl Worker {
                             reply.send();
                             self.fit_page_cache(&mut page_cache, &mut checkpoint);
                             self.run_scheduled_checkpoint(&mut checkpoint);
-                            hard_checkpoint_retry_due = checkpoint
-                                .hard_drain_required()
-                                .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                            hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                         } else {
                             reject_writer_command(command);
                         }
@@ -695,6 +696,8 @@ impl Worker {
                 {
                     break;
                 }
+                // An expired fence keeps retrying with backoff even while no
+                // write arrives to run the checkpoint after its batch.
                 let wake = wait_for_work(
                     &self.cx,
                     &mut self.receiver,
@@ -706,8 +709,12 @@ impl Worker {
                     exact_sql_closed,
                     incremental_vacuum_closed,
                     checkpoint_closed,
-                    None,
+                    checkpoint.retry_due(Instant::now()),
                 );
+                if matches!(wake, WorkerWake::CheckpointRetry) {
+                    self.run_scheduled_checkpoint(&mut checkpoint);
+                    continue;
+                }
                 apply_wake(
                     wake,
                     &mut queue,
@@ -809,8 +816,7 @@ impl Worker {
                             let _ = enqueue(&mut queue, &mut inflight, item, &self.telemetry);
                         }
                     }
-                    hard_checkpoint_retry_due =
-                        Some(Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
+                    hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
                     break;
                 }
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
@@ -858,7 +864,22 @@ impl Worker {
     }
 
     fn run_scheduled_checkpoint(&self, checkpoint: &mut WriterCheckpointController) {
-        let snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
+        let now = Instant::now();
+        if checkpoint.defers_scheduled(now) {
+            return;
+        }
+        if checkpoint.revocation_due(now) {
+            self.checkpoint_blockers
+                .revoke_snapshots_older_than(FENCE_READ_DEADLINE);
+        }
+        let mut snapshot_blockers = self.checkpoint_blockers.checkpoint_blockers();
+        if checkpoint.names_holders(now) && snapshot_blockers.is_clear() {
+            #[cfg(unix)]
+            let database = &self.canonical_path;
+            #[cfg(not(unix))]
+            let database = &self.path;
+            snapshot_blockers = foreign_wal_holders(database);
+        }
         let match_result = {
             let _span = tracing::trace_span!("rusqlite.writer.checkpoint").entered();
             checkpoint.evaluate_scheduled(snapshot_blockers)
@@ -959,6 +980,18 @@ pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<Ch
         } => Some(CheckpointPressure::BlockGeneral {
             wal: CheckpointWal::from_sample(*sample),
             blockers: snapshot_blockers.clone(),
+        }),
+        CheckpointResult::Decision {
+            sample,
+            decision:
+                CheckpointDecision::Pending {
+                    snapshot_blockers,
+                    fence_expired: true,
+                    ..
+                },
+        } => Some(CheckpointPressure::FenceExpired {
+            wal: CheckpointWal::from_sample(*sample),
+            holders: snapshot_blockers.clone(),
         }),
         CheckpointResult::Decision { .. } => Some(CheckpointPressure::Open),
         CheckpointResult::Interrupted { .. } => None,

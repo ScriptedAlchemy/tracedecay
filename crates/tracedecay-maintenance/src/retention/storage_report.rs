@@ -32,9 +32,6 @@ use tracedecay_domain::{
     CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1, decode_bound_cursor,
     encode_bound_cursor,
 };
-use tracedecay_runtime_core::sqlite_read_snapshot::{
-    BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
-};
 
 use tracedecay_code_index_retention::code_index_generations::{
     CODE_TEXT_ARTIFACT_STAGING_DIRECTORY_V1, CODE_TEXT_ARTIFACTS_DIRECTORY_V1,
@@ -1113,16 +1110,40 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
     }
 }
 
-/// Reads the free-page pragmas over the shared bounded read-only probe.
-/// Returns `None` on any failure, a store held by a busy writer, a corrupt
-/// file, or a WAL database whose `-shm` cannot be mapped read-only. A report
-/// must degrade, never block and never repair.
+/// Reads the free pages from the database file header with a plain file
+/// read. Opening a SQLite connection on a live store would make the report a
+/// reader the writer's checkpoint has to wait for; the header takes no lock
+/// and no WAL read slot. It reflects the last checkpoint, which is precise
+/// enough for a size report. `None` for a file that is not a SQLite database
+/// or whose header counts are stale.
 fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
-    let connection = open_read_only_probe(graph_db_path, BOUNDED_PROBE_BUSY_TIMEOUT).ok()?;
-    let page_size = pragma_u64(&connection, "page_size")?;
-    let page_count = pragma_u64(&connection, "page_count")?;
-    let freelist = pragma_u64(&connection, "freelist_count")?;
-    if page_size == 0 || page_count == 0 {
+    use std::io::Read as _;
+
+    let mut header = [0_u8; 100];
+    std::fs::File::open(graph_db_path)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    if &header[..16] != b"SQLite format 3\0" {
+        return None;
+    }
+    let field = |offset: usize| {
+        u32::from_be_bytes([
+            header[offset],
+            header[offset + 1],
+            header[offset + 2],
+            header[offset + 3],
+        ])
+    };
+    let page_size = match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65_536,
+        size => u64::from(size),
+    };
+    let page_count = u64::from(field(28));
+    let freelist = u64::from(field(36));
+    // The in-header page count is valid only when the version-valid-for
+    // number matches the change counter.
+    if field(92) != field(24) || page_size == 0 || page_count == 0 {
         return None;
     }
     let free_bytes = page_size.saturating_mul(freelist);
@@ -1850,6 +1871,41 @@ mod tests {
                 .exists(),
             "sizing must not write scratch into the store"
         );
+    }
+
+    /// Step 6: the report reads free pages from the file header, so it never
+    /// opens a SQLite reader on a live store. A store whose writer holds it
+    /// exclusively, which a reader could not open, still reports them.
+    #[asupersync::test]
+    async fn a_store_held_exclusively_by_its_writer_still_reports_free_pages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
+        seed_graph_db(&profile_root, "proj_a");
+        let writer = rusqlite::Connection::open(
+            profile_root
+                .join("projects")
+                .join("proj_a")
+                .join(tracedecay_runtime_core::config::DB_FILENAME),
+        )
+        .unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA locking_mode = EXCLUSIVE;
+                 INSERT INTO fixture (id) VALUES (1);",
+            )
+            .unwrap();
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+
+        assert_eq!(report.stores.len(), 1);
+        assert!(
+            report.stores[0].free_page_ratio.is_some(),
+            "sizing reads the header and waits on no lock the writer holds"
+        );
+        drop(writer);
     }
 
     /// A registered store whose graph database is unreadable still reports its

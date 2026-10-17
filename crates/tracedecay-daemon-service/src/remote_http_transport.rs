@@ -1140,8 +1140,15 @@ mod tests {
     /// Completes the handshake, sends `REQUEST` in the same flight as the
     /// client Finished, then holds the connection open until released, so the
     /// server sees no readiness edge after that flight. Reports on `sent` once
-    /// the `ClientHello` and once the final flight are on the wire.
-    fn hold_open_client(address: SocketAddr, sent: mpsc::Sender<()>, release: mpsc::Receiver<()>) {
+    /// the `ClientHello` and once the final flight are on the wire. Answers
+    /// the server's flight only once `answer` fires, so the listener's first
+    /// read cannot finish the handshake however its thread is scheduled.
+    fn hold_open_client(
+        address: SocketAddr,
+        sent: mpsc::Sender<()>,
+        answer: mpsc::Receiver<()>,
+        release: mpsc::Receiver<()>,
+    ) {
         let mut roots = rustls::RootCertStore::empty();
         roots
             .add(CertificateDer::from_pem_slice(TRUST_ROOT).unwrap())
@@ -1164,6 +1171,7 @@ mod tests {
             tls.write_tls(&mut socket).unwrap();
         }
         let _ = sent.send(());
+        let _ = answer.recv();
         while tls.is_handshaking() || tls.wants_write() {
             tls.complete_io(&mut socket).unwrap();
         }
@@ -1177,8 +1185,10 @@ mod tests {
         let listener = tls_listener(directory.path());
         let address = listener.bound_addr().unwrap();
         let (sent, _) = mpsc::channel();
+        let (answer, await_answer) = mpsc::channel();
         let (release, held) = mpsc::channel();
-        let client = std::thread::spawn(move || hold_open_client(address, sent, held));
+        let client =
+            std::thread::spawn(move || hold_open_client(address, sent, await_answer, held));
         let (mut io, _) = native_runtime::block_on(listener.accept())
             .unwrap()
             .expect("accepted connection");
@@ -1194,6 +1204,7 @@ mod tests {
                 .is_pending(),
             "the reader parks on the handshake"
         );
+        answer.send(()).unwrap();
         let mut seen = 0;
         while matches!(io.transport, RemoteBrainTlsTransport::Handshaking(_)) {
             seen = waker.wait_past(seen);
@@ -1229,8 +1240,10 @@ mod tests {
         let listener = tls_listener(directory.path()).with_deadlines(deadlines);
         let address = listener.bound_addr().unwrap();
         let (sent, client_sent) = mpsc::channel();
+        let (answer, await_answer) = mpsc::channel();
         let (release, held) = mpsc::channel();
-        let client = std::thread::spawn(move || hold_open_client(address, sent, held));
+        let client =
+            std::thread::spawn(move || hold_open_client(address, sent, await_answer, held));
         let (mut io, _) = native_runtime::block_on(listener.accept())
             .unwrap()
             .expect("accepted connection");
@@ -1251,6 +1264,7 @@ mod tests {
             first_read.is_pending(),
             "reading the waiting ClientHello restarts both read deadlines: {first_read:?}"
         );
+        answer.send(()).unwrap();
         client_sent.recv().expect("client sends its final flight");
         poll_late(deadlines.request_read * 3);
         let read = Pin::new(&mut io).poll_read(&mut context, &mut buffer);

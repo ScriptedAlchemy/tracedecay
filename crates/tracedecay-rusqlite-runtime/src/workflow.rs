@@ -434,28 +434,30 @@ fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
 }
 
 pub(crate) fn query_tx(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkQuery,
     sql: &str,
     params: Vec<ExactSqlValue>,
 ) -> Result<ExactSqlRows, ExactSqlError> {
-    transaction.query(statement(sql, params)?)
+    transaction.work_query(statement(sql, params)?)
 }
 
 pub(crate) fn execute_tx(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     sql: &str,
     params: Vec<ExactSqlValue>,
 ) -> Result<(), ExactSqlError> {
-    transaction.execute(statement(sql, params)?).map(|_| ())
+    transaction
+        .work_execute(statement(sql, params)?)
+        .map(|_| ())
 }
 
 fn execute_tx_changed(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     sql: &str,
     params: Vec<ExactSqlValue>,
 ) -> Result<usize, ExactSqlError> {
     transaction
-        .execute(statement(sql, params)?)
+        .work_execute(statement(sql, params)?)
         .map(|result| result.changed_rows)
 }
 

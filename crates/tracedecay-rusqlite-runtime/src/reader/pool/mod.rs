@@ -26,6 +26,7 @@ use crate::exact_sql::{
 };
 use crate::telemetry::{ReaderAdmissionRecorder, ReaderAdmissionSnapshot};
 use crate::{CheckpointBlocker, CheckpointBlockers, CheckpointPressure};
+use worker::SnapshotRevoker;
 
 mod lease;
 mod outcome;
@@ -76,21 +77,37 @@ pub(super) const DEFERRED_SNAPSHOT_END_LIMIT: Duration = Duration::from_secs(2);
 pub(super) const FOREGROUND_RESERVED_GENERAL_WORKERS: u16 = 2;
 const MAX_CHECKPOINT_BLOCKERS: usize = 16;
 
+/// One open snapshot: when it began, and how the checkpoint fence ends it.
+struct ActiveSnapshot {
+    started: Instant,
+    revoker: SnapshotRevoker,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ReaderCheckpointBlockers {
-    active: Arc<Mutex<BTreeMap<u64, Instant>>>,
+    active: Arc<Mutex<BTreeMap<u64, ActiveSnapshot>>>,
     /// Active snapshots whose lease already ended: the worker's rollback
     /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return thread.
     released: Arc<(Mutex<BTreeSet<u64>>, Condvar)>,
 }
 
 impl ReaderCheckpointBlockers {
-    pub(super) fn begin(&self, reader_id: u64) -> bool {
-        self.active
+    pub(super) fn begin(&self, reader_id: u64, revoker: SnapshotRevoker) -> bool {
+        let mut active = self
+            .active
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(reader_id, Instant::now())
-            .is_none()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.contains_key(&reader_id) {
+            return false;
+        }
+        active.insert(
+            reader_id,
+            ActiveSnapshot {
+                started: Instant::now(),
+                revoker,
+            },
+        );
+        true
     }
 
     pub(super) fn release(&self, reader_id: u64) {
@@ -139,18 +156,40 @@ impl CheckpointBlockerSource for ReaderCheckpointBlockers {
             .active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let blockers = active
+        // A revoked snapshot its worker already rolled back holds no WAL read
+        // slot, though its lease is still out.
+        let holding = active
+            .iter()
+            .filter(|(_, snapshot)| !snapshot.revoker.rolled_back())
+            .collect::<Vec<_>>();
+        let blockers = holding
             .iter()
             .take(MAX_CHECKPOINT_BLOCKERS)
-            .map(|(reader_id, started)| CheckpointBlocker::PhysicalReader {
-                reader_id: *reader_id,
-                age: now.saturating_duration_since(*started),
+            .map(|(reader_id, snapshot)| CheckpointBlocker::PhysicalReader {
+                reader_id: **reader_id,
+                age: now.saturating_duration_since(snapshot.started),
             })
             .collect();
         CheckpointBlockers {
             blockers,
-            omitted: active.len().saturating_sub(MAX_CHECKPOINT_BLOCKERS),
+            omitted: holding.len().saturating_sub(MAX_CHECKPOINT_BLOCKERS),
         }
+    }
+
+    fn revoke_snapshots_older_than(&self, age: Duration) -> usize {
+        let now = Instant::now();
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut revoked = 0;
+        for snapshot in active.values() {
+            if now.saturating_duration_since(snapshot.started) >= age {
+                snapshot.revoker.revoke();
+                revoked += 1;
+            }
+        }
+        revoked
     }
 
     /// A return thread writes off a worker that misses
@@ -568,11 +607,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         &self,
         priority: OperationPriorityV1,
         max_wait: Duration,
+        lifetime: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
             .map_err(map_reader_acquire_error)?;
-        lease.begin_exact_sql_snapshot()?;
+        lease.begin_exact_sql_snapshot(lifetime)?;
         self.record_snapshot_admission();
         Ok(ExactSqlReadSnapshot::new(move |statement, budget| {
             lease.execute_active_exact_sql_query(statement, budget)
@@ -591,7 +631,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             )
             .map_err(map_reader_acquire_error)?;
         lease.retire_after_snapshot();
-        lease.begin_exact_sql_snapshot()?;
+        lease.begin_exact_sql_snapshot(super::READ_SNAPSHOT_LIFETIME)?;
         self.record_snapshot_admission();
         Ok(ExactSqlReadSnapshot::new(move |statement, budget| {
             lease.execute_active_exact_sql_query(statement, budget)

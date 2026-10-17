@@ -86,6 +86,11 @@ pub enum DoctorStorageFindingKindV1 {
     /// running, or stopped on a failure. The daemon serves while they run, so
     /// this is the surface that says which store is still migrating and why.
     PendingSchemaMigration,
+    /// A store whose WAL checkpoint cannot restart the log because a reader
+    /// still holds a read slot past the checkpoint fence: a wedged reader of
+    /// this daemon or another process, named in the evidence. Writes run
+    /// until the WAL reaches its ceiling, then wait.
+    WalCheckpointPinned,
 }
 
 /// Exact Doctor evidence states.

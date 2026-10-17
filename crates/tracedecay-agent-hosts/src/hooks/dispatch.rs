@@ -11,7 +11,7 @@ use tracedecay_contracts::retrieval::{
     HookRuntimeDispositionV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
     HookV2ProfileAdmissionResultV1,
 };
-use tracedecay_domain::NativeHostIdentityV1;
+use tracedecay_domain::{HostIntegrationIdV1, NativeHostIdentityV1};
 use tracedecay_domain::{ProjectId, UtcMicros};
 #[cfg(test)]
 use tracedecay_hooks::HookImmediateAdmissionStateV1;
@@ -41,11 +41,10 @@ use super::daemon_ports::{
 
 pub(crate) enum HookDispatch {
     NotApplicable,
-    /// The native dispatcher recognised the event but could not take ownership of it, no
-    /// published binding, an unreadable store layout, or an envelope it could
-    /// not decode. The disposition is still worth recording, but the event has
-    /// not been admitted anywhere, so callers must fall back to their ordinary
-    /// daemon notification rather than treat the event as delivered.
+    /// The native dispatcher recognised the event but nothing admitted or
+    /// spooled it: an unreadable store layout, an envelope it could not
+    /// decode, or an unbound worktree whose daemon notification failed. The
+    /// event is dropped, and no later replay retries it.
     Unavailable(HookTransportDispositionV1),
     Handled {
         guidance: Option<String>,
@@ -472,9 +471,13 @@ pub(crate) async fn dispatch(
         }
         Err(_) => return unavailable(),
     };
-    let Some(prepared) = prepare_bound_hook(runtime, host, event_json, project_root, decoded)
-    else {
-        return unavailable();
+    let prepared = match prepare_bound_hook(runtime, host, event_json, project_root, decoded) {
+        Ok(prepared) => prepared,
+        Err(Unprepared::Unbound) => {
+            return notify_unbound_worktree(runtime, host, event_json, project_root, telemetry)
+                .await;
+        }
+        Err(Unprepared::Unavailable) => return unavailable(),
     };
     let native_session_id = prepared.native_session_id.clone();
     let native_lifecycle = prepared.native_lifecycle.clone();
@@ -608,14 +611,25 @@ pub(crate) async fn dispatch_opencode_tool_after(
         }
         Err(_) => return unavailable(),
     };
-    let Some(prepared) = prepare_bound_hook(
+    let prepared = match prepare_bound_hook(
         runtime,
         NativeHostIdentityV1::OpenCode,
         event_json,
         project_root,
         decoded,
-    ) else {
-        return unavailable();
+    ) {
+        Ok(prepared) => prepared,
+        Err(Unprepared::Unbound) => {
+            return notify_unbound_worktree(
+                runtime,
+                NativeHostIdentityV1::OpenCode,
+                event_json,
+                project_root,
+                telemetry,
+            )
+            .await;
+        }
+        Err(Unprepared::Unavailable) => return unavailable(),
     };
     let native_session_id = prepared.native_session_id.clone();
     let native_lifecycle = prepared.native_lifecycle.clone();
@@ -649,47 +663,129 @@ struct PreparedBoundHook {
     prepared_at: UtcMicros,
 }
 
+#[derive(Debug)]
+enum Unprepared {
+    /// The checkout belongs to a registered project, but the daemon has not
+    /// opened it, so no binding was published for its worktree. A linked
+    /// worktree an agent was just placed in starts here.
+    Unbound,
+    Unavailable,
+}
+
+/// An envelope cannot be built without the worktree's binding, and only the
+/// daemon publishes one, when it opens the checkout. The daemon notification
+/// opens it through the ordinary project route, publishing the bindings every
+/// later hook admits through, and queues the saved path for a targeted sync.
+async fn notify_unbound_worktree(
+    runtime: &HookRuntimeV1,
+    host: NativeHostIdentityV1,
+    event_json: &str,
+    project_root: &Path,
+    telemetry: Option<&HookTimingSpan>,
+) -> HookDispatch {
+    let agent = match host {
+        NativeHostIdentityV1::ClaudeCode => HostIntegrationIdV1::Claude,
+        NativeHostIdentityV1::Codex => HostIntegrationIdV1::Codex,
+        NativeHostIdentityV1::CursorDesktop | NativeHostIdentityV1::CursorCloud => {
+            HostIntegrationIdV1::Cursor
+        }
+        NativeHostIdentityV1::Hermes => HostIntegrationIdV1::Hermes,
+        NativeHostIdentityV1::Kiro => HostIntegrationIdV1::Kiro,
+        NativeHostIdentityV1::Pi => HostIntegrationIdV1::Pi,
+        // ponytail: the notification wire names only these integrations;
+        // hosts outside it keep dropping edits in unbound worktrees until
+        // their first other daemon contact opens the checkout.
+        _ => return unavailable(),
+    };
+    // Only an edit owes the index a change; other events wait for the first
+    // edit to bind the worktree.
+    let Some(rel_path) = serde_json::from_str::<NativeIdentityFields>(event_json)
+        .ok()
+        .and_then(|fields| {
+            let path = Path::new(fields.file_path()?);
+            path.strip_prefix(project_root)
+                .ok()
+                .or_else(|| path.is_relative().then_some(path))?
+                .to_str()
+                .map(str::to_owned)
+        })
+    else {
+        return unavailable();
+    };
+    let event = tracedecay_hooks::DaemonHookEvent::post_tool_use_edit(
+        agent,
+        vec![rel_path],
+        project_root.to_path_buf(),
+    );
+    let outcome = match telemetry {
+        Some(telemetry) => {
+            super::notify_hook_event_with_telemetry(runtime, project_root, event, telemetry).await
+        }
+        None => (runtime.event_notifier)(&runtime.profile, project_root, event).await,
+    };
+    match outcome {
+        tracedecay_hooks::HookEventNotifyOutcomeV1::Delivered => HookDispatch::Handled {
+            guidance: None,
+            disposition: HookTransportDispositionV1::Accepted,
+        },
+        tracedecay_hooks::HookEventNotifyOutcomeV1::Unavailable
+        | tracedecay_hooks::HookEventNotifyOutcomeV1::Malformed => unavailable(),
+    }
+}
+
 fn prepare_bound_hook(
     runtime: &HookRuntimeV1,
     host: NativeHostIdentityV1,
     event_json: &str,
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
-) -> Option<PreparedBoundHook> {
+) -> Result<PreparedBoundHook, Unprepared> {
     if !runtime.profile.data_dir().is_dir() {
-        return None;
+        return Err(Unprepared::Unavailable);
     }
     let lease = match try_acquire_shared_for_profile(runtime.profile.data_dir(), "hook dispatch") {
         Ok(SharedLeaseAttempt::Acquired(lease)) => lease,
-        Ok(SharedLeaseAttempt::Busy) => return None,
+        Ok(SharedLeaseAttempt::Busy) => return Err(Unprepared::Unavailable),
         Err(error) => {
             tracing::warn!(event = "hook_dispatch_lease_failed", %error);
-            return None;
+            return Err(Unprepared::Unavailable);
         }
     };
-    let layout = super::store_layout::layout(runtime.profile.data_dir(), project_root)?;
-    let worktree_id = worktree_id_for_layout(runtime, &layout).ok()?;
+    let layout = super::store_layout::layout(runtime.profile.data_dir(), project_root)
+        .ok_or(Unprepared::Unavailable)?;
+    let worktree_id =
+        worktree_id_for_layout(runtime, &layout).map_err(|_| Unprepared::Unavailable)?;
     let config_path =
         tracedecay_hooks::hook_configuration_path(&layout.data_root, worktree_id, host);
     let subscriber =
         HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(config_path));
     let now = now_utc();
-    let HookConfigurationReadOutcomeV1::Bound(snapshot) = subscriber.load_current(host, now) else {
-        return None;
+    let snapshot = match subscriber.load_current(host, now) {
+        HookConfigurationReadOutcomeV1::Bound(snapshot) => snapshot,
+        HookConfigurationReadOutcomeV1::Missing | HookConfigurationReadOutcomeV1::Stale => {
+            return Err(Unprepared::Unbound);
+        }
+        HookConfigurationReadOutcomeV1::Corrupted | HookConfigurationReadOutcomeV1::Unavailable => {
+            return Err(Unprepared::Unavailable);
+        }
     };
     let binding = &snapshot.binding;
-    let native_fields = serde_json::from_str::<NativeIdentityFields>(event_json).ok()?;
+    let native_fields = serde_json::from_str::<NativeIdentityFields>(event_json)
+        .map_err(|_| Unprepared::Unavailable)?;
     let native_session_id = native_fields.session_id().map(str::to_owned);
-    let material = native_material(&native_fields, decoded.family(), event_json.as_bytes(), now)?;
+    let material = native_material(&native_fields, decoded.family(), event_json.as_bytes(), now)
+        .ok_or(Unprepared::Unavailable)?;
     let native_lifecycle = native_context_scout_lifecycle(host, &native_fields, material.event_id);
-    let envelope = decoded.into_envelope(binding, material).ok()?;
+    let envelope = decoded
+        .into_envelope(binding, material)
+        .map_err(|_| Unprepared::Unavailable)?;
     let envelope =
         match replay_envelope_if_pending(&layout.data_root, host, binding, &envelope, now) {
             PendingEnvelopeV1::Missing => envelope,
             PendingEnvelopeV1::Exact(queued) => queued,
-            PendingEnvelopeV1::Unavailable => return None,
+            PendingEnvelopeV1::Unavailable => return Err(Unprepared::Unavailable),
         };
-    Some(PreparedBoundHook {
+    Ok(PreparedBoundHook {
         lease,
         host,
         layout,

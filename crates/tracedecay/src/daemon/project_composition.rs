@@ -1577,10 +1577,7 @@ impl ProjectOpenInputs<'_> {
             })?;
         self.log_phase("source_edit_preview_ready", None, full_setup_started);
         project_open_cancellation_checkpoint(self.cancellation)?;
-        let http_registry = self.http_application_registry.clone();
-        let http_owner = self.store_administration.owner_profile()?.clone();
-        let http_project_id = core.project_id.clone();
-        let http_project_path = self.canonical_project_path.to_path_buf();
+        let http_owner = self.store_administration.owner_profile()?;
         join_independent_full_owner_mounts(
             async {
                 let state = project_open_owners::register_project_open_production_owners(
@@ -1609,20 +1606,15 @@ impl ProjectOpenInputs<'_> {
                 self.log_phase("production_owners_registered", None, full_setup_started);
                 Ok(())
             },
-            async move {
+            async {
                 mount_http_application_router(
-                    &http_registry,
-                    &http_owner,
-                    &http_project_id,
-                    &http_project_path,
+                    self.http_application_registry,
+                    http_owner,
+                    &core.project_id,
+                    self.canonical_project_path,
                 )
                 .await?;
-                log_project_open_phase(
-                    &http_project_path,
-                    "http_application_mounted",
-                    None,
-                    full_setup_started,
-                );
+                self.log_phase("http_application_mounted", None, full_setup_started);
                 Ok(())
             },
         )
@@ -1739,10 +1731,14 @@ impl ProjectOpenInputs<'_> {
             Arc::new(move || {
                 let unconverged = registry.unconverged_registered_schemas();
                 tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
-                    storage:
+                    storage: tracedecay_contracts::doctor::merge_storage_reads(
                         tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
                             &unconverged,
                         ),
+                        tracedecay_daemon_service::doctor_kernel::wal_checkpoint_pinned_read(
+                            &registry.runtime_telemetry(),
+                        ),
+                    ),
                     findings: registry.registered_schema_convergence_observations(),
                 }
             })

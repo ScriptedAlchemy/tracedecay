@@ -14,8 +14,8 @@ use tracedecay_domain::{
 
 use crate::work::work_authority;
 use crate::{
-    ApplicationProblem, RequestContext, SafeDiagnostic, WorkAttemptEffectStorageErrorV1,
-    WorkAttemptEffectStoragePortV1, WorkAttemptListCoverageV1, WorkAttemptListV1,
+    ApplicationProblem, RequestContext, SafeDiagnostic, WorkAttemptEffectReadPortV1,
+    WorkAttemptEffectStorageErrorV1, WorkAttemptListCoverageV1, WorkAttemptListV1,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -85,7 +85,7 @@ pub fn project_work_execution_history<S>(
     attempts: WorkAttemptListV1,
 ) -> Result<WorkExecutionHistoryV1, ApplicationProblem>
 where
-    S: WorkAttemptEffectStoragePortV1,
+    S: WorkAttemptEffectReadPortV1,
 {
     let authority = work_authority(context)?;
     let WorkAttemptListV1::Listed {

@@ -282,6 +282,58 @@ pub fn pending_schema_migration_read(
     storage_family_read(findings)
 }
 
+/// Report the shards whose WAL checkpoint fence expired with a read slot still
+/// held (#4097). Each finding names the holders the writer saw: a reader of
+/// this daemon by id, or another process by command name and pid.
+#[must_use]
+pub fn wal_checkpoint_pinned_read(
+    telemetry: &tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryProjection,
+) -> DoctorStorageFamilyReadV1 {
+    use tracedecay_contracts::storage::{StoreKeyV1, wal_checkpoint_pinned_finding};
+    use tracedecay_runtime_core::shard_runtime::registry::{CheckpointBlocker, CheckpointPressure};
+
+    let mut findings = Vec::new();
+    for shard in &telemetry.shards {
+        let Some(CheckpointPressure::FenceExpired { wal, holders }) = shard
+            .writer
+            .as_ref()
+            .map(|writer| &writer.checkpoint_pressure)
+        else {
+            continue;
+        };
+        let mut named = holders
+            .blockers
+            .iter()
+            .map(|holder| match holder {
+                CheckpointBlocker::SnapshotLease { lease_id, .. } => {
+                    format!("lease:{}", lease_id.as_str())
+                }
+                CheckpointBlocker::PhysicalReader { reader_id, .. } => {
+                    format!("reader:{reader_id}")
+                }
+                CheckpointBlocker::ForeignConnection { pid, process } => {
+                    format!("process:{process}[{pid}]")
+                }
+            })
+            .collect::<Vec<_>>();
+        if holders.omitted > 0 {
+            named.push(format!("+{}", holders.omitted));
+        }
+        if named.is_empty() {
+            named.push("unnamed".to_owned());
+        }
+        let Ok(store) = StoreKeyV1::new(format!("{:?}", shard.binding.shard_id)) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let detail = format!("wal_bytes={}.held_by={}", wal.bytes, named.join(","));
+        let Ok(finding) = wal_checkpoint_pinned_finding(&store, &detail) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
 pub struct SchemaConvergenceDoctorReadV1 {
     pub storage: DoctorStorageFamilyReadV1,
     pub findings: Vec<SchemaConvergenceFindingV1>,

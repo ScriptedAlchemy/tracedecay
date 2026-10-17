@@ -1069,7 +1069,6 @@ impl<'a> CatalogCarry<'a> {
             semantic_edges,
             dependency_edge_counts,
             file_dependencies,
-            heap: None,
         };
         // Every entity is a file, a symbol, an import, or the generation
         // marker: what a scan of the successor would have counted.

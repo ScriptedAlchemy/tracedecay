@@ -140,9 +140,23 @@ pub trait WorkRunControlTransitionPort {
     ) -> Result<(), WorkRunControlStorageError>;
 }
 
+/// The control read a reservation fence makes. It carries no `Send + Sync`
+/// bound so the reservation can be fenced inside the writer job that admits
+/// the attempt.
+pub trait WorkRunReservationPort {
+    /// The published control row for one run, or `None` when the run has never
+    /// been controlled.
+    fn load_run_control(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError>;
+}
+
 /// The durable run-control rows and the attempt evidence they are derived
 /// from.
-pub trait WorkRunControlStoragePort: Send + Sync {
+pub trait WorkRunControlStoragePort: WorkRunReservationPort + Send + Sync {
     /// The admitted deadline and live attempt frontier for one run, or `None`
     /// when the run holds no durable attempt at all. Retry-superseded recovery
     /// records still count toward history, but are absent from the frontier.
@@ -152,15 +166,6 @@ pub trait WorkRunControlStoragePort: Send + Sync {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError>;
-
-    /// The published control row for one run, or `None` when the run has never
-    /// been controlled.
-    fn load_run_control(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError>;
 
     /// Publishes `next` under a compare-and-swap on the authority version the
     /// caller read. `expected` is `None` only for the first publication.
@@ -446,35 +451,8 @@ where
 
 impl<S> WorkRunControlService<S>
 where
-    S: WorkRunControlStoragePort,
+    S: WorkRunReservationPort,
 {
-    /// Reads the published control state for one run.
-    #[tracing::instrument(name = "application.work.run_control.read", level = "trace", skip_all)]
-    pub fn read(
-        &self,
-        context: &RequestContext,
-        request: &WorkRunControlRequestV1,
-    ) -> Result<WorkRunControlReadingV1, ApplicationProblem> {
-        let authority = work_authority(context)?;
-        let admission = self.require_admission(&authority, &request.task_id, &request.run_id)?;
-        let control = self
-            .storage
-            .load_run_control(&authority, &request.task_id, &request.run_id)
-            .map_err(ApplicationProblem::from)?;
-        Ok(match control {
-            Some(control) => WorkRunControlReadingV1::Controlled {
-                control,
-                live_attempts: admission.live_attempts,
-                total_attempts: admission.total_attempts,
-            },
-            None => WorkRunControlReadingV1::Uncontrolled {
-                deadline: admission.deadline,
-                live_attempts: admission.live_attempts,
-                total_attempts: admission.total_attempts,
-            },
-        })
-    }
-
     /// Refuses a new attempt reservation while the run is paused.
     ///
     /// This is the fence Plan 32 requires: "pause and cancellation fence new
@@ -503,6 +481,38 @@ where
             )),
             Some(_) | None => Ok(()),
         }
+    }
+}
+
+impl<S> WorkRunControlService<S>
+where
+    S: WorkRunControlStoragePort,
+{
+    /// Reads the published control state for one run.
+    #[tracing::instrument(name = "application.work.run_control.read", level = "trace", skip_all)]
+    pub fn read(
+        &self,
+        context: &RequestContext,
+        request: &WorkRunControlRequestV1,
+    ) -> Result<WorkRunControlReadingV1, ApplicationProblem> {
+        let authority = work_authority(context)?;
+        let admission = self.require_admission(&authority, &request.task_id, &request.run_id)?;
+        let control = self
+            .storage
+            .load_run_control(&authority, &request.task_id, &request.run_id)
+            .map_err(ApplicationProblem::from)?;
+        Ok(match control {
+            Some(control) => WorkRunControlReadingV1::Controlled {
+                control,
+                live_attempts: admission.live_attempts,
+                total_attempts: admission.total_attempts,
+            },
+            None => WorkRunControlReadingV1::Uncontrolled {
+                deadline: admission.deadline,
+                live_attempts: admission.live_attempts,
+                total_attempts: admission.total_attempts,
+            },
+        })
     }
 
     /// Reads the next bounded, cyclic recovery page of settled interval

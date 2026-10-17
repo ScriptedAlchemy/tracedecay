@@ -719,6 +719,47 @@ changes a file that holds memory.
   before store close could still be unwinding the tasks that held their leases,
   and `graceful_stop_truncates_profile_and_project_store_wals` failed. This is an
   interim remedy; the step 7 executor owns close.
+- Step 6, first slice (2026-10-17, branch `fix/storage-bounded-hard-drain`). The
+  hard-pressure drain gets the section 3 fence on today's writer, ahead of the
+  executor, because the live #4097 incident (a 229 MB WAL pending for 6.8 hours
+  through 245,264 retry wakes) cannot wait for step 7:
+  - Past one read deadline (5 s) the fence revokes this pool's snapshots that are
+    older than it: the worker interrupts any running statement, rolls the read
+    back, and the snapshot's later reads fail as `SnapshotExpired`.
+  - A fence lasts at most 6 s. Then whatever still holds the WAL is named (a
+    reader by id, or another process by command and pid from `/proc`), the fence
+    drops, writes resume, and the checkpoint retries with backoff from 1 s to
+    60 s. Past twice the hard limit (512 MiB at the default) writes wait again,
+    so the WAL stays bounded and nothing spins.
+  - The expired fence publishes `CheckpointPressure::FenceExpired`, which status
+    reports as `fence_expired` and Doctor reports as a `WalCheckpointPinned`
+    storage finding naming the holders.
+  Step 7 moves this policy onto lanes unchanged; only the 100 ms interval and the
+  hard limit become the class soft limits.
+- Step 6, snapshot lifetimes (2026-10-17, branch `refactor/storage-snapshot-deadlines`).
+  Every read snapshot ends itself when it has sat 30 s with no statement running
+  (`READ_SNAPSHOT_IDLE_LIMIT`) or 1 hour after it began (`READ_SNAPSHOT_LIFETIME`),
+  whichever comes first. The reader worker rolls it back with the same machinery
+  the fence uses to revoke one, and every statement on it also stops at the
+  1-hour end. So a forgotten snapshot, or one held across unrelated work, frees the
+  WAL within 30 s, while a legitimately long read of a 5.5 GB store (a convergence
+  audit, a dbstat walk of 64-95 s, a paged rebuild) keeps working as long as it
+  keeps issuing statements; each single statement keeps its own budget (30 s per
+  request statement, none for convergence). A fixed 30 s total lifetime was
+  considered and rejected: it would fail legitimate multi-statement reads on large
+  profiles. The session temporal refresh dropped its verification snapshot before
+  its commit phase, which it used to hold through. The design's 2 s and 5 s
+  deadlines apply to read jobs, which arrive with the executor (step 7).
+- Step 6, foreign readers (2026-10-17, branch `fix/storage-report-header-free-pages`).
+  The storage report sized each registered store's free pages by opening its own
+  read-only SQLite connection, a reader outside the daemon's pool on a live file.
+  It now reads the free-page and page counts from the database header with a plain
+  file read, which takes no lock and no WAL read slot. The open probe and its
+  pragma helper had no other caller and are deleted. `sqlite_read_snapshot` stays
+  for now: its remaining production uses read a private copy (the report's
+  `global.db` rows) or a store the daemon does not mount (orphan collection's
+  memory check), and neither holds a read slot on a live file. It goes with step
+  8, where a project directory describes itself and memory has its own file.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose

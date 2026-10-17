@@ -97,8 +97,9 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
             _: &'a ProfileRoot,
             _: &'a Path,
             _: DaemonHookEvent,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        ) -> Pin<Box<dyn Future<Output = tracedecay_hooks::HookEventNotifyOutcomeV1> + Send + 'a>>
+        {
+            Box::pin(async { tracedecay_hooks::HookEventNotifyOutcomeV1::Unavailable })
         }
         fn initialized(_: &ProfileRoot, _: &Path) -> bool {
             false

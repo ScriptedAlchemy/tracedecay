@@ -2065,7 +2065,7 @@ export type DoctorReportEntryV1 = {
   storage_kind: DoctorStorageFindingKindV1 | null;
 };
 
-export type DoctorStorageFindingKindV1 = "over_budget_store" | "orphan_store" | "incident_debris_present" | "retention_backlog" | "table_growth" | "pending_schema_migration";
+export type DoctorStorageFindingKindV1 = "over_budget_store" | "orphan_store" | "incident_debris_present" | "retention_backlog" | "table_growth" | "pending_schema_migration" | "wal_checkpoint_pinned";
 
 export type DuplicateEffectOutcomeV1 = "committed" | "not_applicable" | "prevented" | "unknown";
 
