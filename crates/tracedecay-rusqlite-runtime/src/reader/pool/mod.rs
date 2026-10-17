@@ -8,7 +8,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Condvar, Mutex, Weak},
-    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -87,8 +86,10 @@ struct ActiveSnapshot {
 pub(crate) struct ReaderCheckpointBlockers {
     active: Arc<Mutex<BTreeMap<u64, ActiveSnapshot>>>,
     /// Active snapshots whose lease already ended: the worker's rollback
-    /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return thread.
+    /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return task.
     released: Arc<(Mutex<BTreeSet<u64>>, Condvar)>,
+    /// Signalled with the condvar, for the writer task's await.
+    finished: Arc<asupersync::sync::Notify>,
 }
 
 impl ReaderCheckpointBlockers {
@@ -130,6 +131,7 @@ impl ReaderCheckpointBlockers {
             .remove(&reader_id)
         {
             settled.notify_all();
+            self.finished.notify_waiters();
         }
     }
 
@@ -192,20 +194,27 @@ impl CheckpointBlockerSource for ReaderCheckpointBlockers {
         revoked
     }
 
-    /// A return thread writes off a worker that misses
+    /// A return task writes off a worker that misses
     /// [`DEFERRED_SNAPSHOT_END_LIMIT`], so the wait shares that bound; a
     /// reader still pinned past it is reported by the checkpoint itself.
-    fn await_released_snapshots(&self) {
-        let (released, settled) = &*self.released;
-        let released = released
+    fn await_released_snapshots(&self) -> futures_util::future::BoxFuture<'static, ()> {
+        let released = Arc::clone(&self.released);
+        let finished = Arc::clone(&self.finished);
+        let awaited = released
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let awaited = released.clone();
-        let _ = settled
-            .wait_timeout_while(released, DEFERRED_SNAPSHOT_END_LIMIT, |released| {
-                !released.is_disjoint(&awaited)
-            })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move {
+            let settled = finished.wait_until(|| {
+                released
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_disjoint(&awaited)
+            });
+            let _ = crate::storage_pool::timeout(DEFERRED_SNAPSHOT_END_LIMIT, settled).await;
+        })
     }
 }
 
@@ -251,8 +260,18 @@ impl LaneAdmission {
 
 pub(super) struct WorkerRecord {
     pub(super) client: worker::WorkerClient,
-    pub(super) join: Option<JoinHandle<()>>,
+    pub(super) join: Option<crate::storage_pool::PoolTask>,
     lane: ReaderLane,
+}
+
+/// Waits for a shut-down worker's task to end. A pool thread cannot wait on a
+/// pool task, so there the task is left to end on its own.
+pub(super) fn join_worker(record: &mut WorkerRecord) {
+    if let Some(join) = record.join.take()
+        && !crate::storage_pool::on_pool()
+    {
+        let _ = join.join();
+    }
 }
 
 #[derive(Clone)]
@@ -448,9 +467,7 @@ impl<E: ReaderQueryExecutor> Drop for PoolInner<E> {
             record.client.shutdown();
         }
         for mut record in records.into_values() {
-            if let Some(join) = record.join.take() {
-                let _ = join.join();
-            }
+            join_worker(&mut record);
         }
     }
 }
@@ -824,12 +841,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     /// Every lane-state transition that feeds quiescence (lease returns,
     /// opens, limbo resolution) notifies `capacity_changed`, so the wait is
     /// event-driven. The one exception is the final strong-count handoff:
-    /// the deferred-return thread drops its pool reference immediately after
+    /// the deferred-return task drops its pool reference immediately after
     /// its notification, and that drop has no event, so the tail of this wait
     /// yields across a window of a few instructions.
     ///
     /// There is no bound: a deferred return always resolves its limbo, and a
-    /// host under load can stall that thread for tens of seconds.
+    /// host under load can stall that task for tens of seconds.
     #[cfg(test)]
     pub(crate) fn wait_until_quiescent(&self) {
         fn lanes_busy(state: &PoolState) -> bool {
@@ -923,6 +940,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     where
         F: FnMut() -> Option<UnavailableReasonV1>,
     {
+        crate::storage_pool::debug_assert_off_pool();
         let lane = admission.lane;
         let lease_ceiling = self.lease_ceiling(admission);
         let mut waiting = WaitingGuard::new(&self.inner, lane);
@@ -1135,9 +1153,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             record.client.shutdown();
         }
         for record in &mut retired {
-            if let Some(join) = record.join.take() {
-                let _ = join.join();
-            }
+            join_worker(record);
         }
         retired.len()
     }

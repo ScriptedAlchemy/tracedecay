@@ -33,6 +33,14 @@ impl Drop for LockWorkScope {
     }
 }
 
+/// Exchanges this thread's lock-work state with `saved`: active, encoded,
+/// decoded.
+pub(crate) fn swap(saved: &mut (bool, u64, u64)) {
+    saved.0 = ACTIVE.replace(saved.0);
+    saved.1 = ENCODED.replace(saved.1);
+    saved.2 = DECODED.replace(saved.2);
+}
+
 pub(crate) fn record_encoded_bytes(bytes: u64) {
     if ACTIVE.with(Cell::get) {
         ENCODED.with(|cell| cell.set(cell.get().saturating_add(bytes)));

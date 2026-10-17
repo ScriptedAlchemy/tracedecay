@@ -5,7 +5,7 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, atomic::AtomicBool, mpsc},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -40,6 +40,8 @@ const ROW_ALLOCATION_OVERHEAD: usize =
 const CELL_ALLOCATION_OVERHEAD: usize = std::mem::size_of::<ExactSqlValue>();
 
 mod clock;
+#[cfg(test)]
+pub(crate) use clock::fake::TaskClock;
 mod column;
 mod command;
 mod guard;
@@ -118,6 +120,7 @@ pub struct ExactSqlHandle {
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
+    crate::storage_pool::debug_assert_off_pool();
     if asupersync::runtime::Runtime::current_handle().is_some() {
         NATIVE_THREAD_WRITER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if record_native_thread_wait("writer", std::panic::Location::caller()) {
@@ -784,7 +787,7 @@ impl ExactSqlHandle {
         ),
         ExactSqlError,
     > {
-        let (commands, receiver) = mpsc::sync_channel(1);
+        let (commands, receiver) = async_channel::bounded(1);
         let (reply, response) = async_channel::bounded(1);
         let lease = Arc::new(TransactionLeaseState::default());
         self.writer
@@ -910,7 +913,7 @@ impl ExactSqlReadSnapshot {
 }
 
 pub struct ExactSqlTransaction {
-    commands: Option<mpsc::SyncSender<TransactionCommand>>,
+    commands: Option<async_channel::Sender<TransactionCommand>>,
     lease: Arc<TransactionLeaseState>,
     policy: TransactionPolicy,
 }
@@ -1574,12 +1577,12 @@ fn settled_rollback_or_terminal_error(
 }
 
 fn map_transaction_send_error(
-    error: mpsc::TrySendError<TransactionCommand>,
+    error: async_channel::TrySendError<TransactionCommand>,
     lease: &TransactionLeaseState,
 ) -> ExactSqlError {
     match error {
-        mpsc::TrySendError::Full(_) => ExactSqlError::Busy,
-        mpsc::TrySendError::Disconnected(_) => transaction_terminal_error(lease),
+        async_channel::TrySendError::Full(_) => ExactSqlError::Busy,
+        async_channel::TrySendError::Closed(_) => transaction_terminal_error(lease),
     }
 }
 

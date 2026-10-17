@@ -16,7 +16,6 @@ use std::{
         atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc as std_mpsc,
     },
-    thread::{self, JoinHandle},
 };
 
 use asupersync::{
@@ -57,7 +56,9 @@ impl CheckpointBlockerSource for NoCheckpointBlockers {
         CheckpointBlockers::default()
     }
 
-    fn await_released_snapshots(&self) {}
+    fn await_released_snapshots(&self) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(std::future::ready(()))
+    }
 }
 
 impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
@@ -287,7 +288,6 @@ pub enum WriterStartError {
     LocatorPathIsNotAbsolute,
     LocatorPathMissing,
     LocatorPathIsNotFile,
-    ThreadSpawn(std::io::Error),
     StartupChannelClosed,
     OpenFailed,
     /// Carries the connection-policy stage that actually failed. Collapsing
@@ -318,9 +318,8 @@ impl fmt::Display for WriterStartError {
             }
             Self::LocatorPathMissing => f.write_str("verified SQLite path is missing"),
             Self::LocatorPathIsNotFile => f.write_str("verified SQLite path is not a regular file"),
-            Self::ThreadSpawn(error) => write!(f, "failed to start SQLite writer thread: {error}"),
             Self::StartupChannelClosed => {
-                f.write_str("SQLite writer thread exited before reporting startup")
+                f.write_str("SQLite writer task exited before reporting startup")
             }
             Self::OpenFailed => f.write_str("failed to open verified SQLite store"),
             Self::ConnectionPolicyFailed(detail) => {
@@ -354,7 +353,6 @@ impl Error for WriterStartError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidAdmission(error) => Some(error),
-            Self::ThreadSpawn(error) => Some(error),
             Self::OpenedDatabaseIdentity(error) => Some(error),
             _ => None,
         }
@@ -371,7 +369,7 @@ pub enum WriterActorError {
     StorageFailure(StorageRuntimeErrorV1),
     IncrementalVacuumFailed(String),
     InvalidWorkerOutcome(StorageRuntimeContractErrorV1),
-    ThreadPanicked,
+    TaskPanicked,
 }
 
 impl fmt::Display for WriterActorError {
@@ -393,7 +391,7 @@ impl fmt::Display for WriterActorError {
             Self::InvalidWorkerOutcome(error) => {
                 write!(f, "SQLite writer returned an invalid outcome: {error}")
             }
-            Self::ThreadPanicked => f.write_str("SQLite writer thread panicked"),
+            Self::TaskPanicked => f.write_str("SQLite writer task panicked"),
         }
     }
 }
@@ -448,7 +446,7 @@ pub struct PersistentWriter {
     incremental_vacuum_sender: Mutex<Option<mpsc::Sender<IncrementalVacuumCommand>>>,
     checkpoint_sender: Mutex<Option<mpsc::Sender<CheckpointCommand>>>,
     shutdown_sender: Option<mpsc::UnboundedSender<()>>,
-    join: Option<JoinHandle<()>>,
+    join: Option<crate::storage_pool::PoolTask>,
     admission: Admission,
     telemetry: WriterTelemetry,
     checkpoint_status: watch::Receiver<CheckpointStatus>,
@@ -560,10 +558,9 @@ impl PersistentWriter {
             checkpoint_blockers,
             started: started_tx,
         };
-        let join = thread::Builder::new()
-            .name("tracedecay-rusqlite-writer".to_owned())
-            .spawn(move || worker.run())
-            .map_err(WriterStartError::ThreadSpawn)?;
+        let join = crate::storage_pool::spawn(worker.run())
+            .map_err(|_| WriterStartError::RuntimeUnavailable)?;
+        crate::storage_pool::debug_assert_off_pool();
         match started_rx.recv() {
             Ok(Ok(opened_file_identity)) => Ok(Self {
                 binding,
@@ -832,7 +829,7 @@ impl PersistentWriter {
 
     fn join_worker(&mut self) -> Result<(), WriterActorError> {
         if let Some(join) = self.join.take() {
-            join.join().map_err(|_| WriterActorError::ThreadPanicked)?;
+            join.join().map_err(|_| WriterActorError::TaskPanicked)?;
         }
         Ok(())
     }
@@ -842,7 +839,11 @@ impl Drop for PersistentWriter {
     fn drop(&mut self) {
         self.begin_drain();
         self.request_shutdown();
-        let _ = self.join_worker();
+        // A pool thread cannot wait on a pool task; the shutdown already sent
+        // ends the detached task on its own.
+        if !crate::storage_pool::on_pool() {
+            let _ = self.join_worker();
+        }
     }
 }
 

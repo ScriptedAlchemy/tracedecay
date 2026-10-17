@@ -1,7 +1,7 @@
 //! Bounded, snapshot-coherent readers for one already-authorized SQLite shard.
 //!
 //! The pool accepts only an explicit verified locator. Every SQLite open occurs
-//! on a dedicated worker thread, and every query is selected by the closed
+//! in a worker task on the storage pool, and every query is selected by the closed
 //! [`RuntimeReadRequestV1`] contract rather than caller-provided SQL.
 
 mod locator;

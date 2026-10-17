@@ -1,14 +1,13 @@
-//! What the writer thread receives, and how it runs one write transaction.
+//! What the writer task receives, and how it runs one write transaction.
 //!
 //! The handle side of the transport only sends [`WriterCommand`]s; everything
-//! that touches the writer's connection happens here, on the writer thread, so
+//! that touches the writer's connection happens here, in the writer task, so
 //! a caller never holds the connection across a channel.
 
 use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, RecvTimeoutError},
     },
     time::{Duration, Instant},
 };
@@ -25,7 +24,9 @@ use super::{
     execute_query_unchecked, execute_request, sqlite_error, verify_write_authority,
 };
 use crate::connection::ConnectionMode;
+use crate::storage_pool::TaskTransaction;
 use rusqlite::limits::Limit;
+use tracing::Instrument;
 
 pub(crate) enum WriterCommand {
     Dispatch {
@@ -36,7 +37,7 @@ pub(crate) enum WriterCommand {
     BeginTransaction {
         behavior: TransactionBehavior,
         policy: TransactionPolicy,
-        receiver: Receiver<TransactionCommand>,
+        receiver: async_channel::Receiver<TransactionCommand>,
         reply: async_channel::Sender<Result<(), ExactSqlError>>,
         lease: Arc<TransactionLeaseState>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
@@ -294,14 +295,14 @@ impl TransactionLeaseState {
 /// commit's `SQLite` work in the writer telemetry snapshot, instead of racing
 /// the worker and reading it into a later window.
 #[must_use = "the caller is waiting for this reply"]
-pub(crate) struct DeferredReply(Option<Box<dyn FnOnce()>>);
+pub(crate) struct DeferredReply(Option<Box<dyn FnOnce() + Send>>);
 
 impl DeferredReply {
     fn none() -> Self {
         Self(None)
     }
 
-    fn new<T: 'static>(reply: async_channel::Sender<T>, value: T) -> Self {
+    fn new<T: Send + 'static>(reply: async_channel::Sender<T>, value: T) -> Self {
         Self(Some(Box::new(move || {
             let _ = reply.try_send(value);
         })))
@@ -337,7 +338,7 @@ pub(crate) enum TransactionCommand {
     level = "trace",
     skip_all
 )]
-pub(crate) fn run_writer_command(
+pub(crate) async fn run_writer_command(
     connection: &mut Connection,
     command: WriterCommand,
     shutdown_requested: &Arc<AtomicBool>,
@@ -433,36 +434,42 @@ pub(crate) fn run_writer_command(
             // that follows. Only its terminal answer waits for the telemetry.
             let completion = {
                 let before = connection.total_changes();
-                match begin_transaction_with_busy_retry(
+                let begun = begin_transaction_with_busy_retry(
                     connection,
                     behavior,
                     shutdown_requested,
                     || reply.is_closed(),
-                ) {
-                    // The whole writer-thread hold of one interactive
-                    // transaction, caller think-time included. Every queued
-                    // write and command behind it waits inside this span, so
-                    // it, not SQLite execution, is what explains begin
-                    // latency elsewhere while an interactive lease is open.
+                )
+                .map(TaskTransaction::new);
+                match begun {
+                    // The whole writer hold of one interactive transaction,
+                    // caller think-time included. Every queued write and
+                    // command behind it waits inside this span, so it, not
+                    // SQLite execution, is what explains begin latency
+                    // elsewhere while an interactive lease is open.
                     Ok(transaction) => {
                         // The lease starts before the caller learns it holds
                         // the transaction, so no command it sends can predate
                         // the deadlines that command is checked against.
                         let opened_at = clock::now();
-                        reply.try_send(Ok(())).is_ok().then(|| {
-                            let _span =
-                                tracing::trace_span!("rusqlite.exact_sql.transaction").entered();
-                            run_transaction(
-                                transaction,
-                                opened_at,
-                                receiver,
-                                before,
-                                shutdown_requested,
-                                &lease,
-                                authority,
-                                policy,
+                        if reply.try_send(Ok(())).is_ok() {
+                            Some(
+                                run_transaction(
+                                    transaction,
+                                    opened_at,
+                                    receiver,
+                                    before,
+                                    shutdown_requested,
+                                    &lease,
+                                    authority,
+                                    policy,
+                                )
+                                .instrument(tracing::trace_span!("rusqlite.exact_sql.transaction"))
+                                .await,
                             )
-                        })
+                        } else {
+                            None
+                        }
                     }
                     Err(error) => {
                         return DeferredReply::new(
@@ -576,21 +583,21 @@ fn discard_transaction(
 /// through here, so the rollback is always durable, and its outcome always
 /// readable, before the command channel is dropped and the writer released.
 fn release_rolled_back(
-    transaction: Transaction<'_>,
+    transaction: TaskTransaction<'_>,
     before: u64,
     lease: &TransactionLeaseState,
     attachments: Vec<ExactSqlAttachment>,
     previous_attachment_limit: Option<i32>,
 ) -> TransactionCompletion {
-    lease.settle(discard_transaction(transaction, before));
+    lease.settle(discard_transaction(transaction.into_inner(), before));
     TransactionCompletion::abandoned(attachments, previous_attachment_limit)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_transaction(
-    transaction: Transaction<'_>,
+async fn run_transaction(
+    transaction: TaskTransaction<'_>,
     opened_at: Instant,
-    receiver: Receiver<TransactionCommand>,
+    receiver: async_channel::Receiver<TransactionCommand>,
     before: u64,
     shutdown_requested: &Arc<AtomicBool>,
     lease: &TransactionLeaseState,
@@ -626,10 +633,10 @@ fn run_transaction(
             .saturating_duration_since(now)
             .min(transaction_deadline.saturating_duration_since(now))
             .min(Duration::from_millis(25));
-        let command = match receiver.recv_timeout(wait) {
-            Ok(command) => command,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => {
+        let command = match crate::storage_pool::timeout(wait, receiver.recv()).await {
+            Some(Ok(command)) => command,
+            None => continue,
+            Some(Err(_)) => {
                 return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
             }
         };
@@ -888,6 +895,7 @@ fn run_transaction(
                     let _span = tracing::trace_span!("rusqlite.commit").entered();
                     {
                         transaction
+                            .into_inner()
                             .commit()
                             .map(|()| ExactSqlCommitReceipt { changed_rows })
                             .map_err(|error| sqlite_error("commit immediate transaction", error))
@@ -900,7 +908,7 @@ fn run_transaction(
                 };
             }
             TransactionCommand::Rollback { reply } => {
-                let result = discard_transaction(transaction, before);
+                let result = discard_transaction(transaction.into_inner(), before);
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,

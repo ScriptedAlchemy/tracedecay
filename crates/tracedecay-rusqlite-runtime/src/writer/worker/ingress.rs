@@ -4,13 +4,7 @@
 //! worker never spins, and [`select_auxiliary_work`] is the round-robin that
 //! keeps maintenance from starving product writes.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-    task::{Context, Poll, Wake, Waker},
-    thread::{self, Thread},
-    time::Instant,
-};
+use std::{collections::HashMap, collections::VecDeque, task::Poll, time::Instant};
 
 use asupersync::{Cx, channel::mpsc};
 use tracedecay_domain::process_heap::collect_idle_thread_heap_v1;
@@ -34,20 +28,8 @@ pub(super) enum WorkerWake {
     CheckpointRetry,
 }
 
-struct WriterWake(Thread);
-
-impl Wake for WriterWake {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(super) fn wait_for_work(
+pub(super) async fn wait_for_work(
     cx: &Cx,
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     exact_sql_receiver: &mut mpsc::Receiver<ExactSqlWriterCommand>,
@@ -60,50 +42,55 @@ pub(super) fn wait_for_work(
     checkpoint_closed: bool,
     deadline: Option<Instant>,
 ) -> WorkerWake {
-    let waker = Waker::from(Arc::new(WriterWake(thread::current())));
-    let mut task_cx = Context::from_waker(&waker);
-    loop {
+    let mut retry = deadline.map(|deadline| {
+        Box::pin(crate::storage_pool::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            std::future::pending::<()>(),
+        ))
+    });
+    std::future::poll_fn(|task_cx| {
         // Writer shutdown, rather than request cancellation, owns accepted work.
-        // Register native channel wakers before parking so ingress cannot be lost.
+        // Every channel registers this task's waker before it yields, so
+        // ingress cannot be lost.
         let wake = cx.masked(|| {
-            if shutdown_receiver.poll_recv(cx, &mut task_cx).is_ready() {
+            if shutdown_receiver.poll_recv(cx, task_cx).is_ready() {
                 return Poll::Ready(WorkerWake::Shutdown);
             }
             if !checkpoint_closed
-                && let Poll::Ready(command) = checkpoint_receiver.poll_recv(cx, &mut task_cx)
+                && let Poll::Ready(command) = checkpoint_receiver.poll_recv(cx, task_cx)
             {
                 return Poll::Ready(WorkerWake::Checkpoint(Box::new(command.ok())));
             }
             if !exact_sql_closed
-                && let Poll::Ready(command) = exact_sql_receiver.poll_recv(cx, &mut task_cx)
+                && let Poll::Ready(command) = exact_sql_receiver.poll_recv(cx, task_cx)
             {
                 return Poll::Ready(WorkerWake::ExactSql(Box::new(command.ok())));
             }
             if !incremental_vacuum_closed
-                && let Poll::Ready(command) =
-                    incremental_vacuum_receiver.poll_recv(cx, &mut task_cx)
+                && let Poll::Ready(command) = incremental_vacuum_receiver.poll_recv(cx, task_cx)
             {
                 return Poll::Ready(WorkerWake::IncrementalVacuum(Box::new(command.ok())));
             }
-            if !input_closed && let Poll::Ready(item) = receiver.poll_recv(cx, &mut task_cx) {
+            if !input_closed && let Poll::Ready(item) = receiver.poll_recv(cx, task_cx) {
                 return Poll::Ready(WorkerWake::Write(item.ok()));
             }
             Poll::Pending
         });
-        if let Poll::Ready(wake) = wake {
+        if wake.is_ready() {
             return wake;
         }
-        collect_idle_thread_heap_v1();
-        if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return WorkerWake::CheckpointRetry;
-            }
-            thread::park_timeout(remaining);
-        } else {
-            thread::park();
+        // The clock decides the deadline; the timer only wakes the task for it.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            || retry
+                .as_mut()
+                .is_some_and(|retry| retry.as_mut().poll(task_cx).is_ready())
+        {
+            return Poll::Ready(WorkerWake::CheckpointRetry);
         }
-    }
+        collect_idle_thread_heap_v1();
+        Poll::Pending
+    })
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -287,7 +274,7 @@ mod tests {
             .handle()
             .try_request_cx_with_budget(Budget::INFINITE)
             .unwrap();
-        let wake = wait_for_work(
+        let wake = runtime.block_on(wait_for_work(
             &cx,
             &mut write_rx,
             &mut exact_sql_rx,
@@ -299,7 +286,7 @@ mod tests {
             false,
             false,
             None,
-        );
+        ));
 
         assert!(matches!(wake, WorkerWake::Shutdown));
     }
@@ -320,7 +307,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
             shutdown_tx.send(()).expect("shutdown receiver is open");
         });
-        let wake = wait_for_work(
+        let wake = runtime.block_on(wait_for_work(
             &cx,
             &mut write_rx,
             &mut exact_sql_rx,
@@ -332,7 +319,7 @@ mod tests {
             false,
             false,
             None,
-        );
+        ));
         assert!(matches!(wake, WorkerWake::Shutdown));
         shutdown.join().unwrap();
     }
@@ -349,7 +336,7 @@ mod tests {
         let (_vacuum_tx, mut vacuum_rx) = mpsc::channel::<IncrementalVacuumCommand>(1);
         let (_checkpoint_tx, mut checkpoint_rx) = mpsc::channel::<CheckpointCommand>(1);
         let (_shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
-        let wake = wait_for_work(
+        let wake = runtime.block_on(wait_for_work(
             &cx,
             &mut write_rx,
             &mut exact_sql_rx,
@@ -361,7 +348,7 @@ mod tests {
             false,
             false,
             Some(std::time::Instant::now()),
-        );
+        ));
         assert!(matches!(wake, WorkerWake::CheckpointRetry));
     }
 }

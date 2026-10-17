@@ -85,4 +85,15 @@ pub(super) mod fake {
             read
         }
     }
+
+    /// One storage-pool task's installed clock, so a store's worker keeps the
+    /// clock its tests installed on it however its task moves between threads.
+    #[derive(Default)]
+    pub(crate) struct TaskClock(Option<Arc<FakeClock>>);
+
+    impl TaskClock {
+        pub(crate) fn swap(&mut self) {
+            INSTALLED.with(|installed| std::mem::swap(&mut *installed.borrow_mut(), &mut self.0));
+        }
+    }
 }

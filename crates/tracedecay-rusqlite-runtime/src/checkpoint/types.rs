@@ -116,10 +116,10 @@ pub enum CheckpointBlocker {
 pub(crate) trait CheckpointBlockerSource: Send + Sync {
     fn checkpoint_blockers(&self) -> CheckpointBlockers;
 
-    /// Blocks until snapshots whose owners had already released them when
+    /// Completes once snapshots whose owners had already released them when
     /// this call began have rolled back, so a requested checkpoint never
     /// reports a reader that no caller still holds as pinning the WAL.
-    fn await_released_snapshots(&self);
+    fn await_released_snapshots(&self) -> futures_util::future::BoxFuture<'static, ()>;
 
     /// Ends every snapshot that has been open at least `age`: its worker
     /// interrupts any running statement and rolls the read back, and the
