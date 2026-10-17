@@ -937,9 +937,20 @@ mod tests {
             .count()
     }
 
+    /// This process's threads, each id with its kept name.
     #[cfg(target_os = "linux")]
-    fn threads() -> usize {
-        fs::read_dir("/proc/self/task").unwrap().count()
+    fn threads() -> std::collections::BTreeMap<String, String> {
+        fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|task| {
+                let task = task.ok()?;
+                let name = fs::read_to_string(task.path().join("comm")).ok()?;
+                Some((
+                    task.file_name().to_string_lossy().into_owned(),
+                    name.trim_end().to_owned(),
+                ))
+            })
+            .collect()
     }
 
     fn attach_seeded_store(
@@ -1009,15 +1020,21 @@ mod tests {
             assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
             attachment
         };
-        // The first store starts the pool and the native runtime.
-        let mut attachments = vec![exercise(0)];
-        let started = threads();
-        attachments.extend((1..64).map(exercise));
-        let grown = threads().saturating_sub(started);
+        // Every attach takes the native runtime, so it predates the stores.
+        native_runtime();
+        let before = threads();
+        let attachments = (0..64).map(exercise).collect::<Vec<_>>();
+        let started = threads()
+            .into_iter()
+            .filter(|(id, _)| !before.contains_key(id))
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>();
 
+        let pool = &crate::storage_pool::STORE_THREAD_PREFIX[..15];
         assert!(
-            grown <= 4,
-            "63 more stores grew the process by {grown} threads; a store may own none"
+            started.len() == crate::storage_pool::store_threads()
+                && started.iter().all(|name| name.starts_with(pool)),
+            "64 stores may start the storage pool's threads and no other: {started:?}"
         );
         assert_eq!(
             threads_named("tracedecay-rusqlite"),
