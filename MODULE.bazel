@@ -58,6 +58,25 @@ crate.annotation(
     version = "0.46.0",
 )
 
+# arborium grammar build scripts read `env!("CARGO_MANIFEST_DIR")`, which bakes
+# the compiling output base's absolute path into the build-script binary. The
+# action key does not include that path, so the disk cache served one output
+# base's binary to another and cc looked for parser.c under a dead output base.
+# The patch reads the directory when the script runs instead.
+crate.annotation(
+    crate = "arborium-kotlin",
+    patch_args = ["-p1"],
+    patches = ["//scripts:bazel/patches/arborium-grammar-runtime-manifest-dir.patch"],
+    version = "2.18.2",
+)
+
+crate.annotation(
+    crate = "arborium-lean",
+    patch_args = ["-p1"],
+    patches = ["//scripts:bazel/patches/arborium-grammar-runtime-manifest-dir.patch"],
+    version = "2.18.2",
+)
+
 # One long poll must not delay the rest of the runtime. Two upstream fixes:
 # Dicklesworthstone/asupersync#83, a reactor leader that leaves epoll to run a
 # task promotes no parked follower, so the poll delays every socket wake and

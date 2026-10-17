@@ -8,10 +8,13 @@
 
 mod controller;
 mod driver;
+mod foreign;
 mod types;
 
 pub(crate) use controller::WriterCheckpointController;
 pub(crate) use driver::{RusqliteCheckpointDriver, RusqliteCheckpointError};
+pub(crate) use foreign::foreign_wal_holders;
+pub(crate) use types::FENCE_READ_DEADLINE;
 pub use types::{
     CheckpointBlocker, CheckpointBlockers, CheckpointFrameReport, CheckpointInterruption,
     CheckpointKind, CheckpointOutcome, CheckpointPressure, CheckpointStatus, CheckpointWal,

@@ -473,3 +473,82 @@ fn delivery_receipts_drain_promptly_after_the_last_append_and_after_a_restart() 
         drained
     );
 }
+
+/// One Claude `PostToolUse` Write of `src/lib.rs` in `checkout`, as the host
+/// invokes it, and the `hook_completed` disposition reason it recorded.
+fn claude_edit(home: &Path, checkout: &Path, data_root: &Path, tool_use_id: &str) -> String {
+    let mut event: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
+    ))
+    .unwrap();
+    let file = checkout.join("src/lib.rs");
+    event["cwd"] = json!(checkout);
+    event["tool_use_id"] = json!(tool_use_id);
+    event["prompt_id"] = json!(tool_use_id);
+    event["tool_input"]["file_path"] = json!(file);
+    event["tool_response"]["filePath"] = json!(file);
+    run_hook(home, checkout, "hook-claude-post-tool-use", &event);
+    let rows = std::fs::read_to_string(data_root.join("hook_analytics.jsonl")).unwrap();
+    let completed = rows
+        .lines()
+        .rev()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|row| row["event"] == "hook_completed" && row["hook_name"] == "PostToolUse")
+        .expect("the edit hook records its completion");
+    completed["disposition"]["reason_code"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn bound_worktrees(data_root: &Path) -> usize {
+    std::fs::read_dir(data_root.join("hook-configurations")).map_or(0, Iterator::count)
+}
+
+#[test]
+fn an_edit_in_a_never_opened_linked_worktree_binds_it_and_reaches_the_daemon() {
+    let home = tempfile::TempDir::new().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    let project = init_git_project(&home);
+    let _daemon = spawn_tracedecay_daemon(&home);
+    tracedecay(&home, &project, &["init"]);
+    let data_root = default_profile_sharded_layout(&project, &home.join(".tracedecay"))
+        .unwrap()
+        .data_root;
+    let worktree = project.join(".claude/worktrees/agent-x");
+    assert!(
+        Command::new(git_program())
+            .args(["worktree", "add", "-q", "-b", "agent-x"])
+            .arg(&worktree)
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(
+        worktree.join("src/lib.rs"),
+        "pub fn edited_in_worktree() {}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        bound_worktrees(&data_root),
+        1,
+        "only the main checkout is bound"
+    );
+
+    assert_eq!(
+        claude_edit(&home, &worktree, &data_root, "toolu_unbound_first"),
+        "hook_v2_accepted",
+        "the first edit in an unbound worktree must reach the daemon, not be dropped"
+    );
+    assert_eq!(
+        bound_worktrees(&data_root),
+        2,
+        "delivering that edit opens the worktree and publishes its binding"
+    );
+    let next = claude_edit(&home, &worktree, &data_root, "toolu_unbound_next");
+    assert!(
+        matches!(next.as_str(), "hook_v2_accepted" | "hook_v2_spooled"),
+        "later edits admit through the worktree's own binding, got {next}"
+    );
+}
