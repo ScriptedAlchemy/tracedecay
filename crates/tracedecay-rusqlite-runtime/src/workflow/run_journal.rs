@@ -17,10 +17,7 @@ use tracedecay_domain::{
     WorkflowRunProjection, canonical_sha256,
 };
 
-use super::{
-    ExactSqlTransaction, ExactSqlValue, WorkflowSqliteAuthority, encode_json, execute_tx, query_tx,
-    sql_text,
-};
+use super::{ExactSqlValue, WorkflowSqliteAuthority, encode_json, execute_tx, query_tx, sql_text};
 use crate::work::{RegisteredWorkQuery, registered_work_query};
 
 fn run_journal_unavailable<E>(_: E) -> WorkflowRunStorageError {
@@ -75,7 +72,7 @@ pub(crate) fn projection_from(
 }
 
 pub(crate) fn append_in_transaction(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     request: &WorkflowRunAppendRequest,
 ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
     let payload = encode_json(&request.event).map_err(|_| WorkflowRunStorageError::Unavailable)?;
@@ -292,8 +289,8 @@ fn artifact_store_unavailable<E>(_: E) -> WorkflowArtifactStoreError {
     WorkflowArtifactStoreError::Unavailable
 }
 
-fn stored_payload_tx(
-    transaction: &ExactSqlTransaction,
+pub(crate) fn stored_payload_tx(
+    transaction: &impl crate::work::RegisteredWorkQuery,
     digest: &str,
 ) -> Result<Option<Vec<u8>>, WorkflowArtifactStoreError> {
     let rows = query_tx(

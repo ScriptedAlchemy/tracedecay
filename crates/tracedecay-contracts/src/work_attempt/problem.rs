@@ -85,3 +85,9 @@ pub(super) fn denied_problem(code: &str, message: &str) -> ApplicationProblem {
         legal_actions: vec![LegalAction::Refresh],
     }
 }
+
+impl From<WorkAttemptStorageError> for ApplicationProblem {
+    fn from(error: WorkAttemptStorageError) -> Self {
+        storage_problem(error)
+    }
+}
