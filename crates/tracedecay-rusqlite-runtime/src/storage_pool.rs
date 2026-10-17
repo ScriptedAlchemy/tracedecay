@@ -9,7 +9,7 @@
 //! use check [`on_pool`] and refuse there instead of parking.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     future::Future,
     panic::AssertUnwindSafe,
     pin::{Pin, pin},
@@ -36,8 +36,11 @@ const STORE_THREAD_RANGE: std::ops::RangeInclusive<usize> = 2..=16;
 
 static POOL: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
+type Adopted = Pin<Box<dyn Future<Output = ()> + Send>>;
+
 thread_local! {
     static ON_POOL: Cell<bool> = const { Cell::new(false) };
+    static ADOPTED: RefCell<Vec<Adopted>> = const { RefCell::new(Vec::new()) };
 }
 
 /// How many threads the pool runs: [`STORE_THREADS_ENV`] when it parses,
@@ -138,6 +141,13 @@ where
             .take()
             .expect("a refused task never ran its work")),
     }
+}
+
+/// Gives `work` the pool refused to spawn to the task this pool thread is
+/// polling, which runs it to completion before finishing itself. A pool
+/// thread can neither wait for `work` nor drop it.
+pub(crate) fn adopt(work: impl Future<Output = ()> + Send + 'static) {
+    ADOPTED.with_borrow_mut(|adopted| adopted.push(Box::pin(work)));
 }
 
 /// The receiving end of a pool task's command channel.
@@ -272,8 +282,12 @@ impl Wake for ThreadWake {
 /// kept while it owned a thread: lock-work and VM telemetry, and the test
 /// clock. Swapped in for each poll and out after it, even when the poll
 /// panics, so no other task inherits them.
+///
+/// It also runs the work its polls [`adopt`], and finishes only once that
+/// work and its own have both finished.
 struct TaskLocals<F> {
-    work: Pin<Box<F>>,
+    work: Option<Pin<Box<F>>>,
+    adopted: Vec<Adopted>,
     locals: Locals,
 }
 
@@ -303,20 +317,38 @@ impl Drop for SwappedIn<'_> {
 impl<F> TaskLocals<F> {
     fn new(work: F) -> Self {
         Self {
-            work: Box::pin(work),
+            work: Some(Box::pin(work)),
+            adopted: Vec::new(),
             locals: Locals::default(),
         }
     }
 }
 
-impl<F: Future> Future for TaskLocals<F> {
-    type Output = F::Output;
+impl<F: Future<Output = ()>> Future for TaskLocals<F> {
+    type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
         let this = &mut *self;
         this.locals.swap();
         let _swapped_in = SwappedIn(&mut this.locals);
-        this.work.as_mut().poll(context)
+        if let Some(work) = &mut this.work
+            && work.as_mut().poll(context).is_ready()
+        {
+            this.work = None;
+        }
+        loop {
+            this.adopted.extend(ADOPTED.take());
+            this.adopted
+                .retain_mut(|work| work.as_mut().poll(context).is_pending());
+            if ADOPTED.with_borrow(Vec::is_empty) {
+                break;
+            }
+        }
+        if this.work.is_none() && this.adopted.is_empty() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 }
 

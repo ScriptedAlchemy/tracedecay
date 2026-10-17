@@ -576,6 +576,12 @@ impl RepositoryRuntimePhysicalAttachment {
 
     #[tracing::instrument(name = "rusqlite.attachment.drain", level = "trace", skip_all)]
     pub fn drain(&self) -> Result<(), String> {
+        // The quiesce wait below sleeps the calling thread.
+        if crate::storage_pool::on_pool() {
+            return Err(
+                "repository physical attachment cannot drain on a storage pool thread".to_owned(),
+            );
+        }
         let mut state = self.lock_state();
         if state.closed {
             return Ok(());
@@ -1090,6 +1096,51 @@ mod tests {
         );
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();
+    }
+
+    #[test]
+    fn a_pool_task_is_refused_a_drain_and_a_writer_join_while_the_close_completes() {
+        let directory = TempDir::new().unwrap();
+        let attachment = Arc::new(attach_seeded_store(directory.path(), &binding(), 0));
+        let donor = attach_seeded_store(directory.path(), &binding(), 1);
+        let writer = Arc::try_unwrap(donor.lock_state().writer.take().unwrap())
+            .unwrap_or_else(|_| panic!("only its attachment holds the writer"));
+        let writer_status = writer.checkpoint_handle().status_subscription();
+        let on_pool = Arc::clone(&attachment);
+        let (report, refused) = mpsc::channel();
+        crate::storage_pool::spawn(async move {
+            let _ = report.send((on_pool.drain(), writer.shutdown_and_join()));
+        })
+        .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+        let (drain, join) = refused
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a pool task's drain and writer join must return, not park");
+        assert!(drain.is_err(), "a pool task's drain must refuse");
+        attachment
+            .exact_sql_handle()
+            .expect("a refused drain leaves the attachment open")
+            .execute(statement(
+                "INSERT INTO identity_probe (value) VALUES ('after the refused drain')",
+                vec![],
+            ))
+            .expect("a refused drain leaves the writer serving");
+        assert!(
+            matches!(join, Err(crate::WriterActorError::WaitCancelled)),
+            "a pool task's writer join must report the wait it refused, got {join:?}"
+        );
+        let closing = std::time::Instant::now();
+        while !writer_status.is_closed() {
+            assert!(
+                closing.elapsed() < Duration::from_secs(10),
+                "the writer whose join was refused must still close"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+        donor.drain().unwrap();
+        donor.close_and_join().unwrap();
     }
 
     #[test]

@@ -383,7 +383,7 @@ impl fmt::Display for WriterActorError {
                 write!(f, "runtime write authority denied at {stage:?}")
             }
             Self::ReplyDropped => f.write_str("SQLite writer stopped before replying"),
-            Self::WaitCancelled => f.write_str("SQLite writer reply wait was cancelled"),
+            Self::WaitCancelled => f.write_str("SQLite writer wait was cancelled"),
             Self::StorageFailure(error) => write!(f, "SQLite writer failed: {error}"),
             Self::IncrementalVacuumFailed(message) => {
                 write!(f, "SQLite incremental vacuum failed: {message}")
@@ -832,6 +832,11 @@ impl PersistentWriter {
 
     fn join_worker(&mut self) -> Result<(), WriterActorError> {
         if let Some(join) = self.join.take() {
+            // A pool thread cannot wait; the shutdown already sent ends the
+            // detached task on its own.
+            if crate::storage_pool::on_pool() {
+                return Err(WriterActorError::WaitCancelled);
+            }
             join.join().map_err(|_| WriterActorError::TaskPanicked)?;
         }
         Ok(())

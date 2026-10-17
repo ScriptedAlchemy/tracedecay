@@ -445,15 +445,21 @@ async fn finish_deferred_return<E: ReaderQueryExecutor>(
     }
 }
 
-/// Runs the return as a pool task, or on this thread when the pool refuses
-/// it, so worker capacity cannot disappear silently.
+/// Runs the return as a pool task. When the pool refuses it, this thread
+/// runs it, or on a pool thread the task polling there does, so worker
+/// capacity cannot disappear silently.
 fn spawn_or_run_deferred_return<F>(
     task: F,
     spawn: impl FnOnce(F) -> Result<crate::storage_pool::PoolTask, F>,
 ) where
-    F: Future<Output = ()>,
+    F: Future<Output = ()> + Send + 'static,
 {
-    if let Err(task) = spawn(task) {
+    let Err(task) = spawn(task) else {
+        return;
+    };
+    if crate::storage_pool::on_pool() {
+        crate::storage_pool::adopt(task);
+    } else {
         crate::storage_pool::wait_until(task, None);
     }
 }
@@ -471,6 +477,27 @@ mod deferred_return_spawn_tests {
         spawn_or_run_deferred_return(async move { observed.store(true, Ordering::Release) }, Err);
 
         assert!(ran.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_refused_deferred_return_on_a_pool_thread_still_runs_to_completion() {
+        let (done, finished) = std::sync::mpsc::channel();
+        crate::storage_pool::spawn(async move {
+            spawn_or_run_deferred_return(
+                async move {
+                    crate::storage_pool::sleep(Duration::from_millis(20)).await;
+                    let _ = done.send(());
+                },
+                Err,
+            );
+        })
+        .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(10)),
+            Ok(()),
+            "a pool thread must finish the return it could not spawn, not drop it"
+        );
     }
 }
 

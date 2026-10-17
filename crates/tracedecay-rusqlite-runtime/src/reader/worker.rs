@@ -452,7 +452,11 @@ impl WorkerClient {
         }
     }
 
+    /// Refused on a pool thread: every caller waits on the command's reply.
     fn snapshot_sender(&self) -> Result<async_channel::Sender<SnapshotCommand>, ReaderWorkerError> {
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderWorkerError::WorkerClosed);
+        }
         self.snapshot_sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
