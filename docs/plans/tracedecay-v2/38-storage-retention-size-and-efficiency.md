@@ -29,8 +29,8 @@ byte-budget gates that made the retention findings unreachable, both addressed
 by the same change that carries this correction.
 
 Size evidence published in this plan remains file- and directory-level only.
-`SqliteStoreSizeTelemetryPort` in
-`crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs` implements
+`GuardedStoreTelemetryPort` in
+`crates/tracedecay-maintenance/src/telemetry.rs` implements
 `StoreSizeTelemetryPort` over the runtime's read-only SQLite health reader,
 including `dbstat` table-payload samples. The daemon Doctor kernel emits those
 per-table samples only as tracing; they are not Doctor findings, dashboard
@@ -266,8 +266,8 @@ measurements, not inferred table sizes.
   daemon-authorized retention owner. The exact receipt supporting the current
   source frontier is retained; the delete trigger is suspended and restored
   inside one immediate transaction, with rollback on authority loss.
-- `StoreSizeTelemetryPort` is implemented by `SqliteStoreSizeTelemetryPort` at
-  `crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs`. Its first
+- `StoreSizeTelemetryPort` is implemented by `GuardedStoreTelemetryPort` at
+  `crates/tracedecay-maintenance/src/telemetry.rs`. Its first
   table read establishes scoped watermarks and later reads return `dbstat`
   payload-growth samples. The daemon Doctor kernel emits those samples as
   tracing only; the dashboard exposes per-store size/free ratio and whole-store
