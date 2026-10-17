@@ -139,7 +139,9 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
         .await
         .unwrap();
     first_admin
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .unwrap();
     drop(first_admin);
