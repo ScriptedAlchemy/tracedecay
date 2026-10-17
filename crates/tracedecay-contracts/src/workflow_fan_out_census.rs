@@ -75,8 +75,7 @@ pub struct WorkflowFanOutCensusBackfillPageV1 {
 }
 
 /// The census reads. A storage that can also persist implements
-/// [`WorkflowFanOutCensusStoragePort`]. Neither carries a `Send + Sync`
-/// bound, so a storage scoped to one writer transaction can implement them.
+/// [`WorkflowFanOutCensusStoragePort`].
 pub trait WorkflowFanOutCensusReadPort {
     fn latest_census(
         &self,

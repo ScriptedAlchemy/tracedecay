@@ -796,8 +796,6 @@ fn terminal_attempt_closes_its_open_blocked_interval_in_the_same_fenced_cas() {
     );
 }
 
-/// Runs one storage call as a writer job, which commits only when it returns
-/// `Ok`.
 fn in_job<R: Send + 'static, E: Send + 'static>(
     store: &RegisteredWorkStore,
     call: impl Fn(

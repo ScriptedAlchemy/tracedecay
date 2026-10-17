@@ -186,9 +186,6 @@ fn locator(binding: &StoreRuntimeBindingV1) -> VerifiedStoreLocatorV1 {
     )
 }
 
-/// The registered Workflow authority with every write run as one writer job,
-/// so the storage suites drive the contracts ports the way production jobs do.
-/// Reads go to the handle.
 #[derive(Clone)]
 pub struct WorkflowJobStorage(pub WorkflowSqliteAuthority);
 

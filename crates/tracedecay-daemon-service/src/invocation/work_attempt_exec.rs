@@ -94,8 +94,6 @@ use operation_resource::{AttemptAdmissionTimingV1, work_operation_resource_obser
 use provider_launch::ProviderProcess;
 use provider_output::{overflow_outcome, provider_session, stream_summary};
 
-/// Persists the captured provider stdout as one workflow artifact payload, as
-/// a writer job.
 async fn provider_stdout_artifacts(
     identity: &WorkAttemptIdentityV1,
     captured: Option<&(Vec<u8>, u64)>,
@@ -744,7 +742,6 @@ async fn run_attempt(
         }
     };
 
-    // Resolution canonicalizes and hashes the provider binary.
     let resolver = registered
         .proposal_routing
         .executable_binding_resolver

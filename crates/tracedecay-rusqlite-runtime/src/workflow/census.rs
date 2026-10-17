@@ -128,8 +128,6 @@ fn projection_through_tx(
     Ok(projection)
 }
 
-/// Runs `read` in one deferred transaction, so a multi-statement read sees one
-/// snapshot.
 fn deferred<R>(
     authority: &WorkflowSqliteAuthority,
     read: impl FnOnce(&ExactSqlTransaction) -> Result<R, WorkflowFanOutCensusError>,

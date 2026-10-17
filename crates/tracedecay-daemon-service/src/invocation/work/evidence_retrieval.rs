@@ -15,11 +15,6 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{RegisteredWorkRuntime, work_product_problem};
 
-/// Retrieves one task's evidence. The retrieval interleaves synchronous Work
-/// storage reads with awaited session-evidence reads, so the whole retrieval
-/// runs on the blocking pool rather than parking the request's native thread
-/// on each Work read; the storage executor's reader lane replaces the hop
-/// (docs/plans/storage, step 7).
 #[tracing::instrument(
     name = "daemon.service.work.retrieve_evidence",
     level = "trace",

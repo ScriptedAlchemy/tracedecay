@@ -103,8 +103,7 @@ impl WorkSqliteStorage {
     }
 
     /// Runs the synchronous Work read `read` on the blocking pool, so the
-    /// awaiting task parks no runtime thread. The storage executor replaces
-    /// the hop with a reader lane (docs/plans/storage, step 7).
+    /// awaiting task parks no runtime thread.
     pub async fn read<R>(
         &self,
         read: impl FnOnce(&Self) -> R + Send + 'static,

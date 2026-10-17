@@ -23,8 +23,6 @@ use tracedecay_global_db::configuration::{
 
 use super::{RegisteredWorkRuntime, complete_work_read, preparation, work_product_problem};
 
-/// The product intelligence service bound to `capability` and `use_case`
-/// over the registered Work authorities.
 fn intelligence_service(
     registered: &RegisteredWorkRuntime,
     capability: &str,
@@ -112,10 +110,6 @@ pub(super) async fn execution_history(
         );
         services
             .read(move |services| {
-                // Initial attempt admission appends the accepted-attempt graph
-                // event and inserts the attempt row in one transaction. Read
-                // both from that committed generation; a fresh attempt does
-                // not need a session correlation.
                 let attempts = services.attempts().list(
                     &context,
                     WorkAttemptListOperationV1::ExecutionHistory,

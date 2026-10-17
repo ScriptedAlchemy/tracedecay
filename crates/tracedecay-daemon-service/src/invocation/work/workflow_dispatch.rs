@@ -45,7 +45,7 @@ pub(crate) async fn execute_workflow_application(
     cancellation: CancellationContext,
     worktree_holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
 ) -> DaemonInvocationResponse {
-    super::settled_dispatch(
+    super::dispatch_outliving_caller(
         request_id.clone(),
         Box::pin(workflow_application(
             registered,
@@ -183,12 +183,6 @@ async fn workflow_application(
         }
         WorkflowApplicationInvocation::ActivateDefinition(request) => {
             async {
-                // Catalog and environment-pin admission reject before the
-                // lifecycle command is journaled; a denial is the same canonical
-                // problem effect every other refused mutation records. Run
-                // admission compares the same environment pins, so activation
-                // must refuse here rather than publish an Active definition no
-                // run could ever start.
                 let admitted = {
                     let (registered, definition_id, definition_version) = (
                         registered.clone(),

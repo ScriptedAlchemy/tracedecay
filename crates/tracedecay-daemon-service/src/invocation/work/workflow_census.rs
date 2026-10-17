@@ -40,11 +40,9 @@ pub(super) async fn persist_workflow_fan_out_census(
     }
 }
 
-/// The census for one projection head, read with its evidence.
 struct ObservedCensusV1 {
     census: tracedecay_domain::WorkflowFanOutCensusV1,
-    /// Whether the census is new for this head and has yet to be persisted.
-    derived: bool,
+    unpersisted: bool,
     attempts: Vec<tracedecay_domain::WorkAttemptV1>,
     attempt_reads_complete: bool,
     previous: Option<tracedecay_domain::WorkflowFanOutCensusV1>,
@@ -72,19 +70,16 @@ async fn try_persist_workflow_fan_out_census(
     };
     let ObservedCensusV1 {
         census,
-        derived,
+        unpersisted,
         attempts,
         attempt_reads_complete,
         previous,
     } = observed;
-    if derived {
+    if unpersisted {
         workflow
             .persist_census(census.clone())
             .await
             .map_err(|_| workflow_runtime_unavailable())?;
-        // `persist_census` is the canonical durable write; wake recovery
-        // before optional observability enqueue so a later enqueue error
-        // cannot hide the pending record.
         registered.durable_write_signal.bump();
     }
 
@@ -298,7 +293,7 @@ fn observe_census(
             }
         }
     };
-    let (census, derived) = match latest {
+    let (census, unpersisted) = match latest {
         Some(census) if census.workflow_sequence == projection.sequence() => (census, false),
         Some(_) | None => (
             tracedecay_contracts::derive_workflow_fan_out_census(
@@ -321,7 +316,7 @@ fn observe_census(
     };
     Ok(ObservedCensusV1 {
         census,
-        derived,
+        unpersisted,
         attempts,
         attempt_reads_complete,
         previous,

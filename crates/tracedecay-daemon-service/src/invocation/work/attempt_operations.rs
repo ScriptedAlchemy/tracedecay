@@ -396,8 +396,6 @@ pub(super) async fn retry_attempt(
     )
 }
 
-/// The workflow child rebind a retry of `original` carries, read on the
-/// Workflow read path before the retry job.
 async fn workflow_retry_rebind(
     registered: &RegisteredWorkRuntime,
     original: &tracedecay_domain::WorkAttemptIdentityV1,

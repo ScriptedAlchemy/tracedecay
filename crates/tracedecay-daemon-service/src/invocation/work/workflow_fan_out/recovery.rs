@@ -405,9 +405,6 @@ mod tests {
 
     use super::super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1;
 
-    /// The recovery worker reconciles each page on the native runtime, with
-    /// no Tokio runtime anywhere. A page that dispatches a child must still
-    /// start its attempt supervisor.
     #[test]
     fn a_reconcile_page_dispatches_a_child_without_a_tokio_runtime() {
         let registry = Arc::new(WorkAttemptProcessRegistryV1::default());

@@ -268,8 +268,6 @@ pub(super) async fn reconcile_workflow_fan_out(
             .map_err(|_| workflow_runtime_unavailable())?;
             admit_workflow_child(registered, &product, context, child, observed_at).await?;
             let revisions = workflow_product_revision_pins(registered)?;
-            // The start job fences the child's run reservation, so a paused
-            // run refuses the start atomically with the attempt row.
             let attempt = product
                 .start_attempt(
                     context.clone(),
@@ -330,8 +328,6 @@ pub(super) async fn reconcile_workflow_fan_out(
     Ok(projection)
 }
 
-/// Reads each attempt in `identities`, in order, in one read; an attempt
-/// that cannot be read keeps its own problem.
 async fn attempt_statuses(
     work: &RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
@@ -594,7 +590,6 @@ async fn request_fan_out_cancellation(
             .await
         {
             Ok(cancelled) => cancelled,
-            // The child settled after its status was read.
             Err(problem) if is_not_cancellable(&problem) => continue,
             Err(_) => return Err(workflow_runtime_unavailable()),
         };
@@ -647,9 +642,6 @@ async fn apply_scheduler_command(
         .map_err(workflow_run_problem)
 }
 
-/// Brings the child's task into the Work product graph and admits it for
-/// execution, one committed mutation at a time; each step is skipped when the
-/// graph already holds it.
 async fn admit_workflow_child(
     registered: &RegisteredWorkRuntime,
     product: &RegisteredWorkProductServicesV1,
@@ -808,7 +800,6 @@ pub(crate) fn workflow_product_revision_pins(
         .map_err(|_| workflow_runtime_unavailable())
 }
 
-/// The current graph under `selection`, read on the Work read path.
 async fn current_workflow_product_graph(
     registered: &RegisteredWorkRuntime,
     context: &RequestContext,
@@ -855,8 +846,6 @@ fn workflow_child_task_matches(
             .any(|milestone| milestone == &child.milestone)
 }
 
-/// Prepares one child mutation on the Work read path, then commits it as a
-/// writer job.
 #[allow(clippy::too_many_arguments)]
 async fn apply_workflow_child_product_mutation(
     registered: &RegisteredWorkRuntime,

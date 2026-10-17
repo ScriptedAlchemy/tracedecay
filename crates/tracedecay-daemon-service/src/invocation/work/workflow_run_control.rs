@@ -245,8 +245,6 @@ pub(super) async fn start_workflow_run(
     .await
 }
 
-/// The Active definition version a run in `context`'s project may start
-/// from.
 fn active_definition(
     services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,

@@ -115,8 +115,6 @@ pub(crate) fn append_in_transaction(
     rebuild(&appended).map(WorkflowRunAppendOutcome::Appended)
 }
 
-/// Runs `read` in one deferred transaction, so a multi-statement read sees one
-/// snapshot.
 fn deferred<R>(
     authority: &WorkflowSqliteAuthority,
     read: impl FnOnce(&ExactSqlTransaction) -> Result<R, WorkflowRunStorageError>,
@@ -281,9 +279,6 @@ fn fan_out_binding_from(
     source: &impl RegisteredWorkQuery,
     identity: &WorkAttemptIdentityV1,
 ) -> Result<Option<WorkflowFanOutAttemptBindingV1>, WorkflowRunStorageError> {
-    // The attempt identity already carries its owning workflow run ID, so
-    // the journal primary key provides a bounded lookup. Do not use the
-    // trait's cross-run fallback scan on response-delivery paths.
     let projection = match projection_from(source, identity.run_id()) {
         Ok(projection) => projection,
         Err(WorkflowRunStorageError::NotFound) => return Ok(None),

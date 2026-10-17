@@ -110,7 +110,7 @@ pub async fn execute_work_application(
     let activity_database = registered.database.clone();
     let activity_root = project_root.clone();
     let mutates = work_invocation_mutates(&request);
-    settled_dispatch(
+    dispatch_outliving_caller(
         refused_request_id,
         Box::pin(async move {
             let response = request_dispatch::dispatch_work_application(
@@ -148,12 +148,7 @@ pub async fn execute_work_application(
     .await
 }
 
-/// Runs a Work or Workflow dispatch as its own native task. A dispatch commits
-/// several jobs in sequence (a leased attempt, then its supervision; a paused
-/// run, then its children's controls), so a caller that stops waiting must
-/// abandon only the wait, never the jobs still to come. Boxed so the dispatch
-/// frame stays out of invocation callers.
-async fn settled_dispatch(
+async fn dispatch_outliving_caller(
     request_id: String,
     dispatch: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>>,
 ) -> DaemonInvocationResponse {

@@ -802,9 +802,6 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     );
 }
 
-/// A Work dispatch commits a job and then acts on it (publishes activity,
-/// supervises an attempt). A caller that stops waiting after the dispatch
-/// began abandons only its wait: the dispatch still runs to its last step.
 #[tokio::test]
 async fn a_work_dispatch_whose_caller_stops_waiting_still_completes() {
     let fixture = RegisteredWorkFixture::start("dropped-caller").await;
@@ -1316,13 +1313,6 @@ fn native_storage_wait_site_hits() -> BTreeMap<(&'static str, String), u64> {
         .collect()
 }
 
-/// A Workflow fan-out run served from a native runtime worker: the definition
-/// registers and activates, the run starts, its child attempt settles (no
-/// provider route is mounted, so the attempt task seals a provider denial),
-/// and the attempt task reconciles the fan-out to a terminal run. Every
-/// storage write on that path is an awaited writer job and every read an
-/// awaited hop off the worker, so no Work or Workflow storage call site
-/// parks a native thread.
 #[tokio::test]
 async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
     let fixture = RegisteredWorkFixture::start("native-fan-out").await;
@@ -1525,8 +1515,6 @@ async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
                     .as_ref()
                     .is_some_and(|run| run.status().is_terminal())
             {
-                // The attempt task persists the census and releases the
-                // attempt only after the run turns terminal.
                 while service.work_attempt_processes.holds_worktree(&worktree_id) {
                     tracedecay_runtime_core::native_runtime::sleep_until(
                         std::time::Instant::now() + std::time::Duration::from_millis(50),
@@ -1559,8 +1547,6 @@ async fn a_workflow_fan_out_run_never_parks_a_native_worker_on_storage() {
     else {
         panic!("the native worker must serve the fan-out run: {served:?}");
     };
-    // The wait counters are process-wide and other tests in this binary move
-    // them, so only the Work and Workflow storage call sites are compared.
     let parked = native_storage_wait_site_hits()
         .into_iter()
         .filter(|(key, hits)| {

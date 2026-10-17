@@ -1110,8 +1110,6 @@ fn in_job<R: Send + 'static, E: Send + 'static>(
         .expect("the writer runs the job")
 }
 
-/// The run's live attempts a workflow binds, read in a writer job the way a
-/// run-control transition reads them.
 fn workflow_bound_live_attempts(
     store: &RegisteredWorkStore,
     authority: &WorkAuthority,

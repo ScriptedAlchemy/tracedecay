@@ -711,7 +711,7 @@ changes a file that holds memory.
     the git-index store, whose actor thread is deleted (#4140), placement and
     the leaf Work ports (#4142), native integration (#4143), remote replay with
     its actor thread deleted (#4157), the attempt chain and product mutations
-    (#4158), and Workflow (branch `refactor/storage-workflow-jobs`).
+    (#4158), and Workflow (#4235).
   - Workflow slice (2026-10-17). The Workflow ports are implemented on the Work
     job storage itself, the design's one `JournalTx`, not on a second job type.
     Effects, run-journal appends, artifact persists and census writes are writer

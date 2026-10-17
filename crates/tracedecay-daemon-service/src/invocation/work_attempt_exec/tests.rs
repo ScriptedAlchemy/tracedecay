@@ -2201,9 +2201,6 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
     );
 }
 
-/// Fail-fast reads the open children, then cancels each; a child that settles
-/// in between refuses the cancellation, and the reconcile must skip it rather
-/// than abort.
 #[tokio::test]
 async fn a_child_that_settled_after_its_status_read_is_skipped_by_fail_fast() {
     let directory = tempfile::TempDir::new().unwrap();
