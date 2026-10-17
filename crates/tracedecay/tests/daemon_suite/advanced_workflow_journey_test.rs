@@ -487,8 +487,8 @@ fn feedback_proximity_http_is_mounted_in_an_isolated_project() {
         .as_str()
         .expect("project id"));
     let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
+    let _ = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
     let dashboard = task_session::DashboardProcess::start(&home, &project);
 
     // Proximity mounts with dependent owners (beside Delivery), after Work can
@@ -549,8 +549,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .as_str()
         .expect("registered project id"));
     let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
+    let _ = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
 
     let first_started = scratch.path().join("first-started");
     let cancellation_started = scratch.path().join("cancellation-started");
@@ -608,8 +608,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("restart after provider configuration");
     daemon = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
-    let observed = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
+    let observed = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
     let configuration_revision_id: ConfigurationRevisionId = observed
         .first()
         .expect("configuration component")
@@ -1045,9 +1045,9 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
 
     let mut restarted = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
-    wait_for_workflow_mount(&client, &run_id);
+    let _ = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
+    wait_for_workflow_mount(&home, &client, &run_id);
     let recovered_identity = fan_out_identities[1].clone();
     let recovered = wait_until("fenced recovery-required workflow child", || {
         attempt_status(&client, &recovered_identity)
@@ -1378,8 +1378,8 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .expect("physically restart daemon after accepted synthesis settlement");
     let restored_daemon = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
-    let _ = wait_for_application_mount(&client);
-    wait_for_work_mount(&client);
+    let _ = wait_for_application_mount(&home, &client);
+    wait_for_work_mount(&home, &client);
     let restored_graph = client
         .execute::<WorkViews>(&WorkGraphReadRequestV1::current(
             product_selection.clone(),

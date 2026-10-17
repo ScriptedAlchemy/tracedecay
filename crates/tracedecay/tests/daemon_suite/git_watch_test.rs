@@ -16,7 +16,12 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY;
 
+use crate::common::IndexProgress;
 use crate::common::mcp_response::tool_json;
+
+/// How long the index may report no change before a wait gives up on it.
+const INDEX_STALL_WINDOW: Duration = Duration::from_secs(20);
+
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
@@ -150,36 +155,34 @@ async fn wait_for_symbol(
     symbol: &str,
 ) -> String {
     let revision = head(project);
-    let mut last_status = Value::Null;
     let mut last_search = Value::Null;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            last_status = status(harness, project).await;
-            let worktree = &last_status["code_index_freshness"]["worktree"];
-            let generation = worktree["latest_generation_id"].as_str().map(str::to_owned);
-            let current = last_status["code_index_freshness"]["status"] == "current"
-                && worktree["coverage"] == "complete"
-                && worktree["staleness_state"] == "fresh"
-                && worktree["source_reference"] == reference
-                && worktree["source_revision"] == revision
-                && generation
-                    .as_deref()
-                    .is_some_and(|generation| prior_generation != Some(generation));
-            if current {
-                last_search = search(harness, project, symbol).await;
-                if last_search["code_generation"].as_str() == generation.as_deref()
-                    && symbol_count(&last_search, symbol) == 1
-                {
-                    return generation.expect("current generation");
-                }
+    let mut progress = IndexProgress::new(INDEX_STALL_WINDOW);
+    loop {
+        let last_status = status(harness, project).await;
+        let worktree = &last_status["code_index_freshness"]["worktree"];
+        let generation = worktree["latest_generation_id"].as_str().map(str::to_owned);
+        let current = last_status["code_index_freshness"]["status"] == "current"
+            && worktree["coverage"] == "complete"
+            && worktree["staleness_state"] == "fresh"
+            && worktree["source_reference"] == reference
+            && worktree["source_revision"] == revision
+            && generation
+                .as_deref()
+                .is_some_and(|generation| prior_generation != Some(generation));
+        if current {
+            last_search = search(harness, project, symbol).await;
+            if last_search["code_generation"].as_str() == generation.as_deref()
+                && symbol_count(&last_search, symbol) == 1
+            {
+                return generation.expect("current generation");
             }
-            tokio::task::yield_now().await;
         }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!("timed out waiting for {symbol:?}; status={last_status}; search={last_search}")
-    })
+        assert!(
+            progress.moving(&last_status),
+            "index stopped short of {symbol:?}; status={last_status}; search={last_search}"
+        );
+        tokio::task::yield_now().await;
+    }
 }
 async fn wait_for_stale_serving(
     harness: &ProductionProjectCompositionHarnessV1,
@@ -189,32 +192,32 @@ async fn wait_for_stale_serving(
     revision: &str,
     symbol: &str,
 ) {
-    let mut last = Value::Null;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            last = status(harness, project).await;
-            let worktree = &last["code_index_freshness"]["worktree"];
-            if last["code_index_freshness"]["status"] == "warming"
-                && worktree["latest_generation_id"] == generation
-                && worktree["source_reference"] == reference
-                && worktree["source_revision"] == revision
-                && worktree["staleness_state"] == "refreshing"
-                && worktree["coverage"] == "partial_refresh_in_progress"
-            {
-                let stale = search(harness, project, symbol).await;
-                assert_eq!(stale["code_generation"], generation, "{stale}");
-                assert_eq!(stale["coverage"]["recall"], "partial", "{stale}");
-                for lane in ["exact", "lexical", "graph"] {
-                    assert_eq!(stale["coverage"][lane]["status"], "stale", "{stale}");
-                    assert_eq!(stale["coverage"][lane]["generation"], generation, "{stale}");
-                }
-                return;
+    let mut progress = IndexProgress::new(INDEX_STALL_WINDOW);
+    loop {
+        let last = status(harness, project).await;
+        let worktree = &last["code_index_freshness"]["worktree"];
+        if last["code_index_freshness"]["status"] == "warming"
+            && worktree["latest_generation_id"] == generation
+            && worktree["source_reference"] == reference
+            && worktree["source_revision"] == revision
+            && worktree["staleness_state"] == "refreshing"
+            && worktree["coverage"] == "partial_refresh_in_progress"
+        {
+            let stale = search(harness, project, symbol).await;
+            assert_eq!(stale["code_generation"], generation, "{stale}");
+            assert_eq!(stale["coverage"]["recall"], "partial", "{stale}");
+            for lane in ["exact", "lexical", "graph"] {
+                assert_eq!(stale["coverage"][lane]["status"], "stale", "{stale}");
+                assert_eq!(stale["coverage"][lane]["generation"], generation, "{stale}");
             }
-            tokio::task::yield_now().await;
+            return;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("refresh omitted stale-serving evidence: {last}"));
+        assert!(
+            progress.moving(&last),
+            "refresh omitted stale-serving evidence: {last}"
+        );
+        tokio::task::yield_now().await;
+    }
 }
 #[tokio::test]
 async fn unhooked_commit_becomes_searchable_through_scheduler_reconciliation() {

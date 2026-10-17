@@ -105,7 +105,8 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
     let revision = initialize_repository(&project);
 
     let socket = daemon_socket_path(environment.home());
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let log_path = environment.scratch().join("graceful-stop.log");
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
     let handshake = tracedecay::daemon::handshake_for_current_client(
@@ -147,8 +148,9 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
         assert_eq!(
             wal_bytes(store),
             0,
-            "a stopped daemon keeps no WAL for {}",
-            store.display()
+            "a stopped daemon keeps no WAL for {}; log={}",
+            store.display(),
+            fs::read_to_string(&log_path).unwrap_or_default()
         );
     }
 }
