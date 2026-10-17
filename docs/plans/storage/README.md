@@ -717,13 +717,15 @@ changes a file that holds memory.
     Effects, run-journal appends, artifact persists and census writes are writer
     jobs; a workflow effect (reserve, claim, apply, commit, reconcile) is one
     job, so a failure after the reservation now rolls the reservation back too.
-    Every Work and Workflow request now runs on the native thread that received
-    it (`off_native_worker` is deleted) and the attempt task is an ordinary
-    native task; sync reads run through a `read` helper on the blocking pool,
-    which step 7 replaces with a reader lane. Evidence retrieval stays whole on
-    the blocking pool, because its contracts service interleaves sync Work reads
-    with awaited session-evidence reads. Proof: a fan-out run driven from a
-    native worker leaves both wait counters unchanged.
+    Every Work and Workflow dispatch now runs as a detached native task that the
+    request awaits (`off_native_worker` is deleted), so a caller that stops
+    waiting abandons only the wait and settlement outlives the request (#3711).
+    The attempt task is an ordinary native task. Sync reads run through a
+    `read` helper on the blocking pool, which step 7 replaces with a reader
+    lane. Evidence retrieval stays whole on the blocking pool, because its
+    contracts service interleaves sync Work reads with awaited session-evidence
+    reads. Proof: a fan-out run driven from a native worker adds no native wait
+    at any Work or Workflow storage call site.
   - `transact` has no operation-id ledger yet. The ledger is new schema on stores
     with no migration path, so it ships with `journal.db` in step 8. Until then
     each domain keeps its own idempotency.
