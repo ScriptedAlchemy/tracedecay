@@ -1672,9 +1672,11 @@ mod tests {
 
         let wait_registry = Arc::clone(&registry);
         let wait_db_path = db_path.clone();
+        // The grace never ends this wait: a lost idle notification leaves it
+        // parked until the harness timeout.
         let wait = tokio::spawn(async move {
             wait_registry
-                .wait_idle(&wait_db_path, Duration::from_secs(1))
+                .wait_idle(&wait_db_path, Duration::from_hours(1))
                 .await
         });
         probe_started.notified().await;
@@ -1682,10 +1684,7 @@ mod tests {
         release_probe.notify_one();
 
         assert!(
-            tokio::time::timeout(Duration::from_millis(250), wait)
-                .await
-                .expect("idle notification must avoid the full grace")
-                .expect("wait task"),
+            wait.await.expect("wait task"),
             "a fresh idle probe must observe the completed replay"
         );
         registry.shutdown().await;
