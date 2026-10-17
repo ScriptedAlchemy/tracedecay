@@ -43,7 +43,28 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
         DoctorStorageFindingKindV1::RetentionBacklog => "retention_backlog",
         DoctorStorageFindingKindV1::TableGrowth => "table_growth",
         DoctorStorageFindingKindV1::PendingSchemaMigration => "pending_schema_migration",
+        DoctorStorageFindingKindV1::WalCheckpointPinned => "wal_checkpoint_pinned",
     }
+}
+
+/// Report a store whose WAL checkpoint outlived its fence: `holders` names
+/// what still holds a read slot (a reader of this daemon or another process)
+/// and the WAL size. The log grows until the holder lets go, so the finding
+/// is `Degraded` with complete coverage: the writer observed it directly.
+pub fn wal_checkpoint_pinned_finding(
+    store: &StoreKeyV1,
+    holders: &str,
+) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
+    let kind = DoctorStorageFindingKindV1::WalCheckpointPinned;
+    let finding = problem_finding(
+        kind,
+        store,
+        DoctorEvidenceStateV1::Degraded,
+        DoctorCoverageCompletenessV1::Complete,
+        holders,
+        "the WAL checkpoint fence expired with its read slot still held",
+    )?;
+    DoctorStorageFindingV1::new(kind, finding)
 }
 
 /// Report a store whose historical schema migrations have not completed.

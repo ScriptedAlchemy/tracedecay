@@ -677,3 +677,111 @@ fn a_footprint_budget_is_not_reported_as_an_unmounted_store() {
         DoctorEvidenceStateV1::Unknown
     );
 }
+
+/// #4097: a WAL whose checkpoint fence expired is a typed Doctor finding that
+/// names the process still holding its read slot.
+#[test]
+fn an_expired_wal_checkpoint_fence_is_a_finding_naming_its_holder() {
+    use tracedecay_runtime_core::shard_runtime::registry::{
+        CheckpointBlocker, CheckpointBlockers, CheckpointPressure, CheckpointWal,
+        PhysicalWriterRuntimeSnapshot,
+    };
+    use tracedecay_runtime_core::shard_runtime::telemetry::{
+        RuntimeTelemetryProjection, ShardRuntimeHealth, ShardRuntimeTelemetry,
+    };
+
+    let admission = tracedecay_store::AdmissionConfigV1::default();
+    let shard = |pressure| ShardRuntimeTelemetry {
+        binding: serde_json::from_value(serde_json::json!({
+            "shard_id": {
+                "brain_id": "brain.doctor-wal",
+                "profile_id": "profile.doctor-wal",
+                "scope": { "kind": "project", "project_id": "project.doctor-wal" }
+            },
+            "incarnation": 1,
+            "authority_epoch": 1
+        }))
+        .unwrap(),
+        state: tracedecay_store::RuntimeMaintenanceStateV1::Ready,
+        queue_budget: admission.per_shard_queue.clone(),
+        global_queue_budget_bytes: admission.global_queue_max_bytes,
+        queued_operations: 0,
+        queued_bytes: 0,
+        writer_present: true,
+        physical_reader_handles: 0,
+        general_reader_waiters: 0,
+        health_reader_waiters: 0,
+        client_leases: 0,
+        writer_busy_events: 0,
+        writer: Some(PhysicalWriterRuntimeSnapshot {
+            checkpoint_pressure: pressure,
+            ..PhysicalWriterRuntimeSnapshot::default()
+        }),
+        wal_bytes: None,
+        wal_budget: admission.wal.clone(),
+        memory_estimate_bytes: None,
+        health: ShardRuntimeHealth::Unknown,
+        pinned_profile: false,
+        idle_for_ms: 0,
+        eviction_eligible: false,
+        eviction_blocker_count: 0,
+    };
+    let wal = CheckpointWal {
+        frames: 1,
+        bytes: 300_000_000,
+    };
+    let projection = RuntimeTelemetryProjection {
+        per_shard_queue_budget: admission.per_shard_queue.clone(),
+        global_queue_budget_bytes: admission.global_queue_max_bytes,
+        wal_budget: admission.wal.clone(),
+        shards: vec![
+            shard(CheckpointPressure::FenceExpired {
+                wal,
+                holders: CheckpointBlockers {
+                    blockers: vec![CheckpointBlocker::ForeignConnection {
+                        pid: 4242,
+                        process: "sqlite3".to_owned(),
+                    }],
+                    omitted: 0,
+                },
+            }),
+            shard(CheckpointPressure::BlockGeneral {
+                wal,
+                blockers: CheckpointBlockers::default(),
+            }),
+            shard(CheckpointPressure::Open),
+        ],
+        aggregate:
+            tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryAggregate::default(),
+    };
+
+    let DoctorStorageFamilyReadV1::Observed { findings } = wal_checkpoint_pinned_read(&projection)
+    else {
+        panic!("an expired fence must be reported");
+    };
+    let [finding] = findings.as_slice() else {
+        panic!(
+            "only the expired fence is a finding, not the fence still inside its limit: {findings:?}"
+        );
+    };
+    assert_eq!(
+        finding.kind(),
+        tracedecay_contracts::doctor::DoctorStorageFindingKindV1::WalCheckpointPinned
+    );
+    assert_eq!(
+        finding.finding().state(),
+        tracedecay_contracts::doctor::DoctorEvidenceStateV1::Degraded
+    );
+    let evidence = format!("{:?}", finding.finding());
+    assert!(
+        evidence.contains("process:sqlite3[4242]") && evidence.contains("wal_bytes=300000000"),
+        "the finding names the holder and the WAL size: {evidence}"
+    );
+    assert_eq!(
+        wal_checkpoint_pinned_read(&RuntimeTelemetryProjection {
+            shards: Vec::new(),
+            ..projection
+        }),
+        DoctorStorageFamilyReadV1::Absent
+    );
+}

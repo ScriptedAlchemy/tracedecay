@@ -283,11 +283,10 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
     fn start_snapshot(&mut self) -> Result<(), ReaderWorkerError> {
         self.settle_deferred_end()?;
         if self.snapshot_active
-            || !self
-                .checkout
-                .inner
-                .checkpoint_blockers
-                .begin(self.checkout.worker.id)
+            || !self.checkout.inner.checkpoint_blockers.begin(
+                self.checkout.worker.id,
+                self.checkout.worker.client.revoker(),
+            )
         {
             return Err(ReaderWorkerError::SnapshotAlreadyActive);
         }

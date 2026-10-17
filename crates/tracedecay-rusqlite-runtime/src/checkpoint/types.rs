@@ -104,6 +104,13 @@ pub enum CheckpointBlocker {
         reader_id: u64,
         age: Duration,
     },
+    /// Another process holds the database open while no reader of this
+    /// runtime does, so it is the connection pinning the WAL. `pid` is that
+    /// process and `process` its command name.
+    ForeignConnection {
+        pid: u32,
+        process: String,
+    },
 }
 
 pub(crate) trait CheckpointBlockerSource: Send + Sync {
@@ -113,7 +120,29 @@ pub(crate) trait CheckpointBlockerSource: Send + Sync {
     /// this call began have rolled back, so a requested checkpoint never
     /// reports a reader that no caller still holds as pinning the WAL.
     fn await_released_snapshots(&self);
+
+    /// Ends every snapshot that has been open at least `age`: its worker
+    /// interrupts any running statement and rolls the read back, and the
+    /// snapshot's later reads fail as revoked. Returns how many were asked.
+    fn revoke_snapshots_older_than(&self, _age: Duration) -> usize {
+        0
+    }
 }
+
+/// How long a fenced drain lets in-flight snapshots run before it revokes
+/// them: the background read deadline.
+pub(crate) const FENCE_READ_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long a fence may stay up. Past it, whatever still pins the WAL is
+/// named in a finding, writes resume, and the checkpoint retries with backoff.
+pub(crate) const FENCE_LIMIT: Duration = Duration::from_secs(6);
+
+/// Retry interval while the fence is up.
+pub(crate) const FENCED_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// First and largest retry interval once the fence has expired.
+pub(crate) const EXPIRED_RETRY_MIN: Duration = Duration::from_secs(1);
+pub(crate) const EXPIRED_RETRY_MAX: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CheckpointMode {
@@ -308,6 +337,14 @@ pub enum CheckpointPressure {
         wal: CheckpointWal,
         blockers: CheckpointBlockers,
     },
+    /// A hard-pressure drain outlived its fence: `holders` still pin the WAL,
+    /// so the fence dropped and writes run while the checkpoint retries with
+    /// backoff. Past twice the hard limit the writer blocks again
+    /// ([`Self::BlockGeneral`]), so the WAL stays bounded.
+    FenceExpired {
+        wal: CheckpointWal,
+        holders: CheckpointBlockers,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -329,6 +366,7 @@ pub(crate) enum CheckpointDecision {
         report: CheckpointReport,
         snapshot_blockers: CheckpointBlockers,
         hard_drain_required: bool,
+        fence_expired: bool,
         elapsed: Duration,
     },
 }

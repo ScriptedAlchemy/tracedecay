@@ -1739,10 +1739,14 @@ impl ProjectOpenInputs<'_> {
             Arc::new(move || {
                 let unconverged = registry.unconverged_registered_schemas();
                 tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
-                    storage:
+                    storage: tracedecay_contracts::doctor::merge_storage_reads(
                         tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
                             &unconverged,
                         ),
+                        tracedecay_daemon_service::doctor_kernel::wal_checkpoint_pinned_read(
+                            &registry.runtime_telemetry(),
+                        ),
+                    ),
                     findings: registry.registered_schema_convergence_observations(),
                 }
             })
