@@ -81,16 +81,26 @@ use tracedecay_domain::test_fixtures::id;
 use tracedecay_domain::test_fixtures::digest;
 
 /// Runs `future` with no Tokio runtime anywhere on the stack, so any Tokio
-/// reactor, timer or blocking-pool call on the attempt path panics.
-fn without_tokio<F: std::future::Future>(future: F) -> F::Output {
-    let _probe = crate::invocation::NATIVE_WRITER_WAITS_PROBE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    native_runtime::block_on(async {
+/// reactor, timer or blocking-pool call on the attempt path panics. Like
+/// `spawn_for_worktree`, it polls the attempt on a blocking-pool thread, where
+/// synchronous storage ports may park without holding a native worker.
+fn without_tokio<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let outcome = native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_err());
-        future.await
+        native_runtime::NativeTask::spawn_off_native_thread(future)
+            .expect("native blocking pool available")
+            .wait()
+            .await
     })
-    .expect("native runtime available")
+    .expect("native runtime available");
+    match outcome {
+        native_runtime::NativeTaskOutcome::Completed(()) => {}
+        native_runtime::NativeTaskOutcome::Panicked(payload) => panic!("{payload}"),
+        native_runtime::NativeTaskOutcome::Cancelled => panic!("attempt task was cancelled"),
+    }
 }
 
 fn sha256_digest(bytes: &[u8]) -> ManifestDigest {
