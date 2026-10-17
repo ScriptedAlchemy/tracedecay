@@ -124,16 +124,14 @@ pub(crate) mod mimalloc_v3 {
 
     unsafe extern "C" fn sqlite_shutdown(_: *mut c_void) {}
 
-    /// Installs no owner heaps: in mimalloc 3.3.2, `mi_heap_delete` frees
-    /// every thread's part of the heap while those threads' pages still name
-    /// it. An owner's block freed afterwards by the thread that built it
-    /// dereferences the freed part or races the page move (#4152), and an
-    /// owner's state routinely outlives its heap.
+    /// First-class heaps stay unused: in mimalloc 3.3.2 `mi_heap_delete`
+    /// frees every thread's part of the heap while those threads' pages still
+    /// name it, so a block the building thread frees afterwards dereferences
+    /// the freed part (#4152).
     pub(crate) fn install() {
         if let Err(message) = install_process_allocator_release_v1(ProcessAllocatorReleaseV1 {
             release,
             collect_calling_thread: collect,
-            owner_heaps: None,
         }) {
             tracing::warn!(event = "process_allocator_release_install_failed", %message);
         }

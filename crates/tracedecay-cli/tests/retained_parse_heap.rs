@@ -78,18 +78,10 @@ fn releasing_retained_parses_returns_their_pages() {
     }
     let held = pool.holding().expect("retained documents");
     assert_eq!(held.documents, DOCUMENTS);
-    assert_eq!(
-        held.bytes, None,
-        "the shipped allocator has no owner heaps (#4152)"
-    );
 
     let before = anon_bytes();
-    assert_eq!(
-        pool.release(),
-        RetainedParsePoolReleaseV1::Released { bytes: None }
-    );
+    assert_eq!(pool.release(), RetainedParsePoolReleaseV1::Released);
     let freed = before.saturating_sub(anon_bytes());
-    eprintln!("RETAINED_RELEASE documents={DOCUMENTS} freed={freed}");
     assert_eq!(pool.holding(), None);
     assert!(
         freed >= 16 * MIB,
