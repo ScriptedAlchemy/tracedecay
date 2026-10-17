@@ -1,0 +1,17 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+py_test(
+    name = "score_test",
+    srcs = ["score.py", "test_score.py"],
+    main = "test_score.py",
+    imports = ["."],
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "scorecard_test",
+    srcs = ["scorecard.py", "test_scorecard.py"],
+    main = "test_scorecard.py",
+    imports = ["."],
+    legacy_create_init = 0,
+)

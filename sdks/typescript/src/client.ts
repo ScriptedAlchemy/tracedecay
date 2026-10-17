@@ -511,7 +511,7 @@ function decodeSse(
   frame: SseFrame,
   status: number,
   expectedCorrelationId: string,
-): { event: HttpSseEvent<unknown>; sequence?: string; frontier?: StreamFrontier } {
+): { event: HttpSseEvent<unknown>; sequence?: string; lastSequence?: string; frontier?: StreamFrontier } {
   const value = parseJson(frame.data, status);
   if (
     !isRecord(value) ||
@@ -593,6 +593,7 @@ function decodeSse(
       !isRecord(gap) ||
       !isSafeUnsignedInteger(gap.first_missing_sequence) ||
       !isSafeUnsignedInteger(gap.last_missing_sequence) ||
+      gap.first_missing_sequence !== eventData.sequence ||
       gap.first_missing_sequence > gap.last_missing_sequence ||
       !isRecord(gap.frontier) ||
       !isSafeUnsignedInteger(gap.frontier.next_sequence) ||
@@ -629,6 +630,21 @@ function decodeSse(
     event: eventName,
     data: eventData,
   };
+  if (eventName === "resume_gap") {
+    const gap = eventData.gap as Record<string, unknown>;
+    const frontier = gap.frontier as Record<string, unknown>;
+    return {
+      event,
+      sequence,
+      lastSequence: String(gap.last_missing_sequence),
+      frontier: {
+        nextSequence: incrementDecimal(String(gap.last_missing_sequence)),
+        ...(typeof frontier.resume_token === "string"
+          ? { resumeToken: frontier.resume_token }
+          : {}),
+      },
+    };
+  }
   return { event, sequence };
 }
 
@@ -985,8 +1001,8 @@ export class TraceDecayClient {
                 { status: response.status, payload: decoded.event },
               );
             }
-            lastSequence = decoded.sequence;
-            nextSequence = incrementDecimal(decoded.sequence);
+            lastSequence = decoded.lastSequence ?? decoded.sequence;
+            nextSequence = incrementDecimal(lastSequence);
           }
           yield {
             event: frame.event,

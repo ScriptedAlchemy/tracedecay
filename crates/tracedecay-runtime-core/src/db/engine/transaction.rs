@@ -163,6 +163,19 @@ impl Transaction {
         .await
     }
 
+    /// The writer owns completion resources even if this future is dropped.
+    pub async fn commit_with_on_commit<F>(self, on_commit: F) -> Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.settle(move |mut gate| async move {
+            let transaction = gate.take().ok_or(Error::TransactionClosed)?;
+            transaction.commit_async_with_on_commit(on_commit).await?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn rollback(self) -> Result<()> {
         self.settle(|mut gate| async move {
             let transaction = gate.take().ok_or(Error::TransactionClosed)?;

@@ -24,17 +24,19 @@ fn loopback_http_request_never_routes_through_a_system_proxy() {
     let target = TcpListener::bind("127.0.0.1:0").expect("bind target listener");
     let target_port = target.local_addr().expect("target address").port();
     let server = thread::spawn(move || {
-        let (mut stream, _) = target.accept().expect("direct loopback connection");
-        let mut head = [0u8; 2048];
-        let _ = stream.read(&mut head).expect("read request head");
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\n\
+        for _ in 0..2 {
+            let (mut stream, _) = target.accept().expect("direct loopback connection");
+            let mut head = [0u8; 2048];
+            let _ = stream.read(&mut head).expect("read request head");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\n\
 content-type: application/json\r\n\
 content-length: 2\r\n\
 connection: close\r\n\r\n{}",
-            )
-            .expect("write canned response");
+                )
+                .expect("write canned response");
+        }
     });
 
     // SAFETY: this integration binary holds only this test, so no other
@@ -48,6 +50,15 @@ connection: close\r\n\r\n{}",
         "0123456789abcdef0123456789abcdef",
         Duration::from_secs(5),
     );
+    let local =
+        tracedecay_sdk::client::Client::builder(tracedecay_sdk::client::ConnectionMode::local(
+            format!("http://127.0.0.1:{target_port}"),
+            "project.proxy",
+            "synthetic-local-token",
+        ))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("local client under proxy environment");
     // SAFETY: as above.
     unsafe {
         std::env::remove_var("HTTP_PROXY");
@@ -64,6 +75,13 @@ connection: close\r\n\r\n{}",
         Err(error) => panic!("expected a protocol error from the direct target, got {error:?}"),
         Ok(_) => panic!("the canned non-canonical response must fail as protocol"),
     }
+    assert!(
+        matches!(
+            local.cancel_operation("request.proxy"),
+            Err(tracedecay_sdk::client::ClientError::Protocol { .. })
+        ),
+        "local request must reach the direct target"
+    );
     server.join().expect("target server thread");
 
     proxy

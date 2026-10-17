@@ -1,11 +1,4 @@
-import tdSessions from "../../../profile-pack/proj_ae394425f7837d4f/sessions.json";
-import tdMessages from "../../../profile-pack/proj_ae394425f7837d4f/messages-spine.json";
-import tdObs from "../../../profile-pack/proj_ae394425f7837d4f/observations-slim.json";
-import coreSessions from "../../../profile-pack/proj_2c558f8ce42d5cdf/sessions.json";
-import zfsSessions from "../../../profile-pack/proj_e19f6f383c982ea8/sessions.json";
-import iosSessions from "../../../profile-pack/proj_8007f36f3654e9be/sessions.json";
-import movieSessions from "../../../profile-pack/proj_a812b7edf6fab331/sessions.json";
-import mqvpnSessions from "../../../profile-pack/proj_2f28a204e57c569f/sessions.json";
+import { profileRows } from "../../profilePack";
 import { PROJECTS, type ProjectBody } from "../../data/fixtures";
 import { HUB_ID, type AttributionHop, type LabGrain, type LabIdentity } from "./labUtil";
 
@@ -18,6 +11,16 @@ type SessionRow = {
 };
 
 type SpineRow = { session_id?: string };
+
+const tdSessions = profileRows<SessionRow>("proj_ae394425f7837d4f/sessions.json") ?? [];
+const tdMessages = profileRows<SpineRow>("proj_ae394425f7837d4f/messages-spine.json") ?? [];
+const tdObs = profileRows<SpineRow>("proj_ae394425f7837d4f/observations-slim.json") ?? [];
+const coreSessions = profileRows<SessionRow>("proj_2c558f8ce42d5cdf/sessions.json") ?? [];
+const zfsSessions = profileRows<SessionRow>("proj_e19f6f383c982ea8/sessions.json") ?? [];
+const iosSessions = profileRows<SessionRow>("proj_8007f36f3654e9be/sessions.json") ?? [];
+const movieSessions = profileRows<SessionRow>("proj_a812b7edf6fab331/sessions.json") ?? [];
+const mqvpnSessions = profileRows<SessionRow>("proj_2f28a204e57c569f/sessions.json") ?? [];
+export const PROFILE_INTERIOR_AVAILABLE = profileRows<SessionRow>("proj_ae394425f7837d4f/sessions.json") !== null;
 
 const TRACEDECAY_ID = "proj_ae394425f7837d4f";
 

@@ -1064,6 +1064,7 @@ impl ExactSqlTransaction {
 
     fn enqueue_commit(
         mut self,
+        on_commit: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Result<async_channel::Receiver<Result<ExactSqlCommitReceipt, ExactSqlError>>, ExactSqlError>
     {
         let sender = self
@@ -1072,18 +1073,34 @@ impl ExactSqlTransaction {
             .ok_or(ExactSqlError::TransactionClosed)?;
         let (reply, response) = async_channel::bounded(1);
         sender
-            .try_send(TransactionCommand::Commit { reply })
+            .try_send(TransactionCommand::Commit { reply, on_commit })
             .map_err(|error| map_transaction_send_error(error, &self.lease))?;
         Ok(response)
     }
     pub fn commit(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
         let lease = Arc::clone(&self.lease);
-        recv_writer_reply(self.enqueue_commit()?).map_err(|_| transaction_terminal_error(&lease))?
+        recv_writer_reply(self.enqueue_commit(None)?)
+            .map_err(|_| transaction_terminal_error(&lease))?
     }
 
     pub async fn commit_async(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
         let lease = Arc::clone(&self.lease);
-        self.enqueue_commit()?
+        self.enqueue_commit(None)?
+            .recv()
+            .await
+            .map_err(|_| transaction_terminal_error(&lease))?
+    }
+
+    /// Transfers resources to the writer until SQLite commits or rolls back.
+    pub async fn commit_async_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> Result<ExactSqlCommitReceipt, ExactSqlError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let lease = Arc::clone(&self.lease);
+        self.enqueue_commit(Some(Box::new(on_commit)))?
             .recv()
             .await
             .map_err(|_| transaction_terminal_error(&lease))?
