@@ -65,7 +65,7 @@ impl McpRequestContext {
 }
 
 // Keep retained request payloads bounded independently of handler execution.
-const MAX_PENDING_REQUESTS: usize = 8;
+pub const MAX_PENDING_REQUESTS: usize = 8;
 
 type InFlight<'a> = Pin<Box<dyn Future<Output = Option<RequestId>> + Send + 'a>>;
 
