@@ -483,6 +483,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
 ) -> Result<SpawnedWorker, ReaderStartError> {
     let worker_open_path = locator.worker_open_path()?;
     let (sender, receiver) = async_channel::unbounded();
+    let receiver = crate::storage_pool::CommandReceiver::new(receiver);
     let snapshot_sender = Arc::new(Mutex::new(None));
     let worker_snapshot_sender = Arc::clone(&snapshot_sender);
     let in_snapshot = Arc::new(AtomicBool::new(false));
@@ -563,7 +564,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
 
 async fn run<E: ReaderQueryExecutor>(
     mut connection: Connection,
-    receiver: async_channel::Receiver<WorkerCommand>,
+    receiver: crate::storage_pool::CommandReceiver<WorkerCommand>,
     published: Arc<Mutex<Option<async_channel::Sender<SnapshotCommand>>>>,
     in_snapshot: &AtomicBool,
     revocation: &SnapshotRevocation,
@@ -601,7 +602,15 @@ async fn run<E: ReaderQueryExecutor>(
                             revocation,
                             expires,
                         };
-                        if run_snapshot(transaction, commands, executor, &admission, &end).await {
+                        if run_snapshot(
+                            transaction,
+                            crate::storage_pool::CommandReceiver::new(commands),
+                            executor,
+                            &admission,
+                            &end,
+                        )
+                        .await
+                        {
                             return;
                         }
                         // Clear the flag before the sender: a release that
@@ -624,7 +633,9 @@ async fn run<E: ReaderQueryExecutor>(
 
 /// Wait for the next command, returning the polling thread's heap whenever
 /// the sampler asked for it while the worker idles.
-async fn next_command(receiver: &async_channel::Receiver<WorkerCommand>) -> Option<WorkerCommand> {
+async fn next_command(
+    receiver: &crate::storage_pool::CommandReceiver<WorkerCommand>,
+) -> Option<WorkerCommand> {
     loop {
         collect_idle_thread_heap_v1();
         match crate::storage_pool::timeout(IDLE_THREAD_COLLECTION_WAIT_V1, receiver.recv()).await {
@@ -637,7 +648,7 @@ async fn next_command(receiver: &async_channel::Receiver<WorkerCommand>) -> Opti
 
 async fn run_snapshot<E: ReaderQueryExecutor>(
     transaction: crate::storage_pool::TaskTransaction<'_>,
-    commands: async_channel::Receiver<SnapshotCommand>,
+    commands: crate::storage_pool::CommandReceiver<SnapshotCommand>,
     executor: &mut E,
     admission: &ReaderAdmissionRecorder,
     end: &SnapshotEnd<'_>,

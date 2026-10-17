@@ -457,7 +457,7 @@ pub(crate) async fn run_writer_command(
                                 run_transaction(
                                     transaction,
                                     opened_at,
-                                    receiver,
+                                    crate::storage_pool::CommandReceiver::new(receiver),
                                     before,
                                     shutdown_requested,
                                     &lease,
@@ -597,7 +597,7 @@ fn release_rolled_back(
 async fn run_transaction(
     transaction: TaskTransaction<'_>,
     opened_at: Instant,
-    receiver: async_channel::Receiver<TransactionCommand>,
+    receiver: crate::storage_pool::CommandReceiver<TransactionCommand>,
     before: u64,
     shutdown_requested: &Arc<AtomicBool>,
     lease: &TransactionLeaseState,

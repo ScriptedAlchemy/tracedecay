@@ -143,6 +143,30 @@ where
     }
 }
 
+/// The receiving end of a pool task's command channel.
+///
+/// Dropping it discards the queued commands, as a std receiver does, so a
+/// caller waiting on the reply a queued command carries learns the task is
+/// gone instead of waiting on a channel its own sender keeps open.
+pub(crate) struct CommandReceiver<T>(async_channel::Receiver<T>);
+
+impl<T> CommandReceiver<T> {
+    pub(crate) fn new(receiver: async_channel::Receiver<T>) -> Self {
+        Self(receiver)
+    }
+
+    pub(crate) fn recv(&self) -> async_channel::Recv<'_, T> {
+        self.0.recv()
+    }
+}
+
+impl<T> Drop for CommandReceiver<T> {
+    fn drop(&mut self) {
+        self.0.close();
+        while self.0.try_recv().is_ok() {}
+    }
+}
+
 /// `future`, or `None` once `duration` passes first. Timed on the pool's
 /// timer when polled by a pool task.
 pub(crate) async fn timeout<F: Future>(duration: Duration, future: F) -> Option<F::Output> {
