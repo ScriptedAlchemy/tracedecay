@@ -42,9 +42,9 @@ use tracedecay_contracts::{
     DisclosureClass, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
     WorkAttemptCapacityVerdictV1, WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1,
-    WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1, WorkAttemptEffectStorageErrorV1,
-    WorkAttemptEffectStoragePortV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
-    WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
+    WorkAttemptEffectReadPortV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1,
+    WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1, WorkAttemptInsertOutcome,
+    WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
 use tracedecay_domain::{
@@ -455,7 +455,9 @@ impl WorkAttemptEffectStoragePortV1 for AttemptStore {
         rows.effects.insert(key, next.clone());
         Ok(next)
     }
+}
 
+impl WorkAttemptEffectReadPortV1 for AttemptStore {
     fn load_effect_dispatch(
         &self,
         authority: &WorkAuthority,
@@ -579,6 +581,120 @@ impl Fixture {
         self.rows
             .sealed_evidence(&self.authority, self.identity())
             .expect("terminal evidence is sealed with the attempt row")
+    }
+}
+
+impl Fixture {
+    fn steps(&self) -> FixtureSteps<'_> {
+        FixtureSteps {
+            attempts: &self.attempts,
+            effects: &self.effects,
+        }
+    }
+}
+
+/// The driver's steps answered synchronously by the in-memory services.
+struct FixtureSteps<'fixture> {
+    attempts: &'fixture WorkAttemptService<AttemptStore>,
+    effects: &'fixture WorkAttemptEffectServiceV1<AttemptStore>,
+}
+
+impl AttemptStepsV1 for FixtureSteps<'_> {
+    fn mark_running(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        actual_route: WorkProviderRouteV1,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(self.attempts.mark_running(context, identity, actual_route))
+    }
+
+    fn mark_provider_unavailable(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        observed_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(
+            self.attempts
+                .mark_provider_unavailable(context, identity, observed_at),
+        )
+    }
+
+    fn fail_recovery(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(self.attempts.fail_recovery(context, identity, evidence))
+    }
+
+    fn acknowledge_cancellation(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        acknowledged_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(self.attempts.acknowledge_cancellation(
+            context,
+            identity,
+            acknowledged_at,
+        ))
+    }
+
+    fn escalate_cancellation(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        escalated_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(
+            self.attempts
+                .escalate_cancellation(context, identity, escalated_at),
+        )
+    }
+
+    fn settle_with_artifacts(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+        artifacts: Vec<WorkArtifactRefV1>,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(
+            self.attempts
+                .settle_with_artifacts(context, identity, evidence, artifacts),
+        )
+    }
+
+    fn record_dispatch(
+        &self,
+        context: &RequestContext,
+        attempt: &WorkAttemptV1,
+        dispatched_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptEffectDispatchOutcomeV1, ApplicationProblem>> + Send
+    {
+        std::future::ready(self.effects.record_dispatch(
+            context,
+            attempt.identity().clone(),
+            attempt.execution().effect_state(),
+            dispatched_at,
+            attempt.execution().deadline(),
+        ))
+    }
+
+    fn settle_dispatch(
+        &self,
+        context: &RequestContext,
+        attempt: &WorkAttemptIdentityV1,
+        resolution: WorkAttemptEffectResolutionV1,
+        resolved_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptEffectHolderV1, ApplicationProblem>> + Send {
+        std::future::ready(
+            self.effects
+                .settle(context, attempt, resolution, resolved_at),
+        )
     }
 }
 
@@ -828,8 +944,7 @@ fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
         let admitted_environment =
             admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
         execute_provider_with_environment(
-            &fixture.attempts,
-            &fixture.effects,
+            &fixture.steps(),
             Some(&workflow_artifacts),
             &fixture.context,
             &fixture.attempt,
@@ -1013,8 +1128,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
         std::env::set_var(&ambient_secret, "ambient-secret");
     }
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -1079,8 +1193,7 @@ fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success() {
         let admitted_environment =
             admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
         execute_provider_with_environment(
-            &fixture.attempts,
-            &fixture.effects,
+            &fixture.steps(),
             Some(&workflow_artifacts),
             &fixture.context,
             &fixture.attempt,
@@ -1261,10 +1374,10 @@ fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
             std::future::pending::<()>().await;
         };
 
+        let steps = fixture.steps();
         tokio::select! {
             () = execute_provider_with_environment(
-                &fixture.attempts,
-                &fixture.effects,
+                &steps,
                 Some(&workflow_artifacts),
                 &fixture.context,
                 &fixture.attempt,
@@ -1397,8 +1510,7 @@ async fn a_cancellation_requested_before_mark_running_seals_cancelled() {
     let route = requested_route(WorkProviderBackendV1::ClaudeCodeCli);
 
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -1502,8 +1614,7 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
     let admitted_environment =
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -1741,8 +1852,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
     let admitted_environment =
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -1884,7 +1994,7 @@ async fn a_fallback_that_is_also_refused_keeps_both_denials_on_the_record() {
 
     // Sealed exactly as `run_attempt` seals it.
     settle_unstarted(
-        &fixture.attempts,
+        &fixture.steps(),
         &fixture.context,
         fixture.identity(),
         &fixture.attempt,
@@ -1893,7 +2003,8 @@ async fn a_fallback_that_is_also_refused_keeps_both_denials_on_the_record() {
         },
         denial.fallback.clone(),
         None,
-    );
+    )
+    .await;
     assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
     let evidence = fixture.sealed_evidence();
     assert_eq!(
@@ -1987,8 +2098,7 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
     let admitted_environment =
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -2036,7 +2146,7 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
     );
 
     settle_unstarted(
-        &fixture.attempts,
+        &fixture.steps(),
         &fixture.context,
         fixture.identity(),
         &fixture.attempt,
@@ -2045,7 +2155,8 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
         },
         None,
         None,
-    );
+    )
+    .await;
 
     assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
     assert_eq!(
