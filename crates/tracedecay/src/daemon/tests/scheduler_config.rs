@@ -370,15 +370,16 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     let server = save_scheduled_automation(&engine, &handshake, true).await;
     let cg = server.cg().await;
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
-    let finished = NativeTask::spawn(async move {
-        let _ = finished_tx.send(());
-    })
-    .expect("native task");
-    tokio::time::timeout(tokio::time::Duration::from_secs(2), finished_rx)
-        .await
-        .expect("finished owner barrier timed out")
-        .expect("finished owner barrier sender dropped");
+    let finished = NativeTask::spawn(async {}).expect("native task");
+    // The planted owner must read as finished to both re-enables. A signal
+    // sent from inside its body precedes the task's end, and a task that has
+    // not ended is a live owner the re-enables rightly notify.
+    assert!(matches!(
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), finished.wait())
+            .await
+            .expect("finished owner barrier timed out"),
+        tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(())
+    ));
     engine
         .automation_configured_override
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -456,16 +457,20 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     drop(schedulers);
     engine.shutdown_all().await;
 
-    assert!(matches!(
-        (first, second),
-        (
-            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started,
-            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
-        ) | (
-            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified,
-            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
-        )
-    ));
+    assert!(
+        matches!(
+            (first, second),
+            (
+                tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started,
+                tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified
+            ) | (
+                tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::RunningNotified,
+                tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
+            )
+        ),
+        "one re-enable must start the owner and the other must notify it: {:?}",
+        (first, second)
+    );
 }
 
 #[cfg(unix)]
