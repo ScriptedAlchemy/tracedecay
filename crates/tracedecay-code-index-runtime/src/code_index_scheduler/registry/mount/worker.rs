@@ -152,6 +152,8 @@ pub(super) struct WorktreeWorkerV1 {
 }
 
 /// State the worker carries from one pass to the next.
+// Each flag is an independent bound with its own lifetime; none is a mode.
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct WorktreeWorkerLoopStateV1 {
     /// Headroom other owners released, and the share of it this worker
     /// already answered.
@@ -3326,6 +3328,8 @@ fn withhold_prepared_seat(result: &mut PreparedSeatV1) {
 
 /// One blocking source reconcile and what it decides from, captured before
 /// it leaves the worker.
+// The flags are the pass's independent observations, sampled before the step.
+#[allow(clippy::struct_excessive_bools)]
 struct SourceReconcileStepV1 {
     stashed_successor: Option<CodeIndexReconcileOutcomeV1>,
     scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
