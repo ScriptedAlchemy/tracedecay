@@ -938,41 +938,87 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn threads() -> usize {
+        fs::read_dir("/proc/self/task").unwrap().count()
+    }
+
+    fn attach_seeded_store(
+        directory: &std::path::Path,
+        binding: &StoreRuntimeBindingV1,
+        index: usize,
+    ) -> RepositoryRuntimePhysicalAttachment {
+        let path = directory.join(format!("store-{index}.sqlite3"));
+        create_identity_database(&path, "seed");
+        RepositoryPhysicalAttachmentFactory
+            .attach(
+                &native_runtime(),
+                binding.clone(),
+                locator(binding),
+                path.canonicalize().unwrap(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap()
+    }
+
+    /// Runs the calling test alone in a child process, so a process-wide
+    /// thread count sees no other test's threads. True in the child.
+    #[cfg(target_os = "linux")]
+    fn alone_in_child_process(test: &str) -> bool {
+        const CHILD: &str = "TRACEDECAY_ATTACHMENT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let test = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test.as_str(), "--exact", "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{test} failed in its child process:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn sixty_four_attached_stores_run_on_the_fixed_storage_pool() {
+        if !alone_in_child_process("sixty_four_attached_stores_run_on_the_fixed_storage_pool") {
+            return;
+        }
         let directory = TempDir::new().unwrap();
         let binding = binding();
-        let attachments = (0..64)
-            .map(|index| {
-                let path = directory.path().join(format!("store-{index}.sqlite3"));
-                create_identity_database(&path, "seed");
-                let attachment = RepositoryPhysicalAttachmentFactory
-                    .attach(
-                        &native_runtime(),
-                        binding.clone(),
-                        locator(&binding),
-                        path.canonicalize().unwrap(),
-                        AdmissionConfigV1::default(),
-                    )
-                    .unwrap();
-                let handle = attachment.exact_sql_handle().unwrap();
-                handle
-                    .execute(statement(
-                        "INSERT INTO identity_probe (value) VALUES (?)",
-                        vec![ExactSqlValue::Text(format!("store-{index}"))],
-                    ))
-                    .unwrap();
-                let rows = handle
-                    .query(
-                        statement("SELECT count(*) FROM identity_probe", vec![]),
-                        Duration::from_secs(10),
-                    )
-                    .unwrap();
-                assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
-                attachment
-            })
-            .collect::<Vec<_>>();
+        let exercise = |index: usize| {
+            let attachment = attach_seeded_store(directory.path(), &binding, index);
+            let handle = attachment.exact_sql_handle().unwrap();
+            handle
+                .execute(statement(
+                    "INSERT INTO identity_probe (value) VALUES (?)",
+                    vec![ExactSqlValue::Text(format!("store-{index}"))],
+                ))
+                .unwrap();
+            let rows = handle
+                .query(
+                    statement("SELECT count(*) FROM identity_probe", vec![]),
+                    Duration::from_secs(10),
+                )
+                .unwrap();
+            assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
+            attachment
+        };
+        // The first store starts the pool and the native runtime.
+        let mut attachments = vec![exercise(0)];
+        let started = threads();
+        attachments.extend((1..64).map(exercise));
+        let grown = threads().saturating_sub(started);
 
+        assert!(
+            grown <= 4,
+            "63 more stores grew the process by {grown} threads; a store may own none"
+        );
         assert_eq!(
             threads_named("tracedecay-rusqlite"),
             0,
@@ -987,6 +1033,46 @@ mod tests {
             attachment.drain().unwrap();
             attachment.close_and_join().unwrap();
         }
+    }
+
+    #[test]
+    fn a_pool_task_is_refused_synchronous_store_calls_instead_of_parked() {
+        let directory = TempDir::new().unwrap();
+        let attachment = attach_seeded_store(directory.path(), &binding(), 0);
+        let handle = attachment.exact_sql_handle().unwrap();
+        let on_pool = handle.clone();
+        let (report, refused) = mpsc::channel();
+        crate::storage_pool::spawn(async move {
+            let write = on_pool.execute(statement(
+                "INSERT INTO identity_probe (value) VALUES ('from the pool')",
+                vec![],
+            ));
+            let read = on_pool.query(
+                statement("SELECT count(*) FROM identity_probe", vec![]),
+                Duration::from_secs(10),
+            );
+            let _ = report.send((write.map(|_| ()), read.map(|_| ())));
+        })
+        .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+        let (write, read) = refused
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a pool task's synchronous store calls must return, not park");
+        assert_eq!(write, Err(ExactSqlError::WriterUnavailable));
+        assert!(read.is_err(), "a pool task's synchronous read must refuse");
+        let rows = handle
+            .query(
+                statement("SELECT count(*) FROM identity_probe", vec![]),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(
+            rows.rows[0].values,
+            vec![ExactSqlValue::Integer(1)],
+            "a refused write must not reach the writer"
+        );
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
     }
 
     #[test]
