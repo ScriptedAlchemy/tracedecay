@@ -82,7 +82,7 @@ pub enum WorkAttemptInsertOutcome {
 /// Durable attempt persistence. Every transition is a compare-and-swap on the
 /// exact prior lease fence and state, so a fenced-out writer cannot advance a
 /// row it no longer owns.
-pub trait WorkAttemptStoragePort: Send + Sync {
+pub trait WorkAttemptStoragePort {
     /// Mints the next monotonic fence epoch for this authority scope.
     fn next_fence_epoch(&self, authority: &WorkAuthority) -> Result<u64, WorkAttemptStorageError>;
 

@@ -604,89 +604,6 @@ impl WorkProductAttemptAdmissionPortV1 for WorkProductAttemptStore {
             attempt: admission.attempt.clone(),
         })
     }
-
-    fn admit_retry(
-        &self,
-        _admission: &tracedecay_contracts::WorkProductRetryAdmissionV1,
-    ) -> Result<
-        (
-            WorkProductEventCommitV1,
-            tracedecay_contracts::WorkRetryAttemptOutcomeV1,
-        ),
-        WorkProductAttemptAdmissionErrorV1,
-    > {
-        Err(WorkProductAttemptAdmissionErrorV1::Unavailable)
-    }
-
-    fn admit_synthesis(
-        &self,
-        admission: &tracedecay_contracts::WorkProductSynthesisAdmissionV1,
-    ) -> Result<
-        (
-            WorkProductEventCommitV1,
-            tracedecay_contracts::WorkSynthesisInsertOutcome,
-        ),
-        WorkProductAttemptAdmissionErrorV1,
-    > {
-        admission.validate()?;
-        let attempt = &admission.admission.attempt;
-        let payload = serde_json::to_string(attempt)
-            .map_err(|_| WorkProductAttemptAdmissionErrorV1::Unavailable)?;
-        let key = attempt_key(&admission.admission.authority, attempt.identity());
-        let mut rows = self
-            .inner
-            .lock()
-            .map_err(|_| WorkProductAttemptAdmissionErrorV1::Unavailable)?;
-        let product = rows
-            .events
-            .iter()
-            .find(|event| {
-                event.commit.event().command_id() == &admission.admission.product_draft.command_id
-            })
-            .map(|event| event.commit.clone());
-        let synthesis = rows.syntheses.get(&key).cloned();
-        match (product, synthesis, rows.attempts.get(&key)) {
-            (Some(product), Some(existing), Some(existing_attempt))
-                if existing.request_digest == admission.synthesis.request_digest
-                    && existing.result == admission.synthesis.result
-                    && existing_attempt == &payload =>
-            {
-                return Ok((
-                    product,
-                    WorkSynthesisInsertOutcome::Replayed(Box::new(existing.result)),
-                ));
-            }
-            (Some(_), Some(_), Some(_)) => {
-                return Err(WorkProductAttemptAdmissionErrorV1::IdentityConflict);
-            }
-            (None, None, None) => {}
-            _ => return Err(WorkProductAttemptAdmissionErrorV1::IdentityConflict),
-        }
-        let (next_graph, product) = product_commit_for(&rows, &admission.admission.product_draft)?;
-        attempt
-            .validate_graph_admission(&next_graph)
-            .map_err(|_| WorkProductAttemptAdmissionErrorV1::InvalidAdmission)?;
-        if matches!(
-            attempt_capacity(
-                &rows,
-                &admission.admission.authority,
-                attempt.identity().task_id(),
-                &admission.admission.concurrency,
-            )
-            .map_err(|_| WorkProductAttemptAdmissionErrorV1::Unavailable)?
-            .verdict(),
-            WorkAttemptCapacityVerdictV1::Exhausted(_)
-        ) {
-            return Err(WorkProductAttemptAdmissionErrorV1::CapacityExceeded);
-        }
-        rows.graph = Some(next_graph);
-        rows.events.push(StoredProductEvent {
-            commit: product.clone(),
-        });
-        rows.attempts.insert(key.clone(), payload);
-        rows.syntheses.insert(key, admission.synthesis.clone());
-        Ok((product, WorkSynthesisInsertOutcome::Inserted))
-    }
 }
 
 impl WorkAttemptStoragePort for WorkProductAttemptStore {
@@ -912,5 +829,75 @@ impl WorkSynthesisAdmissionStoragePort for WorkProductAttemptStore {
             .get(&attempt_key(authority, identity))
             .cloned()
             .ok_or(WorkAttemptStorageError::AttemptConflict)
+    }
+
+    fn admit_synthesis(
+        &self,
+        admission: &tracedecay_contracts::WorkProductSynthesisAdmissionV1,
+    ) -> Result<
+        (
+            WorkProductEventCommitV1,
+            tracedecay_contracts::WorkSynthesisInsertOutcome,
+        ),
+        WorkProductAttemptAdmissionErrorV1,
+    > {
+        admission.validate()?;
+        let attempt = &admission.admission.attempt;
+        let payload = serde_json::to_string(attempt)
+            .map_err(|_| WorkProductAttemptAdmissionErrorV1::Unavailable)?;
+        let key = attempt_key(&admission.admission.authority, attempt.identity());
+        let mut rows = self
+            .inner
+            .lock()
+            .map_err(|_| WorkProductAttemptAdmissionErrorV1::Unavailable)?;
+        let product = rows
+            .events
+            .iter()
+            .find(|event| {
+                event.commit.event().command_id() == &admission.admission.product_draft.command_id
+            })
+            .map(|event| event.commit.clone());
+        let synthesis = rows.syntheses.get(&key).cloned();
+        match (product, synthesis, rows.attempts.get(&key)) {
+            (Some(product), Some(existing), Some(existing_attempt))
+                if existing.request_digest == admission.synthesis.request_digest
+                    && existing.result == admission.synthesis.result
+                    && existing_attempt == &payload =>
+            {
+                return Ok((
+                    product,
+                    WorkSynthesisInsertOutcome::Replayed(Box::new(existing.result)),
+                ));
+            }
+            (Some(_), Some(_), Some(_)) => {
+                return Err(WorkProductAttemptAdmissionErrorV1::IdentityConflict);
+            }
+            (None, None, None) => {}
+            _ => return Err(WorkProductAttemptAdmissionErrorV1::IdentityConflict),
+        }
+        let (next_graph, product) = product_commit_for(&rows, &admission.admission.product_draft)?;
+        attempt
+            .validate_graph_admission(&next_graph)
+            .map_err(|_| WorkProductAttemptAdmissionErrorV1::InvalidAdmission)?;
+        if matches!(
+            attempt_capacity(
+                &rows,
+                &admission.admission.authority,
+                attempt.identity().task_id(),
+                &admission.admission.concurrency,
+            )
+            .map_err(|_| WorkProductAttemptAdmissionErrorV1::Unavailable)?
+            .verdict(),
+            WorkAttemptCapacityVerdictV1::Exhausted(_)
+        ) {
+            return Err(WorkProductAttemptAdmissionErrorV1::CapacityExceeded);
+        }
+        rows.graph = Some(next_graph);
+        rows.events.push(StoredProductEvent {
+            commit: product.clone(),
+        });
+        rows.attempts.insert(key.clone(), payload);
+        rows.syntheses.insert(key, admission.synthesis.clone());
+        Ok((product, WorkSynthesisInsertOutcome::Inserted))
     }
 }
