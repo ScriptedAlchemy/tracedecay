@@ -685,7 +685,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                     let _span = tracing::trace_span!("rusqlite.reader.execute").entered();
                     {
                         executor
-                            .execute_read(&transaction, &request)
+                            .execute_read(transaction, &request)
                             .map_err(ReaderWorkerError::Storage)
                     }
                 };
