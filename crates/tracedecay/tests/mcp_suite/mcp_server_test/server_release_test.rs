@@ -17,9 +17,6 @@ fn open_files_under(roots: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// A store a finished server leaves open keeps its writer and three reader
-/// threads for the rest of the test process (#3990). `run` shuts the server
-/// down, so once the caller's handle drops every store it opened must close.
 #[tokio::test]
 async fn a_shut_down_direct_server_releases_its_stores() {
     let dir = TempDir::new().unwrap();
@@ -34,7 +31,7 @@ async fn a_shut_down_direct_server_releases_its_stores() {
         .expect("direct test graph holds its registered runtime")
         .profile_root_for_test()
         .to_path_buf();
-    let roots = [project.clone(), canonical_root_identity(&profile_root)];
+    let roots = [project, canonical_root_identity(&profile_root)];
     let server = Box::pin(McpServer::new(cg, None)).await;
     let released_server = Arc::downgrade(&server);
     assert!(
