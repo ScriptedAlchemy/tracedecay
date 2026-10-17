@@ -1160,24 +1160,13 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
         .expect("session runtime registry");
     let convergence_gate = registry.block_registered_schema_convergence_for_test();
 
-    let admission = registry.project_sessions(project_id, [project_root]);
-    tokio::pin!(admission);
-    let convergence_blocked = convergence_gate.wait_until_blocked();
-    tokio::pin!(convergence_blocked);
-    let database = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        tokio::select! {
-            result = &mut admission => {
-                let database = result.expect("registered project sessions");
-                convergence_blocked.await;
-                database
-            }
-            () = &mut convergence_blocked => {
-                admission.await.expect("registered project sessions")
-            }
-        }
-    })
-    .await
-    .expect("daemon admission and convergence scheduling must not stall");
+    // The gate holds convergence until the assertions below, so an admission
+    // that waited on convergence never returns.
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions");
+    convergence_gate.wait_until_blocked().await;
 
     assert_eq!(
         registry.registered_schema_convergence_status(&shard_id),
