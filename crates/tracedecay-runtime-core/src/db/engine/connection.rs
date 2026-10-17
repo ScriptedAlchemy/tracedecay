@@ -53,11 +53,6 @@ impl ReadConnection {
         self.connection.read_snapshot().await
     }
 
-    /// A read snapshot that ends itself `lifetime` after it began.
-    pub(crate) async fn read_snapshot_for(&self, lifetime: Duration) -> Result<ReadSnapshot> {
-        self.connection.read_snapshot_for(lifetime).await
-    }
-
     /// Live reader-pool telemetry for this exact store.
     #[must_use]
     pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
@@ -240,16 +235,10 @@ impl Connection {
 
     #[tracing::instrument(name = "runtime_core.db.snapshot.read", level = "trace", skip_all)]
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
-        self.read_snapshot_for(tracedecay_rusqlite_runtime::reader::READ_SNAPSHOT_LIFETIME)
-            .await
-    }
-
-    /// A read snapshot that ends itself `lifetime` after it began.
-    pub(crate) async fn read_snapshot_for(&self, lifetime: Duration) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
         run_blocking("SQL snapshot", join_error, move || {
-            runtime.begin_read_snapshot_for(priority, READER_WAIT, lifetime)
+            runtime.begin_read_snapshot_with_priority(priority, READER_WAIT)
         })
         .await?
         .map(ReadSnapshot::from_runtime)
