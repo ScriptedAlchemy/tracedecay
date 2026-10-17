@@ -92,9 +92,6 @@ pub struct RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
-    attempts: tracedecay_contracts::WorkProductAttemptServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
     storage: tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
 }
 
@@ -127,7 +124,6 @@ impl RegisteredWorkProductServicesV1 {
                 storage.clone(),
                 storage.clone(),
             ),
-            attempts: tracedecay_contracts::WorkProductAttemptServiceV1::new(storage.clone()),
             storage,
         })
     }
@@ -359,14 +355,6 @@ impl RegisteredWorkProductServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.mutations
-    }
-
-    pub const fn attempts(
-        &self,
-    ) -> &tracedecay_contracts::WorkProductAttemptServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.attempts
     }
 }
 

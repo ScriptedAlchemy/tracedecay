@@ -550,14 +550,7 @@ fn recovery_retry_replaces_the_original_across_active_attempt_census() {
         admission.live_attempts,
         vec![replacement.identity().attempt_id().clone()]
     );
-    let workflow_live = store
-        .storage()
-        .workflow_bound_live_attempts(
-            &authority,
-            original.identity().task_id(),
-            original.identity().run_id(),
-        )
-        .unwrap();
+    let workflow_live = workflow_bound_live_attempts(&store, &authority, original.identity());
     assert_eq!(workflow_live.len(), 1);
     assert_eq!(
         workflow_live[0].attempt_id,
@@ -629,17 +622,7 @@ fn recovery_retry_replaces_the_original_across_active_attempt_census() {
         .unwrap();
     assert_eq!(admission.total_attempts, 2);
     assert!(admission.live_attempts.is_empty());
-    assert!(
-        store
-            .storage()
-            .workflow_bound_live_attempts(
-                &authority,
-                original.identity().task_id(),
-                original.identity().run_id(),
-            )
-            .unwrap()
-            .is_empty()
-    );
+    assert!(workflow_bound_live_attempts(&store, &authority, original.identity()).is_empty());
 }
 
 #[test]
@@ -1125,6 +1108,24 @@ fn in_job<R: Send + 'static, E: Send + 'static>(
     tracedecay_rusqlite_runtime::native_runtime::block_on(store.storage().transact(call))
         .expect("native runtime")
         .expect("the writer runs the job")
+}
+
+/// The run's live attempts a workflow binds, read in a writer job the way a
+/// run-control transition reads them.
+fn workflow_bound_live_attempts(
+    store: &RegisteredWorkStore,
+    authority: &WorkAuthority,
+    attempt: &WorkAttemptIdentityV1,
+) -> Vec<tracedecay_contracts::WorkRunLiveAttemptV1> {
+    let (authority, task_id, run_id) = (
+        authority.clone(),
+        attempt.task_id().clone(),
+        attempt.run_id().clone(),
+    );
+    in_job(store, move |storage| {
+        storage.workflow_bound_live_attempts(&authority, &task_id, &run_id)
+    })
+    .unwrap()
 }
 
 fn begin_dispatch(
