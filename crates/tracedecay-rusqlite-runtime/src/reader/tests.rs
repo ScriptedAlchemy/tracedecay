@@ -1,22 +1,13 @@
 use std::{
-    collections::BTreeSet,
     path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use rusqlite::{Connection, Transaction};
-use tracedecay_contracts::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope,
-    storage::{
-        StorageTelemetryReadV1, StoreKeyV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
-    },
-};
-use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_store::{
     AdmissionConfigV1, LocatorDigest, OperationPriorityV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1,
@@ -26,11 +17,9 @@ use tracedecay_store::{
 
 use super::pool::FOREGROUND_RESERVED_GENERAL_WORKERS;
 use super::*;
-use crate::SqliteStoreSizeTelemetryPort;
 use crate::checkpoint::CheckpointBlockerSource;
 #[cfg(unix)]
 use crate::connection::OpenedDatabaseFile;
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[derive(Clone)]
 pub(super) struct CountExecutor;
@@ -155,42 +144,6 @@ impl TestStore {
         );
         ExistingReaderLocator::new(self.binding.clone(), locator, path).unwrap()
     }
-}
-
-fn telemetry_context(scope: ResolvedScope) -> RequestContext {
-    let actor = ActorId::new("actor.storage-telemetry-test").unwrap();
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.storage-telemetry-test").unwrap(),
-        1,
-        ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
-        actor.clone(),
-        UtcMicros(1),
-        UtcMicros(i64::MAX),
-        scope.clone(),
-        BTreeSet::from([CapabilityId::new("capability.storage.telemetry").unwrap()]),
-        BTreeSet::from([UseCaseId::new("use-case.storage.telemetry.read").unwrap()]),
-        DisclosureClass::Metadata,
-    )
-    .unwrap();
-    RequestContext::new(
-        actor,
-        scope,
-        grant,
-        RequestId::new("request.storage-telemetry-test").unwrap(),
-        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
-        CancellationContext::active("cancel.storage-telemetry-test").unwrap(),
-    )
-    .unwrap()
-}
-
-fn telemetry_scope() -> ResolvedScope {
-    ResolvedScope::new(
-        ProjectId::new("project.storage-telemetry-test").unwrap(),
-        RepositoryId::new("repository.storage-telemetry-test").unwrap(),
-        WorktreeId::new("worktree.storage-telemetry-test").unwrap(),
-        None,
-    )
-    .unwrap()
 }
 
 pub(super) struct Probe {
@@ -549,232 +502,6 @@ fn busy_snapshot_worker_bounds_the_table_sizes_reply() {
     busy.join().expect("join busy reader");
     client.shutdown();
     spawned.join.join().expect("join reader worker");
-}
-
-#[test]
-fn application_telemetry_port_reads_real_store_size() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::MAX,
-    );
-
-    let read = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(port.store_size(&context, &StoreKeyV1::new("reader.db").unwrap()));
-
-    let StorageTelemetryReadV1::Observed { sample } = read else {
-        panic!("production telemetry port must observe the retained store");
-    };
-    assert!(sample.page_size_bytes > 0);
-    assert!(sample.page_count > 0);
-    assert!(sample.freelist_pages <= sample.page_count);
-}
-
-#[test]
-fn application_telemetry_wait_does_not_block_the_async_runtime() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let handle = crate::exact_sql::ExactSqlHandle::attach_read_only(&pool);
-    let health_snapshot = handle
-        .begin_health_read_snapshot(Duration::from_secs(1))
-        .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        handle,
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::from_millis(100),
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap();
-    let runtime_advanced = Arc::new(AtomicBool::new(false));
-
-    runtime.block_on(async {
-        let runtime_advanced = Arc::clone(&runtime_advanced);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            runtime_advanced.store(true, Ordering::SeqCst);
-        });
-        let read = port
-            .table_growth(&context, &StoreKeyV1::new("reader.db").unwrap())
-            .await;
-        assert!(matches!(read, TableGrowthTelemetryReadV1::Unknown { .. }));
-    });
-
-    assert!(
-        runtime_advanced.load(Ordering::SeqCst),
-        "waiting for SQLite telemetry must yield the async runtime"
-    );
-    drop(health_snapshot);
-}
-
-#[test]
-fn application_telemetry_port_compares_table_payload_watermarks() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::MAX,
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-
-    let baseline =
-        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    assert!(
-        matches!(
-            baseline,
-            TableGrowthTelemetryReadV1::BaselineEstablished {
-                tables_observed,
-                ..
-            } if tables_observed > 0
-        ),
-        "the first read must report baseline establishment, got {baseline:?}"
-    );
-    pool.wait_until_quiescent();
-    let connection = Connection::open(&store.path).unwrap();
-    for value in 0..256 {
-        connection
-            .execute("INSERT INTO markers(value) VALUES (?1)", [value])
-            .unwrap();
-    }
-
-    let growth =
-        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    let TableGrowthTelemetryReadV1::Observed { samples, .. } = growth else {
-        panic!("the second read must compare table watermarks");
-    };
-    let markers = samples
-        .iter()
-        .find(|sample| sample.table.as_str() == "markers")
-        .expect("markers growth sample");
-    assert!(markers.current_bytes > markers.previous_bytes);
-}
-
-#[test]
-fn application_telemetry_port_marks_new_table_baseline_pending() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::MAX,
-    );
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-
-    let baseline =
-        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    assert!(matches!(
-        baseline,
-        TableGrowthTelemetryReadV1::BaselineEstablished { .. }
-    ));
-    pool.wait_until_quiescent();
-
-    let connection = Connection::open(&store.path).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TABLE created_after_baseline (id INTEGER PRIMARY KEY, payload TEXT);
-             INSERT INTO created_after_baseline(payload) VALUES ('new');",
-        )
-        .unwrap();
-
-    let read =
-        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    let TableGrowthTelemetryReadV1::Observed {
-        samples,
-        baseline_pending,
-        ..
-    } = read
-    else {
-        panic!("the second read must compare table watermarks");
-    };
-    assert!(
-        samples
-            .iter()
-            .all(|sample| sample.table.as_str() != "created_after_baseline"),
-        "new table must not be compared against fabricated zero bytes"
-    );
-    let pending = baseline_pending
-        .iter()
-        .find(|pending| pending.table.as_str() == "created_after_baseline")
-        .expect("new table is explicitly baseline-pending");
-    assert!(pending.current_bytes.get() > 0);
-}
-
-#[test]
-fn application_telemetry_port_reports_denied_table_growth_without_zero() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(
-        store.locator(),
-        AdmissionConfigV1::default().readers,
-        CountExecutor,
-    )
-    .unwrap();
-    let scope = telemetry_scope();
-    let context = telemetry_context(scope.clone());
-    let port = SqliteStoreSizeTelemetryPort::new(
-        crate::native_runtime::handle().expect("native runtime"),
-        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
-        StoreKeyV1::new("reader.db").unwrap(),
-        scope,
-        Duration::from_millis(100),
-    );
-
-    let read = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(port.table_growth(&context, &StoreKeyV1::new("other.db").unwrap()));
-
-    assert_eq!(
-        read,
-        TableGrowthTelemetryReadV1::Denied {
-            store: StoreKeyV1::new("other.db").unwrap(),
-        }
-    );
 }
 
 #[test]

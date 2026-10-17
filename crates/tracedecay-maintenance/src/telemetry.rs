@@ -902,18 +902,22 @@ mod retention_tick_log_tests {
 #[allow(clippy::expect_used, clippy::panic)]
 mod table_growth_tests {
     use std::collections::BTreeSet;
-
     use std::path::Path;
+    use std::time::Duration;
 
+    use futures_util::FutureExt;
     use tracedecay_contracts::ResolvedScope;
     use tracedecay_contracts::storage::{
-        TableGrowthDoctorEvidenceV1, TableGrowthTelemetryReadV1, TableGrowthUnavailableReasonV1,
-        table_growth_doctor_evidence,
+        StorageTelemetryReadV1, StoreKeyV1, StoreSizeTelemetryPort, TableGrowthDoctorEvidenceV1,
+        TableGrowthTelemetryReadV1, TableGrowthUnavailableReasonV1, table_growth_doctor_evidence,
     };
     use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracedecay_runtime_core::db::Database;
 
-    use super::{StoreTelemetrySamplingRegistry, storage_telemetry_request_context};
+    use super::{
+        GuardedStoreTelemetryPort, StoreTelemetrySamplingRegistry, TableGrowthStateV1,
+        storage_telemetry_request_context,
+    };
 
     const GROWN_TABLE_BYTES: u64 = 80 * 1024 * 1024;
 
@@ -1016,6 +1020,131 @@ mod table_growth_tests {
                 )),
             "doctor evidence must flag the grown table"
         );
+    }
+
+    async fn fixture_port(
+        database_path: &Path,
+        reader_wait: Duration,
+    ) -> (Database, StoreKeyV1, GuardedStoreTelemetryPort) {
+        let (database, scope) = growth_fixture(database_path).await;
+        let store = StoreKeyV1::new("project.db".to_owned()).expect("store key");
+        let port = GuardedStoreTelemetryPort::new(
+            database
+                .storage_telemetry_handle()
+                .expect("telemetry handle"),
+            store.clone(),
+            scope,
+            reader_wait,
+            TableGrowthStateV1::default(),
+        );
+        (database, store, port)
+    }
+
+    #[asupersync::test]
+    async fn store_size_reports_the_exact_page_pragmas() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (_database, store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+
+        let read = port.store_size(&context, &store).await;
+
+        let StorageTelemetryReadV1::Observed { sample } = read else {
+            panic!("the mounted store's size must be observed, got {read:?}");
+        };
+        assert!(sample.page_size_bytes > 0);
+        assert!(sample.page_count > 0);
+        assert!(sample.freelist_pages <= sample.page_count);
+    }
+
+    #[asupersync::test]
+    async fn a_table_created_after_the_baseline_is_pending_rather_than_grown_from_zero() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (database, store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+        assert!(matches!(
+            port.table_growth(&context, &store).await,
+            TableGrowthTelemetryReadV1::BaselineEstablished { .. }
+        ));
+        database
+            .execute_write_batch(
+                "create a table after the baseline",
+                "CREATE TABLE created_after_baseline (payload TEXT NOT NULL); \
+                 INSERT INTO created_after_baseline VALUES ('new');",
+            )
+            .await
+            .expect("new table");
+
+        let read = port.table_growth(&context, &store).await;
+
+        let TableGrowthTelemetryReadV1::Observed {
+            samples,
+            baseline_pending,
+            ..
+        } = read
+        else {
+            panic!("the second pass compares watermarks, got {read:?}");
+        };
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.table.as_str() != "created_after_baseline"),
+            "a new table must not be compared against fabricated zero bytes"
+        );
+        let pending = baseline_pending
+            .iter()
+            .find(|pending| pending.table.as_str() == "created_after_baseline")
+            .expect("the new table is explicitly baseline-pending");
+        assert!(pending.current_bytes.get() > 0);
+    }
+
+    #[asupersync::test]
+    async fn another_store_is_denied_without_bytes() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (_database, _store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+        let other = StoreKeyV1::new("other.db".to_owned()).expect("store key");
+        let denied = TableGrowthTelemetryReadV1::Denied {
+            store: other.clone(),
+        };
+
+        assert_eq!(port.table_growth(&context, &other).await, denied);
+        assert_eq!(port.latest_table_growth(&context, &other), denied);
+        assert_eq!(
+            port.store_size(&context, &other).await,
+            StorageTelemetryReadV1::Denied { store: other }
+        );
+    }
+
+    #[asupersync::test]
+    async fn a_telemetry_wait_yields_the_polling_thread() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (database, store, port) = fixture_port(
+            &temporary.path().join("project.db"),
+            Duration::from_millis(200),
+        )
+        .await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+        let health_reader = database
+            .begin_engine_health_read_snapshot()
+            .await
+            .expect("hold the reserved health reader");
+
+        let mut read = port.table_growth(&context, &store);
+        assert!(
+            (&mut read).now_or_never().is_none(),
+            "a measurement waiting on the health reader must not block the poller"
+        );
+        assert!(matches!(
+            read.await,
+            TableGrowthTelemetryReadV1::Unknown {
+                reason: TableGrowthUnavailableReasonV1::ReaderUnavailable,
+                ..
+            }
+        ));
+        drop(health_reader);
     }
 }
 
