@@ -105,9 +105,10 @@ pub struct ExactSqlHandle {
 /// Waits for the serialized writer actor's reply by parking the calling
 /// thread.
 ///
-/// Every synchronous storage port in this workspace (`WorkAttemptStoragePort`,
-/// `WorkflowRunStoragePort`, and their siblings) reaches the writer through
-/// these one-shot replies, so its caller must run where a thread may park: a
+/// Every synchronous handle storage port in this workspace
+/// (`WorkAttemptStoragePort`, `WorkflowRunReadPort`, and their siblings)
+/// reaches the writer through these one-shot replies, so its caller must run
+/// where a thread may park: a
 /// blocking-pool thread (`native_runtime::spawn_blocking`,
 /// `native_runtime::off_native_thread`, `NativeTask::spawn_off_native_thread`)
 /// or a dedicated thread. A wait on a native runtime thread (a worker or a
