@@ -896,7 +896,9 @@ mod tests {
         lifecycle.begin_draining();
         let terminal_cancelled = Arc::new(AtomicBool::new(false));
         let task_cancelled = Arc::clone(&terminal_cancelled);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A deadline shorter than the reserves behind the client drain floors
+        // that phase at `now`, so the drain would end at the first timer tick.
+        let deadline = Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
         let shutdown_lifecycle = lifecycle.clone();
         let shutdown = tokio::spawn(async move {
             coordinate_daemon_shutdown(&shutdown_lifecycle, deadline, async move {
