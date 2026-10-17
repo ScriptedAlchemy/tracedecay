@@ -106,61 +106,41 @@ pub async fn execute_work_application(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
-    let refused_request_id = request_id.clone();
-    // Keep the Work dispatch and activity-publication frame out of invocation callers.
-    off_native_worker(refused_request_id, async move {
-        let activity_database = registered.database.clone();
-        let activity_root = project_root.clone();
-        let mutates = work_invocation_mutates(&request);
-        let dispatched: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>> =
-            Box::pin(request_dispatch::dispatch_work_application(
-                registered,
-                attempt_processes,
-                observability_producer,
-                project_root,
-                request_id,
-                request,
-                observed_at,
-                deadline,
-                cancellation,
-            ));
-        let response = dispatched.await;
-        if mutates
-            && matches!(
-                response.outcome,
-                DaemonInvocationOutcome::WorkApplication { .. }
-            )
-            && let Some(project_root) = activity_root.as_deref()
-        {
-            tracedecay_session_memory::event_lane::publish(
-                &activity_database,
-                tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
-                project_root,
-                None,
-                1,
-                work_activity_detail(&response.outcome),
-            )
-            .await;
-        }
-        response
-    })
-    .await
-}
-
-/// Serves a Work or Workflow request off native runtime workers. Their storage
-/// ports are synchronous and park the calling thread on every writer wait,
-/// and a parked worker drives no other task.
-async fn off_native_worker(
-    request_id: String,
-    request: impl Future<Output = DaemonInvocationResponse> + Send + 'static,
-) -> DaemonInvocationResponse {
-    match tracedecay_runtime_core::native_runtime::off_native_thread(request).await {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::error!(%error, "Work request did not run on the blocking pool");
-            DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
-        }
+    let activity_database = registered.database.clone();
+    let activity_root = project_root.clone();
+    let mutates = work_invocation_mutates(&request);
+    // Keep the Work dispatch frame out of invocation callers.
+    let dispatched: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>> =
+        Box::pin(request_dispatch::dispatch_work_application(
+            registered,
+            attempt_processes,
+            observability_producer,
+            project_root,
+            request_id,
+            request,
+            observed_at,
+            deadline,
+            cancellation,
+        ));
+    let response = dispatched.await;
+    if mutates
+        && matches!(
+            response.outcome,
+            DaemonInvocationOutcome::WorkApplication { .. }
+        )
+        && let Some(project_root) = activity_root.as_deref()
+    {
+        tracedecay_session_memory::event_lane::publish(
+            &activity_database,
+            tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
+            project_root,
+            None,
+            1,
+            work_activity_detail(&response.outcome),
+        )
+        .await;
     }
+    response
 }
 
 fn publish_committed_task_activity_in_background(

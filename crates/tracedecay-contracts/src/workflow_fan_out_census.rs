@@ -74,7 +74,10 @@ pub struct WorkflowFanOutCensusBackfillPageV1 {
     pub continuation: Option<crate::WorkflowActiveRunRecoveryCursorV1>,
 }
 
-pub trait WorkflowFanOutCensusStoragePort: Send + Sync {
+/// The census reads. A storage that can also persist implements
+/// [`WorkflowFanOutCensusStoragePort`]. Neither carries a `Send + Sync`
+/// bound, so a storage scoped to one writer transaction can implement them.
+pub trait WorkflowFanOutCensusReadPort {
     fn latest_census(
         &self,
         run_id: &RunId,
@@ -85,11 +88,6 @@ pub trait WorkflowFanOutCensusStoragePort: Send + Sync {
         run_id: &RunId,
         workflow_sequence: u64,
     ) -> Result<Option<WorkflowFanOutCensusV1>, WorkflowFanOutCensusError>;
-
-    fn persist_census(
-        &self,
-        census: &WorkflowFanOutCensusV1,
-    ) -> Result<WorkflowFanOutCensusPersistOutcomeV1, WorkflowFanOutCensusError>;
 
     fn pending_census_observations(
         &self,
@@ -103,6 +101,13 @@ pub trait WorkflowFanOutCensusStoragePort: Send + Sync {
         authority: &WorkAuthority,
         after: Option<&crate::WorkflowActiveRunRecoveryCursorV1>,
     ) -> Result<WorkflowFanOutCensusBackfillPageV1, WorkflowFanOutCensusError>;
+}
+
+pub trait WorkflowFanOutCensusStoragePort: WorkflowFanOutCensusReadPort {
+    fn persist_census(
+        &self,
+        census: &WorkflowFanOutCensusV1,
+    ) -> Result<WorkflowFanOutCensusPersistOutcomeV1, WorkflowFanOutCensusError>;
 
     fn mark_census_observability_durable(
         &self,

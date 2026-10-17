@@ -9,7 +9,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkflowDefinition};
 
-use crate::exact_sql::{ExactSqlTransaction, ExactSqlValue};
+use crate::exact_sql::ExactSqlValue;
 
 use super::{
     decode_json, definition_digest, encode_definition, encode_json, execute_tx, execute_tx_changed,
@@ -18,7 +18,7 @@ use super::{
 };
 
 pub(super) fn apply_workflow_effect(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     prepared: &WorkflowEffectPreparedV1,
     applied_at: UtcMicros,
 ) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
@@ -50,7 +50,7 @@ pub(super) fn apply_workflow_effect(
 /// carry the stored disposition's revision, never silently coerced; a
 /// replayed command returns the stored disposition unchanged.
 fn apply_lifecycle_command(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     command: &WorkflowDefinitionLifecycleCommand,
 ) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
     let outcome = super::disposition::apply_lifecycle_transition(transaction, command)
@@ -96,7 +96,7 @@ fn lifecycle_success(
 }
 
 fn apply_definition_registration(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     definition: &WorkflowDefinition,
     registered_at: UtcMicros,
 ) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
@@ -159,7 +159,7 @@ fn apply_definition_registration(
 }
 
 fn apply_handoff_issue(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     grant: &TaskHandoffGrant,
 ) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
     let existing = query_tx(
@@ -201,7 +201,7 @@ fn apply_handoff_issue(
 }
 
 fn apply_handoff_redeem(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     token_digest: &ManifestDigest,
     expected_scope: &TaskHandoffScope,
     consumed_at: UtcMicros,

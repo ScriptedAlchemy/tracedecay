@@ -16,8 +16,8 @@ use tracedecay_domain::{
 };
 
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
-    ExactSqlValue, integer_column as sql_integer, text_column as sql_text,
+    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlValue,
+    integer_column as sql_integer, text_column as sql_text,
 };
 use crate::repository::RetainedExactSqlCapability;
 use crate::work::RegisteredWorkQuery;
@@ -52,15 +52,60 @@ pub struct WorkflowSqliteAuthority {
 }
 
 impl WorkflowSqliteAuthority {
-    pub fn from_retained_exact_sql(
+    pub async fn from_retained_exact_sql(
         retained: RetainedExactSqlCapability,
     ) -> Result<Self, WorkflowSqliteAuthorityBuildError> {
-        require_workflow_schema(retained.handle())?;
-        Ok(Self { retained })
+        let authority = Self { retained };
+        authority
+            .read(|authority| require_workflow_schema(authority.handle()))
+            .await
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)??;
+        Ok(authority)
     }
 
     pub(crate) fn handle(&self) -> &ExactSqlHandle {
         self.retained.handle()
+    }
+
+    /// Runs `job` over the Workflow (and Work) ports of storage scoped to one
+    /// writer transaction; see [`crate::work::WorkSqliteStorage::transact`].
+    pub async fn transact<R, E, F>(&self, job: F) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(crate::work_run_control::WorkSqliteJobStorage<'_>) -> Result<R, E>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        crate::work::WorkSqliteStorage::from_retained_exact_sql(self.retained.clone())
+            .transact(job)
+            .await
+    }
+
+    /// Runs the synchronous Workflow read `read` on the blocking pool, so the
+    /// awaiting task parks no runtime thread. The storage executor replaces
+    /// the hop with a reader lane (docs/plans/storage, step 7).
+    pub async fn read<R>(
+        &self,
+        read: impl FnOnce(&Self) -> R + Send + 'static,
+    ) -> Result<R, ExactSqlError>
+    where
+        R: Send + 'static,
+    {
+        let authority = self.clone();
+        crate::native_runtime::spawn_blocking(move || read(&authority))
+            .await
+            .map_err(ExactSqlError::ReaderUnavailable)
+    }
+
+    /// Whether any effect is still before-effect or in-flight in
+    /// `worktree_id`. A read failure stays unavailable to cleanup callers.
+    pub fn has_pending_effects(
+        &self,
+        worktree_id: &tracedecay_domain::WorktreeId,
+    ) -> Result<bool, WorkflowEffectAuthorityErrorV1> {
+        effect_holder::has_pending_effects(self.handle(), worktree_id)
     }
 
     pub fn load_definition_source(
@@ -212,17 +257,8 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<Option<WorkflowDefinitionDisposition>, WorkflowDefinitionAuthorityError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| definition_authority_unavailable())?;
-        let disposition =
-            disposition::load_disposition_tx(&transaction, definition_id, definition_version)
-                .map_err(|_| definition_authority_unavailable())?;
-        transaction
-            .commit()
-            .map_err(|_| definition_authority_unavailable())?;
-        Ok(disposition)
+        disposition::load_disposition_tx(self.handle(), definition_id, definition_version)
+            .map_err(|_| definition_authority_unavailable())
     }
 
     #[tracing::instrument(
@@ -570,12 +606,12 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
     }
 }
 
-impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
+impl WorkflowEffectAuthorityPortV1 for crate::work_run_control::WorkSqliteJobStorage<'_> {
     fn has_pending_effects(
         &self,
         worktree_id: &tracedecay_domain::WorktreeId,
     ) -> Result<bool, WorkflowEffectAuthorityErrorV1> {
-        effect_holder::has_pending_effects(self.handle(), worktree_id)
+        effect_holder::has_pending_effects(self.transaction, worktree_id)
     }
 
     #[tracing::instrument(
@@ -588,6 +624,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         identity: &WorkflowEffectIdentityV1,
         prepared: &WorkflowEffectPreparedV1,
     ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+        let transaction = self.transaction;
         if prepared.input_digest() != identity.input_digest()
             || prepared
                 .operation()
@@ -608,12 +645,8 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         let prepared_payload_digest = prepared
             .payload_digest()
             .map_err(|_| workflow_effect_codec_unavailable())?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(workflow_effect_unavailable)?;
         let existing = query_tx(
-            &transaction,
+            transaction,
             WORKFLOW_EFFECT_SELECT,
             vec![ExactSqlValue::Text(
                 identity.idempotency_key().as_str().to_owned(),
@@ -624,7 +657,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             let persisted_digest =
                 sql_text(&row.values, 0).ok_or_else(workflow_effect_codec_unavailable)?;
             if persisted_digest != identity_digest.as_str() {
-                let _ = transaction.rollback();
                 return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
             }
             let persisted_identity = decode_workflow_effect_identity(&row.values)?;
@@ -633,7 +665,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
                 .map_err(|_| workflow_effect_codec_unavailable())?
                 != identity_digest
             {
-                let _ = transaction.rollback();
                 return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
             }
             let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
@@ -642,7 +673,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
                     .operation()
                     .is_some_and(|operation| operation != persisted_identity.operation())
             {
-                let _ = transaction.rollback();
                 return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
             }
             let record = decode_workflow_effect_record(&row.values)?;
@@ -657,15 +687,13 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
                     .map_err(|_| workflow_effect_codec_unavailable())?
                     != identity_digest
                 {
-                    let _ = transaction.rollback();
                     return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
                 }
             }
-            transaction.commit().map_err(workflow_effect_unavailable)?;
             return Ok(record);
         }
         execute_tx(
-            &transaction,
+            transaction,
             "INSERT INTO workflow_effect_journal (
                  idempotency_key, identity_digest, identity_payload,
                  identity_payload_digest, prepared_payload,
@@ -687,7 +715,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             ],
         )
         .map_err(workflow_effect_unavailable)?;
-        transaction.commit().map_err(workflow_effect_unavailable)?;
         Ok(WorkflowEffectJournalRecordV1::before_effect())
     }
 
@@ -697,19 +724,16 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         prepared: &WorkflowEffectPreparedV1,
         ended_at: UtcMicros,
     ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+        let transaction = self.transaction;
         let reserved = self.reserve_effect(identity, prepared)?;
         if reserved.terminal().is_some() {
-            return reconcile_workflow_effect(self.handle(), identity, reserved);
+            return reconcile_workflow_effect(transaction, identity, reserved);
         }
         let identity_digest = identity
             .identity_digest()
             .map_err(|_| workflow_effect_codec_unavailable())?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(workflow_effect_unavailable)?;
         let current = query_tx(
-            &transaction,
+            transaction,
             WORKFLOW_EFFECT_SELECT,
             vec![ExactSqlValue::Text(
                 identity.idempotency_key().as_str().to_owned(),
@@ -721,7 +745,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             .first()
             .ok_or_else(workflow_effect_codec_unavailable)?;
         if sql_text(&row.values, 0) != Some(identity_digest.as_str()) {
-            let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
         }
         let persisted_identity = decode_workflow_effect_identity(&row.values)?;
@@ -730,7 +753,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             .map_err(|_| workflow_effect_codec_unavailable())?
             != identity_digest
         {
-            let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
         }
         let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
@@ -739,16 +761,14 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
                 .operation()
                 .is_some_and(|operation| operation != persisted_identity.operation())
         {
-            let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
         }
         let current_record = decode_workflow_effect_record(&row.values)?;
         if current_record.terminal().is_some() {
-            transaction.commit().map_err(workflow_effect_unavailable)?;
-            return reconcile_workflow_effect(self.handle(), identity, current_record);
+            return reconcile_workflow_effect(transaction, identity, current_record);
         }
         let claimed = execute_tx_changed(
-            &transaction,
+            transaction,
             "UPDATE workflow_effect_journal
              SET state = 'in_flight', updated_at = ?2
              WHERE idempotency_key = ?1
@@ -761,13 +781,12 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         )
         .map_err(workflow_effect_unavailable)?;
         if claimed != 1 {
-            let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
         }
         let outcome = if persisted_identity.deadline().is_elapsed_at(ended_at) {
             WorkflowEffectOutcomeV1::Problem(WorkflowEffectProblemV1::TimedOut)
         } else {
-            effect_mutation::apply_workflow_effect(&transaction, &persisted_prepared, ended_at)?
+            effect_mutation::apply_workflow_effect(transaction, &persisted_prepared, ended_at)?
         };
         let terminal = WorkflowEffectTerminalV1::new(persisted_identity, ended_at, outcome)?;
         let terminal_payload =
@@ -776,7 +795,7 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             canonical_sha256(&("tracedecay.runtime.workflow-effect-terminal.v1", &terminal))
                 .map_err(|_| workflow_effect_codec_unavailable())?;
         let committed = execute_tx_changed(
-            &transaction,
+            transaction,
             "UPDATE workflow_effect_journal
              SET state = 'committed', terminal_payload = ?2,
                  terminal_payload_digest = ?3, updated_at = ?4
@@ -792,12 +811,10 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
         )
         .map_err(workflow_effect_unavailable)?;
         if committed != 1 {
-            let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
         }
-        transaction.commit().map_err(workflow_effect_unavailable)?;
         reconcile_workflow_effect(
-            self.handle(),
+            transaction,
             identity,
             WorkflowEffectJournalRecordV1::with_terminal(
                 WorkflowEffectJournalStateV1::Committed,
@@ -898,7 +915,7 @@ fn decode_workflow_effect_preparation(
 }
 
 fn reconcile_workflow_effect(
-    storage: &ExactSqlHandle,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     identity: &WorkflowEffectIdentityV1,
     record: WorkflowEffectJournalRecordV1,
 ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
@@ -912,11 +929,8 @@ fn reconcile_workflow_effect(
         .terminal()
         .cloned()
         .ok_or(WorkflowEffectAuthorityErrorV1::InvalidTransition)?;
-    let transaction = storage
-        .begin_immediate()
-        .map_err(workflow_effect_unavailable)?;
     let changed = execute_tx_changed(
-        &transaction,
+        transaction,
         "UPDATE workflow_effect_journal
          SET state = 'reconciled', updated_at = ?2
          WHERE idempotency_key = ?1 AND state = 'committed'",
@@ -928,7 +942,7 @@ fn reconcile_workflow_effect(
     .map_err(workflow_effect_unavailable)?;
     if changed == 0 {
         let current = query_tx(
-            &transaction,
+            transaction,
             WORKFLOW_EFFECT_SELECT,
             vec![ExactSqlValue::Text(
                 identity.idempotency_key().as_str().to_owned(),
@@ -949,7 +963,6 @@ fn reconcile_workflow_effect(
                 .map_err(|_| workflow_effect_codec_unavailable())?
                 != identity_digest
         {
-            let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
         }
         let persisted_prepared = decode_workflow_effect_preparation(&row.values)?;
@@ -958,23 +971,18 @@ fn reconcile_workflow_effect(
                 .operation()
                 .is_some_and(|operation| operation != persisted_identity.operation())
         {
-            let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::IdentityConflict);
         }
         let current_record = decode_workflow_effect_record(&row.values)?;
         if current_record.state() != WorkflowEffectJournalStateV1::Reconciled
             || current_record.terminal() != Some(&terminal)
         {
-            let _ = transaction.rollback();
             return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
         }
-        transaction.commit().map_err(workflow_effect_unavailable)?;
         return Ok(current_record);
     }
     if changed != 1 {
-        let _ = transaction.rollback();
         return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
     }
-    transaction.commit().map_err(workflow_effect_unavailable)?;
     WorkflowEffectJournalRecordV1::with_terminal(WorkflowEffectJournalStateV1::Reconciled, terminal)
 }

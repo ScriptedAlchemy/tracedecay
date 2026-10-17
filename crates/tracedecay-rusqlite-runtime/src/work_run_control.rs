@@ -99,10 +99,23 @@ impl WorkSqliteStorage {
         &self,
         read: impl FnOnce(&Self) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 + Send + 'static,
     ) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 {
+        self.read(read).await.unwrap_or_default()
+    }
+
+    /// Runs the synchronous Work read `read` on the blocking pool, so the
+    /// awaiting task parks no runtime thread. The storage executor replaces
+    /// the hop with a reader lane (docs/plans/storage, step 7).
+    pub async fn read<R>(
+        &self,
+        read: impl FnOnce(&Self) -> R + Send + 'static,
+    ) -> Result<R, ExactSqlError>
+    where
+        R: Send + 'static,
+    {
         let storage = self.clone();
         crate::native_runtime::spawn_blocking(move || read(&storage))
             .await
-            .unwrap_or_default()
+            .map_err(ExactSqlError::ReaderUnavailable)
     }
 }
 

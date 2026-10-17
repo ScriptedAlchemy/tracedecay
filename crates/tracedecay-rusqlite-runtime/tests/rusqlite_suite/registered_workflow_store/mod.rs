@@ -4,10 +4,31 @@ use std::path::PathBuf;
 
 use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
-use tracedecay_domain::LocatorDigest;
+use tracedecay_contracts::{
+    TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
+    TaskHandoffGrant, TaskHandoffScope, WorkflowActiveRunRecoveryCursorV1,
+    WorkflowActiveRunRecoveryPageV1, WorkflowArtifactPayload, WorkflowArtifactPersistOutcome,
+    WorkflowArtifactStoreError, WorkflowArtifactStorePort, WorkflowDefinitionAuthorityError,
+    WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,
+    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionTransitionOutcome,
+    WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1,
+    WorkflowEffectJournalRecordV1, WorkflowEffectPreparedV1, WorkflowFanOutAttemptBindingV1,
+    WorkflowFanOutCensusBackfillPageV1, WorkflowFanOutCensusError,
+    WorkflowFanOutCensusObservationV1, WorkflowFanOutCensusPersistOutcomeV1,
+    WorkflowFanOutCensusReadPort, WorkflowFanOutCensusStoragePort, WorkflowRunAppendOutcome,
+    WorkflowRunAppendRequest, WorkflowRunReadPort, WorkflowRunStorageError, WorkflowRunStoragePort,
+};
+use tracedecay_domain::{
+    LocatorDigest, ManifestDigest, RunId, UtcMicros, WorkArtifactRefV1, WorkAttemptIdentityV1,
+    WorkAuthority, WorkflowDefinition, WorkflowDefinitionId, WorkflowFanOutCensusV1,
+    WorkflowRunProjection,
+};
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
+use tracedecay_rusqlite_runtime::native_runtime::block_on;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
 use tracedecay_rusqlite_runtime::repository::RetainedExactSqlCapability;
+use tracedecay_rusqlite_runtime::work_run_control::WorkSqliteJobStorage;
+use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
 use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -163,4 +184,238 @@ fn locator(binding: &StoreRuntimeBindingV1) -> VerifiedStoreLocatorV1 {
         StoreIncarnationV1::new(1).expect("workflow store incarnation"),
         LocatorDigest::new(format!("sha256:{}", "5".repeat(64))).expect("workflow store digest"),
     )
+}
+
+/// The registered Workflow authority with every write run as one writer job,
+/// so the storage suites drive the contracts ports the way production jobs do.
+/// Reads go to the handle.
+#[derive(Clone)]
+pub struct WorkflowJobStorage(pub WorkflowSqliteAuthority);
+
+impl WorkflowJobStorage {
+    pub fn attach(store: &RegisteredWorkflowStore) -> Self {
+        Self(
+            block_on(WorkflowSqliteAuthority::from_retained_exact_sql(
+                store.retained_exact_sql(),
+            ))
+            .expect("native runtime")
+            .expect("attach workflow authority"),
+        )
+    }
+
+    fn job<R: Send + 'static, E: Send + 'static>(
+        &self,
+        job: impl Fn(WorkSqliteJobStorage<'_>) -> Result<R, E> + Send + Sync + 'static,
+        unavailable: E,
+    ) -> Result<R, E> {
+        block_on(self.0.transact(job))
+            .expect("native runtime")
+            .unwrap_or(Err(unavailable))
+    }
+}
+
+impl WorkflowRunReadPort for WorkflowJobStorage {
+    fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
+        self.0.projection(run_id)
+    }
+
+    fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
+        self.0.projections()
+    }
+
+    fn active_projection_page(
+        &self,
+        authority: &WorkAuthority,
+        after: Option<&WorkflowActiveRunRecoveryCursorV1>,
+    ) -> Result<WorkflowActiveRunRecoveryPageV1, WorkflowRunStorageError> {
+        self.0.active_projection_page(authority, after)
+    }
+
+    fn fan_out_binding(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<Option<WorkflowFanOutAttemptBindingV1>, WorkflowRunStorageError> {
+        self.0.fan_out_binding(identity)
+    }
+}
+
+impl WorkflowRunStoragePort for WorkflowJobStorage {
+    fn append(
+        &self,
+        request: &WorkflowRunAppendRequest,
+    ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
+        let request = request.clone();
+        self.job(
+            move |storage| storage.append(&request),
+            WorkflowRunStorageError::Unavailable,
+        )
+    }
+}
+
+impl WorkflowArtifactStorePort for WorkflowJobStorage {
+    fn persist(
+        &self,
+        payload: &WorkflowArtifactPayload,
+    ) -> Result<WorkflowArtifactPersistOutcome, WorkflowArtifactStoreError> {
+        let payload = payload.clone();
+        self.job(
+            move |storage| storage.persist(&payload),
+            WorkflowArtifactStoreError::Unavailable,
+        )
+    }
+
+    fn load(
+        &self,
+        artifact: &WorkArtifactRefV1,
+    ) -> Result<WorkflowArtifactPayload, WorkflowArtifactStoreError> {
+        let artifact = artifact.clone();
+        self.job(
+            move |storage| storage.load(&artifact),
+            WorkflowArtifactStoreError::Unavailable,
+        )
+    }
+}
+
+impl WorkflowFanOutCensusReadPort for WorkflowJobStorage {
+    fn latest_census(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<WorkflowFanOutCensusV1>, WorkflowFanOutCensusError> {
+        self.0.latest_census(run_id)
+    }
+
+    fn census_before(
+        &self,
+        run_id: &RunId,
+        workflow_sequence: u64,
+    ) -> Result<Option<WorkflowFanOutCensusV1>, WorkflowFanOutCensusError> {
+        self.0.census_before(run_id, workflow_sequence)
+    }
+
+    fn pending_census_observations(
+        &self,
+        limit: u16,
+    ) -> Result<Vec<WorkflowFanOutCensusObservationV1>, WorkflowFanOutCensusError> {
+        self.0.pending_census_observations(limit)
+    }
+
+    fn census_backfill_projection_page(
+        &self,
+        authority: &WorkAuthority,
+        after: Option<&WorkflowActiveRunRecoveryCursorV1>,
+    ) -> Result<WorkflowFanOutCensusBackfillPageV1, WorkflowFanOutCensusError> {
+        self.0.census_backfill_projection_page(authority, after)
+    }
+}
+
+impl WorkflowFanOutCensusStoragePort for WorkflowJobStorage {
+    fn persist_census(
+        &self,
+        census: &WorkflowFanOutCensusV1,
+    ) -> Result<WorkflowFanOutCensusPersistOutcomeV1, WorkflowFanOutCensusError> {
+        let census = census.clone();
+        self.job(
+            move |storage| storage.persist_census(&census),
+            WorkflowFanOutCensusError::Unavailable,
+        )
+    }
+
+    fn mark_census_observability_durable(
+        &self,
+        census: &WorkflowFanOutCensusV1,
+    ) -> Result<(), WorkflowFanOutCensusError> {
+        let census = census.clone();
+        self.job(
+            move |storage| storage.mark_census_observability_durable(&census),
+            WorkflowFanOutCensusError::Unavailable,
+        )
+    }
+}
+
+impl WorkflowEffectAuthorityPortV1 for WorkflowJobStorage {
+    fn has_pending_effects(
+        &self,
+        worktree_id: &tracedecay_domain::WorktreeId,
+    ) -> Result<bool, WorkflowEffectAuthorityErrorV1> {
+        self.0.has_pending_effects(worktree_id)
+    }
+
+    fn reserve_effect(
+        &self,
+        identity: &WorkflowEffectIdentityV1,
+        prepared: &WorkflowEffectPreparedV1,
+    ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+        let (identity, prepared) = (identity.clone(), prepared.clone());
+        self.job(
+            move |storage| storage.reserve_effect(&identity, &prepared),
+            WorkflowEffectAuthorityErrorV1::Unavailable("writer job".to_owned()),
+        )
+    }
+
+    fn execute_effect(
+        &self,
+        identity: &WorkflowEffectIdentityV1,
+        prepared: &WorkflowEffectPreparedV1,
+        ended_at: UtcMicros,
+    ) -> Result<WorkflowEffectJournalRecordV1, WorkflowEffectAuthorityErrorV1> {
+        let (identity, prepared) = (identity.clone(), prepared.clone());
+        self.job(
+            move |storage| storage.execute_effect(&identity, &prepared, ended_at),
+            WorkflowEffectAuthorityErrorV1::Unavailable("writer job".to_owned()),
+        )
+    }
+}
+
+impl WorkflowDefinitionAuthorityPort for WorkflowJobStorage {
+    fn insert(
+        &self,
+        definition: &WorkflowDefinition,
+    ) -> Result<(), WorkflowDefinitionAuthorityError> {
+        self.0.insert(definition)
+    }
+
+    fn load(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Option<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
+        self.0.load(definition_id, definition_version)
+    }
+
+    fn list(
+        &self,
+        definition_id: Option<&WorkflowDefinitionId>,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
+        self.0.list(definition_id)
+    }
+
+    fn load_disposition(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Option<WorkflowDefinitionDisposition>, WorkflowDefinitionAuthorityError> {
+        self.0.load_disposition(definition_id, definition_version)
+    }
+
+    fn transition(
+        &self,
+        command: &WorkflowDefinitionLifecycleCommand,
+    ) -> Result<WorkflowDefinitionTransitionOutcome, WorkflowDefinitionAuthorityError> {
+        self.0.transition(command)
+    }
+}
+
+impl TaskHandoffAuthorityPort for WorkflowJobStorage {
+    fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError> {
+        self.0.issue(grant)
+    }
+
+    fn consume(
+        &self,
+        token_digest: &ManifestDigest,
+        expected_scope: &TaskHandoffScope,
+        consumed_at: UtcMicros,
+    ) -> Result<TaskHandoffConsumeOutcome, TaskHandoffAuthorityError> {
+        self.0.consume(token_digest, expected_scope, consumed_at)
+    }
 }

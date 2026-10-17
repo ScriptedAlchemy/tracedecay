@@ -989,13 +989,15 @@ fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
             "artifact.provider.stdout"
         );
         assert_eq!(settled.artifacts()[0].byte_length(), stream.len() as u64);
-        assert_eq!(
-            workflow_artifacts
-                .load(&settled.artifacts()[0])
-                .unwrap()
-                .bytes(),
-            stream.as_bytes()
-        );
+        let artifact = settled.artifacts()[0].clone();
+        let payload = workflow_artifacts
+            .transact(move |storage| {
+                tracedecay_contracts::WorkflowArtifactStorePort::load(&storage, &artifact)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payload.bytes(), stream.as_bytes());
         let scheduled = std::time::Instant::now();
         let admitted = scheduled + std::time::Duration::from_micros(5);
         let started = scheduled + std::time::Duration::from_micros(10);
@@ -2374,6 +2376,6 @@ async fn provider_artifact_store() -> (
     )
     .await
     .unwrap();
-    let store = database.workflow_storage().unwrap();
+    let store = database.workflow_storage().await.unwrap();
     (directory, store)
 }

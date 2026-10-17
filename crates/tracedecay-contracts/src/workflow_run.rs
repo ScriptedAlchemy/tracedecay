@@ -51,13 +51,11 @@ impl WorkflowRunAppendOutcome {
     }
 }
 
-pub trait WorkflowRunStoragePort: Send + Sync {
+/// The journaled run reads. A storage that can also append implements
+/// [`WorkflowRunStoragePort`]. Neither carries a `Send + Sync` bound, so a
+/// storage scoped to one writer transaction can implement them.
+pub trait WorkflowRunReadPort {
     fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError>;
-
-    fn append(
-        &self,
-        request: &WorkflowRunAppendRequest,
-    ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError>;
 
     fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError>;
 
@@ -125,6 +123,13 @@ pub trait WorkflowRunStoragePort: Send + Sync {
         }
         Ok(binding)
     }
+}
+
+pub trait WorkflowRunStoragePort: WorkflowRunReadPort {
+    fn append(
+        &self,
+        request: &WorkflowRunAppendRequest,
+    ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -363,8 +368,10 @@ pub enum WorkflowArtifactPersistOutcome {
     Replayed,
 }
 
-/// Durable digest-addressed workflow artifact payload store.
-pub trait WorkflowArtifactStorePort: Send + Sync {
+/// Durable digest-addressed workflow artifact payload store. It carries no
+/// `Send + Sync` bound so a storage scoped to one writer transaction can
+/// implement it.
+pub trait WorkflowArtifactStorePort {
     fn persist(
         &self,
         payload: &WorkflowArtifactPayload,
