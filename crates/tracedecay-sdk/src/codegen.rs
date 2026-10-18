@@ -1025,14 +1025,25 @@ fn render_rust_operations(
 }
 
 fn render_types() -> String {
-    format!("{HEADER}{TYPES_SOURCE}")
+    format!("{HEADER}{TYPES_SOURCE}{}", operation_terminations_source())
+}
+
+/// The runtime list of terminal event names, derived from the catalog enum so
+/// SDK stream classification cannot drift from the server's terminal states.
+fn operation_terminations_source() -> String {
+    let names = TerminalState::ALL
+        .iter()
+        .map(|state| format!("\"{}\"", state.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("export const OPERATION_TERMINATIONS = [{names}] as const;\n")
 }
 
 fn render_dashboard_application(
     operations: &[Operation],
     dashboard_bindings: &BTreeMap<String, Vec<String>>,
 ) -> Result<String, Box<dyn Error>> {
-    let mut out = format!("{HEADER}{TYPES_SOURCE}");
+    let mut out = render_types();
     out.push_str(
         "\nexport interface ApplicationHttpBinding { readonly bindingIds: readonly [string, ...string[]]; readonly resultSchema: { readonly schemaId: string; readonly revision: number }; readonly terminalStates: readonly string[]; readonly cancellation: CanonicalCancellation; readonly receipt: \"operation\" | \"durable_effect\"; readonly reconciliation: \"not_required\" | \"required\" }\n\
          export const APPLICATION_HTTP_BINDINGS = {\n",
@@ -1100,7 +1111,7 @@ fn canonical_dashboard_bindings() -> Result<BTreeMap<String, Vec<String>>, Box<d
 const TYPES_SOURCE: &str = r##"export type UnknownValue = string & {};
 export type RetryDirective = "never" | "same_request" | "after_delay" | "after_revalidate" | "after_reconcile" | UnknownValue;
 export type LegalAction = "correct_request" | "reauthorize" | "refresh" | "retry" | "reconcile" | "reset" | "contact_administrator" | UnknownValue;
-export type OperationTermination = "completed" | "cancelled" | "timed_out" | "failed" | "unavailable" | "partial" | "effect_unknown" | UnknownValue;
+export type OperationTermination = (typeof OPERATION_TERMINATIONS)[number] | UnknownValue;
 export type EffectTermination = "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown" | UnknownValue;
 export type ApplicationProblemKind = "invalid_request" | "not_found_or_not_authorized" | "conflict" | "partial_effect" | "stale" | "unsupported" | "unavailable" | "execution_failed" | "reset_required" | "saturated" | "cancelled" | "timed_out" | UnknownValue;
 export type ApplicationUnavailableClassV1 = "authority" | "backend_unavailable" | "backend_disconnected" | "backend_retryable" | UnknownValue;

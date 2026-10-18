@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from 'react-router';
 import '../theme/tailwind.css';
+import { installDashboardAuthentication } from '../data/auth/install.ts';
 import { applyEmbeddedPublicPath, dashboardRouterBasename } from './embedBasename.ts';
 import { dashboardRouterForPath, ScopedEventsProvider } from './runtime.tsx';
 
@@ -15,6 +16,8 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+installDashboardAuthentication();
 
 const rootEl = document.getElementById('root');
 if (!rootEl) throw new Error('missing #root');
