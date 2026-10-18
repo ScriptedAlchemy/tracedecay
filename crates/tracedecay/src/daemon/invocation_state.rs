@@ -1068,7 +1068,10 @@ impl DaemonInvocationState {
     }
 
     #[tracing::instrument(name = "daemon.invocation_state.shutdown", level = "trace", skip_all)]
-    pub(super) async fn shutdown(&self) -> tracedecay_daemon_service::shutdown::ShutdownJoined {
+    pub(super) async fn shutdown(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> tracedecay_daemon_service::shutdown::ShutdownJoined {
         let started = std::time::Instant::now();
         let step = |outcome: &str| {
             log_daemon_event(
@@ -1108,7 +1111,7 @@ impl DaemonInvocationState {
         }
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         step("lsp_sessions_expired");
-        let mut expired = self.service.expire_all().await;
+        let mut expired = self.service.expire_all(deadline).await;
         step("invocation_service_expired");
         if expired.status.is_clean() && schedulers_timed_out {
             expired.status = ShutdownStatus::TimedOut;
@@ -1256,7 +1259,7 @@ mod shutdown_tests {
                 tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
                     "invocation",
                     || {},
-                    move |_| async move { state.shutdown().await },
+                    move |deadline| async move { state.shutdown(Some(deadline)).await },
                 ),
             ],
         )
@@ -1276,7 +1279,7 @@ mod shutdown_tests {
         state.cancel_admissions();
         let started = std::time::Instant::now();
         assert!(
-            state.shutdown().await.status.is_clean(),
+            state.shutdown(None).await.status.is_clean(),
             "empty invocation shutdown must expire cleanly"
         );
         assert!(

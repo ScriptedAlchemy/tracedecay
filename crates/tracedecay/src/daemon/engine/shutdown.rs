@@ -114,7 +114,7 @@ impl DaemonEngine {
                     let invocation_cancel = self.invocation.clone();
                     move || invocation_cancel.cancel_admissions()
                 },
-                move |_| async move { invocation_join.shutdown().await },
+                move |deadline| async move { invocation_join.shutdown(Some(deadline)).await },
             )],
             vec![
                 ShutdownOwner::new(
