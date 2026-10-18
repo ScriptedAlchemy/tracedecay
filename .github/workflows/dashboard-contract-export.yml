@@ -1,0 +1,73 @@
+# Temporary build route: remove after importing the canonical generated JSON.
+name: Export dashboard contract artifacts
+run-name: Export dashboard contracts for ${{ github.event.pull_request.head.sha }}
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dashboard-contract-export-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_BAZEL_TIMEOUT: "3600"
+      EXPORT_DIRECTORY: ${{ runner.temp }}/dashboard-contract-export
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+
+      - uses: ./.github/actions/setup-pnpm
+
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: ci-linux-test-v2
+
+      - name: Export the canonical dashboard schema
+        run: |
+          set -euo pipefail
+          mkdir -p "$EXPORT_DIRECTORY"
+          bazel run --config=ci --jobs=1 //sdks/codegen:dashboard_schema -- "$EXPORT_DIRECTORY/dashboard-contracts.schema.json"
+          test -s "$EXPORT_DIRECTORY/dashboard-contracts.schema.json"
+
+      # Preserve the schema before the independent fixture build starts.
+      - name: Upload the canonical dashboard schema
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-schema-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/dashboard-contract-export/dashboard-contracts.schema.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Serialize the real settings response fixture
+        run: |
+          set -euo pipefail
+          bazel test --config=ci --jobs=1 //crates/tracedecay-dashboard-api:unit_test \
+            --test_arg=settings_api::tests::wire::project_patch_serialization_preserves_settlement_and_refusals \
+            --test_arg=--exact --test_output=all --cache_test_results=no \
+            --nozip_undeclared_test_outputs
+          fixture=bazel-testlogs/crates/tracedecay-dashboard-api/unit_test/test.outputs/settings-patch.json
+          test -s "$fixture"
+          cp -- "$fixture" "$EXPORT_DIRECTORY/settings-patch.json"
+
+      - name: Upload the canonical settings response fixture
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: settings-patch-fixture-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/dashboard-contract-export/settings-patch.json
+          if-no-files-found: error
+          retention-days: 1

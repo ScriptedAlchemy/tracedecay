@@ -167,6 +167,7 @@ function isTaggedUnion(schema: JsonSchema): boolean {
 interface ResolveCtx {
   genericParam?: string;
   genericSchemaVar?: string;
+  envelopePayloads: ReadonlyMap<string, JsonSchema>;
 }
 
 interface Resolved {
@@ -197,6 +198,16 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): Resolved {
 
   if (schema.$ref) {
     const name = refName(schema.$ref);
+    const payload = ctx.envelopePayloads.get(name);
+    if (payload) {
+      const resolved = resolveType(payload, ctx);
+      const ts = `DashboardEnvelopeV1<${resolved.ts}>`;
+      return {
+        ts,
+        zod: `z.lazy(() => DashboardEnvelopeV1Schema(${resolved.zod}))`,
+        ann: typeAnn(ts),
+      };
+    }
     return { ts: name, zod: `z.lazy(() => ${name}Schema)`, ann: typeAnn(name) };
   }
 
@@ -393,14 +404,18 @@ interface EmittedDef {
   decoders: string;
 }
 
-function emitNamedDef(name: string, schema: JsonSchema): EmittedDef {
+function emitNamedDef(
+  name: string,
+  schema: JsonSchema,
+  envelopePayloads: ReadonlyMap<string, JsonSchema>,
+): EmittedDef {
   const genericParam = schema["x-generic"];
   const desc = schema.description ? `/** ${schema.description} */\n` : "";
 
   if (genericParam) {
     // Generic type + decoder factory (DashboardEnvelope<TPayload>).
     const schemaVar = "payloadSchema";
-    const ctx: ResolveCtx = { genericParam, genericSchemaVar: schemaVar };
+    const ctx: ResolveCtx = { genericParam, genericSchemaVar: schemaVar, envelopePayloads };
     const obj = resolveObject(schema, ctx);
     return {
       typeName: name,
@@ -415,7 +430,7 @@ function emitNamedDef(name: string, schema: JsonSchema): EmittedDef {
     };
   }
 
-  const ctx: ResolveCtx = {};
+  const ctx: ResolveCtx = { envelopePayloads };
 
   if (isTaggedUnion(schema)) {
     const union = resolveTaggedUnion(schema, ctx);
@@ -457,12 +472,14 @@ export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
   const schemaRevision = revisions[0] as string | number;
 
   const omittedNames = new Set(["DashboardPayloadMarkerV1"]);
+  const envelopePayloads = new Map<string, JsonSchema>();
   const envelopeIndex = defs.findIndex(([name]) => name === "DashboardEnvelopeV1");
   const envelope = defs[envelopeIndex]?.[1];
   if (envelope?.properties) {
     for (const [name, schema] of defs) {
       if (name !== "DashboardEnvelopeV1" && isMonomorphizedEnvelope(schema, envelope)) {
         omittedNames.add(name);
+        envelopePayloads.set(name, schema.properties!.payload!);
       }
     }
     defs[envelopeIndex] = [
@@ -482,13 +499,15 @@ export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
   const emitted: EmittedDef[] = [];
   for (const [name, schema] of defs) {
     if (omittedNames.has(name)) continue;
-    const omittedRef = [...localDefinitionRefs(schema)].find((ref) => omittedNames.has(ref));
+    const omittedRef = [...localDefinitionRefs(schema)].find(
+      (ref) => omittedNames.has(ref) && !envelopePayloads.has(ref),
+    );
     if (omittedRef) {
       throw new Error(
         `${name} references omitted generated definition ${omittedRef}`,
       );
     }
-    emitted.push(emitNamedDef(name, schema));
+    emitted.push(emitNamedDef(name, schema, envelopePayloads));
   }
 
   const types = [

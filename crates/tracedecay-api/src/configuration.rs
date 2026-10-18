@@ -9,8 +9,10 @@ use axum::Json;
 use axum::http::StatusCode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tracedecay_contracts::{ApplicationProblemEnvelope, ApplicationProblemKind};
+use serde_json::Value;
+use tracedecay_contracts::{
+    ApplicationProblemEnvelope, ApplicationProblemKind, SettingsValidationIssueV1,
+};
 use tracedecay_domain::configuration::{CodeIndexWorkerSelectionV1, ContextScoutIntentSettingsV1};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -89,8 +91,39 @@ pub struct CodeIndexWorkerSettingsPatch {
     pub code_index_workers: CodeIndexWorkerSelectionV1,
 }
 
+/// Configuration refusals carrying the same stable codes as the HTTP routes.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "code", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfigurationRefusalV1 {
+    ConfigurationRevisionConflict {
+        detail: String,
+        expected_revision_id: String,
+        actual_revision_id: String,
+    },
+    ConfigurationAuthorityUnavailable {
+        detail: String,
+    },
+    ApplicationContractViolation {
+        detail: String,
+    },
+}
+
+/// Every refusal body produced by the dashboard configuration adapter. The
+/// untagged wrapper preserves the existing validation, CAS, and application
+/// problem wire formats while giving producers and consumers one authority.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum DashboardConfigurationRefusalV1 {
+    Validation {
+        detail: String,
+        validation_errors: Vec<SettingsValidationIssueV1>,
+    },
+    Configuration(ConfigurationRefusalV1),
+    ApplicationProblem(ApplicationProblemEnvelope),
+}
+
 /// Axum-compatible typed error used by dashboard configuration handlers.
-pub type DashboardConfigurationRouteErrorV1 = (StatusCode, Json<Value>);
+pub type DashboardConfigurationRouteErrorV1 = (StatusCode, Json<DashboardConfigurationRefusalV1>);
 
 /// Parse a project settings patch while preserving the dashboard's established
 /// malformed-payload response shape.
@@ -175,13 +208,15 @@ pub fn validate_code_index_worker_settings_patch(
 }
 
 /// Render validation failures using the generated dashboard wire shape.
-pub fn settings_validation_error(errors: impl Serialize) -> DashboardConfigurationRouteErrorV1 {
+pub fn settings_validation_error(
+    errors: impl IntoIterator<Item = SettingsValidationIssueV1>,
+) -> DashboardConfigurationRouteErrorV1 {
     (
         StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": "settings validation failed",
-            "validation_errors": errors,
-        })),
+        Json(DashboardConfigurationRefusalV1::Validation {
+            detail: "settings validation failed".to_owned(),
+            validation_errors: errors.into_iter().collect(),
+        }),
     )
 }
 
@@ -193,12 +228,13 @@ pub fn configuration_revision_conflict_error(
 ) -> DashboardConfigurationRouteErrorV1 {
     (
         StatusCode::CONFLICT,
-        Json(json!({
-            "code": "configuration_revision_conflict",
-            "detail": detail,
-            "expected_revision_id": expected,
-            "actual_revision_id": actual,
-        })),
+        Json(DashboardConfigurationRefusalV1::Configuration(
+            ConfigurationRefusalV1::ConfigurationRevisionConflict {
+                detail: detail.to_owned(),
+                expected_revision_id: expected.to_owned(),
+                actual_revision_id: actual.to_owned(),
+            },
+        )),
     )
 }
 
@@ -206,10 +242,11 @@ pub fn configuration_revision_conflict_error(
 pub fn configuration_authority_unavailable_error() -> DashboardConfigurationRouteErrorV1 {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "code": "configuration_authority_unavailable",
-            "detail": "configuration authority is unavailable",
-        })),
+        Json(DashboardConfigurationRefusalV1::Configuration(
+            ConfigurationRefusalV1::ConfigurationAuthorityUnavailable {
+                detail: "configuration authority is unavailable".to_owned(),
+            },
+        )),
     )
 }
 
@@ -225,13 +262,17 @@ pub fn configuration_application_problem_error(
     } else {
         crate::application_problem_status(problem.problem.kind)
     };
-    let payload = serde_json::to_value(problem)
-        .unwrap_or_else(|_| json!({ "detail": "configuration mutation was rejected" }));
-    (status, Json(payload))
+    (
+        status,
+        Json(DashboardConfigurationRefusalV1::ApplicationProblem(problem)),
+    )
 }
 
-fn validation_error(field: &str, message: &str) -> Value {
-    json!({ "field": field, "message": message })
+fn validation_error(field: &str, message: &str) -> SettingsValidationIssueV1 {
+    SettingsValidationIssueV1 {
+        field: field.to_owned(),
+        message: message.to_owned(),
+    }
 }
 
 fn patch_shape_error(scope: &str, error: &serde_json::Error) -> DashboardConfigurationRouteErrorV1 {
@@ -239,10 +280,10 @@ fn patch_shape_error(scope: &str, error: &serde_json::Error) -> DashboardConfigu
     let field = serde_error_field(&message).unwrap_or_else(|| "patch".to_owned());
     (
         StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": message,
-            "validation_errors": [{ "field": field, "message": message }],
-        })),
+        Json(DashboardConfigurationRefusalV1::Validation {
+            detail: message.clone(),
+            validation_errors: vec![SettingsValidationIssueV1 { field, message }],
+        }),
     )
 }
 
@@ -260,6 +301,7 @@ fn serde_error_field(message: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn user_worker_patch_round_trips_the_tagged_contract() {
@@ -298,7 +340,10 @@ mod tests {
         let (status, Json(body)) =
             validate_code_index_worker_settings_patch(&patch).expect_err("zero must be denied");
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["validation_errors"][0]["field"], "code_index_workers");
+        assert_eq!(
+            serde_json::to_value(body).unwrap()["validation_errors"][0]["field"],
+            "code_index_workers"
+        );
     }
 
     #[test]
@@ -324,7 +369,10 @@ mod tests {
         let (status, Json(body)) = admit_user_settings_patch(&invalid, |_| None)
             .expect_err("zero duration must be denied");
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["validation_errors"][0]["field"], "watcher_debounce");
+        assert_eq!(
+            serde_json::to_value(body).unwrap()["validation_errors"][0]["field"],
+            "watcher_debounce"
+        );
     }
 
     #[test]
@@ -338,6 +386,9 @@ mod tests {
 
         let (status, Json(body)) = result.expect_err("mixed authority must be rejected");
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["validation_errors"][0]["field"], "code_index_workers");
+        assert_eq!(
+            serde_json::to_value(body).unwrap()["validation_errors"][0]["field"],
+            "code_index_workers"
+        );
     }
 }

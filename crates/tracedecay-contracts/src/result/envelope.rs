@@ -84,7 +84,7 @@ impl ResultContractRef {
 }
 
 /// Canonical outcome family for an admitted application operation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "outcome", content = "value")]
 pub enum ApplicationOutcome<T> {
     Evidence(EvidencePacket<T>),
