@@ -94,6 +94,7 @@ impl RepositoryPhysicalAttachmentFactory {
                 file_lost: false,
                 close_failure: None,
             })),
+            drain_serial: Mutex::new(()),
         })
     }
 
@@ -305,7 +306,10 @@ impl RepositoryPhysicalAttachmentFactory {
             close_failure: None,
         }));
         let _ = lost_state.set(Arc::downgrade(&state));
-        Ok(RepositoryRuntimePhysicalAttachment { state })
+        Ok(RepositoryRuntimePhysicalAttachment {
+            state,
+            drain_serial: Mutex::new(()),
+        })
     }
 }
 
@@ -358,6 +362,9 @@ impl Error for RepositoryAttachmentStartError {
 
 pub struct RepositoryRuntimePhysicalAttachment {
     state: Arc<Mutex<RepositoryRuntimePhysicalState>>,
+    /// Serializes `drain` so the state lock can be released across the writer
+    /// join: the writer's lost-file notice takes that lock.
+    drain_serial: Mutex<()>,
 }
 
 struct RepositoryRuntimePhysicalState {
@@ -631,6 +638,10 @@ impl RepositoryRuntimePhysicalAttachment {
                 "repository physical attachment cannot drain on a storage pool thread".to_owned(),
             );
         }
+        let _serial = self
+            .drain_serial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut state = self.lock_state();
         if state.closed {
             return Ok(());
@@ -683,15 +694,16 @@ impl RepositoryRuntimePhysicalAttachment {
             }
         };
         let readers = state.readers.take();
+        drop(state);
         drop(readers);
         if let Some(writer) = writer
             && let Err(error) = writer.shutdown_and_join()
         {
             let message = format!("join repository writer: {error}");
-            state.close_failure = Some(message.clone());
+            self.lock_state().close_failure = Some(message.clone());
             return Err(message);
         }
-        state.drained = true;
+        self.lock_state().drained = true;
         Ok(())
     }
 
@@ -1181,6 +1193,35 @@ mod tests {
         attachment.close_and_join().unwrap();
         donor.drain().unwrap();
         donor.close_and_join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drain_completes_when_the_probe_finds_the_file_gone_while_the_writer_is_busy() {
+        let directory = TempDir::new().unwrap();
+        let attachment = Arc::new(attach_seeded_store(directory.path(), &binding(), 0));
+        let handle = attachment.exact_sql_handle().unwrap();
+        let busy = thread::spawn(move || {
+            handle.execute(statement(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000000000) \
+                 SELECT count(*) FROM c",
+                vec![],
+            ))
+        });
+        thread::sleep(Duration::from_millis(200));
+        fs::remove_file(directory.path().join("store-0.sqlite3")).unwrap();
+        thread::sleep(crate::FILE_PROBE_INTERVAL);
+
+        let (done, drained) = mpsc::channel();
+        let draining = Arc::clone(&attachment);
+        thread::spawn(move || {
+            let _ = done.send(draining.drain());
+        });
+        let drain = drained.recv_timeout(Duration::from_secs(30)).expect(
+            "a drain that joins the writer must not wait on the lost-file notice's state lock",
+        );
+        assert_eq!(drain, Ok(()));
+        let _ = busy.join();
     }
 
     #[test]
