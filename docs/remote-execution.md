@@ -39,6 +39,17 @@ open-file checks incorrect. The action also needs normal signal delivery and
 orphan reaping; an ordinary test executable should not become PID 1. Verify
 these properties when configuring a worker, including action timeout cleanup.
 
+Use a short, dedicated action work directory. The complete daemon socket path,
+including the action UUID, temporary fixture home, and `.tracedecay/daemon.sock`,
+must be shorter than 104 bytes on macOS and 108 bytes on Linux. Validate the
+full path from an executed test; checking only the work directory misses this
+limit. Worker sandboxes must allow Unix socket bind/connect inside the owned
+action directories. Keep action `TMPDIR` on the same writable filesystem and
+mount as
+compiler outputs: a separate temporary mount can make Rust's artifact renames
+fail with `EXDEV`. The action root may be separate from the CAS cache, but must
+remain on the intended build volume.
+
 See [CI fleet configuration](ci-remote-builds.md) for hosted runners, dynamic
 execution, and restricted Tailscale enrollment.
 
