@@ -191,3 +191,29 @@ fn output_limit_stops_a_child_that_is_still_running() {
     );
     assert!(started.elapsed() < Duration::from_secs(1));
 }
+
+/// The Windows twin of the Unix descendant tests: `start /b` leaves a child
+/// holding the inherited stdout after `cmd` exits. Not executed in CI, which
+/// only type-checks Windows.
+#[cfg(windows)]
+#[test]
+fn windows_draining_after_exit_is_bounded_when_a_descendant_holds_stdout() {
+    let mut command = Command::new("cmd");
+    command.args([
+        "/C",
+        "echo tracedecay 1.2.3 & start /b ping -n 20 127.0.0.1 & exit 0",
+    ]);
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + Duration::from_millis(500),
+        ..GitCommandBounds::default()
+    };
+    let started = Instant::now();
+
+    let result = bounded_command_output(command, None, &bounds);
+
+    assert!(matches!(result, Err(GitCommandError::DeadlineExceeded)));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the inherited pipe must not hold the caller past its deadline"
+    );
+}

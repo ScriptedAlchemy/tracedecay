@@ -562,9 +562,13 @@ impl Drop for AbandonOnReturn {
 trait PipeEnd: std::os::fd::AsFd + Send + 'static {}
 #[cfg(unix)]
 impl<T: std::os::fd::AsFd + Send + 'static> PipeEnd for T {}
-#[cfg(not(unix))]
+#[cfg(windows)]
+trait PipeEnd: std::os::windows::io::AsRawHandle + Send + 'static {}
+#[cfg(windows)]
+impl<T: std::os::windows::io::AsRawHandle + Send + 'static> PipeEnd for T {}
+#[cfg(not(any(unix, windows)))]
 trait PipeEnd: Send + 'static {}
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl<T: Send + 'static> PipeEnd for T {}
 
 #[cfg(unix)]
@@ -614,8 +618,31 @@ fn await_pipe(pipe: &impl PipeEnd, writable: bool, abandoned: &AtomicBool) -> st
     Err(std::io::Error::other("git supervisor abandoned the pipe"))
 }
 
-/// Windows child pipes cannot be polled; the blocking call that follows waits.
-#[cfg(not(unix))]
+/// Waits until a read from `pipe` returns without blocking, failing once the
+/// supervisor abandons it, so a descendant that holds the write end open
+/// cannot keep the reader thread alive.
+///
+/// Windows has no way to ask an anonymous pipe whether a write would block,
+/// so a write goes straight to the blocking call. The supervisor kills the
+/// child on every error return, which breaks the pipe and releases a blocked
+/// writer. Only a descendant that inherited the child's stdin can keep one
+/// blocked.
+#[cfg(windows)]
+fn await_pipe(pipe: &impl PipeEnd, writable: bool, abandoned: &AtomicBool) -> std::io::Result<()> {
+    use crate::child_pipe::{peek_read_state, wait_readable};
+
+    if writable {
+        return Ok(());
+    }
+    if wait_readable(|| peek_read_state(pipe), abandoned, false)? {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("git supervisor abandoned the pipe"))
+    }
+}
+
+/// Other targets cannot poll child pipes; the blocking call that follows waits.
+#[cfg(not(any(unix, windows)))]
 fn await_pipe(_: &impl PipeEnd, _: bool, _: &AtomicBool) -> std::io::Result<()> {
     Ok(())
 }
