@@ -54,13 +54,6 @@ impl RegisteredHttpOperation for MultiRootHttpOperation {
         MultiRootHttpOperation::operation_id(self).to_owned()
     }
 
-    fn is_read_only(self) -> bool {
-        match self {
-            Self::ScopeSetRead | Self::Execute => true,
-            Self::ScopeSetCompareAndSwap => false,
-        }
-    }
-
     fn problem_family(self) -> &'static str {
         "multi_root"
     }

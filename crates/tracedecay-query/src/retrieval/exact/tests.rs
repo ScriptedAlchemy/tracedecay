@@ -18,7 +18,7 @@ use tracedecay_domain::{
 
 use super::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneEvidence,
-    ExactLaneRequest, ExactLaneRetriever, ExactLiteralV1,
+    ExactLaneRequest, ExactLiteralV1,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort,
