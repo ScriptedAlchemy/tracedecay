@@ -124,6 +124,9 @@ jobs:
   # runner for a couple of minutes of work; on 20 free slots that is three
   # queue entries per push doing what one does.
   gates:
+    permissions:
+      contents: read
+      id-token: write
     name: Repository gates
     runs-on: ubuntu-latest
     # The rustfmt build's crate_universe splice clones git-pinned crates from
@@ -182,6 +185,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           cache-key: ci-format-linux
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
 
       - name: Test the ranked-tail trim replay against the Rust rule cases
         run: bazel run //scripts:test-measure-ranked-tail-trim.py
