@@ -119,6 +119,12 @@ impl DashboardGraphTestRuntimeV1 {
             project_root,
             project_id.as_str(),
         )?;
+        // A repository marker is authoritative only when this profile holds
+        // its shard. Enroll and mount the fixture store before resolving the
+        // registered layout, including for a fresh secondary project.
+        let project_database = self
+            .project_sessions(project_root, project_id.clone())
+            .await?;
         let options = tracedecay_project::project::TraceDecayOpenOptions {
             profile_root: Some(self.profile_root.clone()),
             global_db_path: Some(self.profile_database.db_path().to_path_buf()),
@@ -137,7 +143,6 @@ impl DashboardGraphTestRuntimeV1 {
                 message: "dashboard graph identity differs from its test authority".to_owned(),
             });
         }
-        let project_database = self.project_sessions(project_root, project_id).await?;
         tracing::Instrument::instrument(
             tracedecay_project::project::TraceDecay::init_with_registered_configuration(
                 project_root,
