@@ -1,0 +1,89 @@
+name: Ruby resolution verification
+on:
+  push:
+    branches: [fix/4227-ruby-caller-cache]
+    paths:
+      - .github/workflows/ruby-resolution-verification.yml
+      - scripts/ci/apply-ruby-resolution-scope.py
+permissions:
+  contents: read
+concurrency:
+  group: ruby-resolution-verification
+  cancel-in-progress: true
+jobs:
+  verify:
+    if: github.repository == 'ScriptedAlchemy/tracedecay' && github.actor == 'ScriptedAlchemy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Apply the pinned caller-scope fix and production regression
+        run: python3 scripts/ci/apply-ruby-resolution-scope.py
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: ci-linux-test-v2
+          test-tools: 'true'
+      - name: Format changed Rust sources
+        run: >-
+          rustfmt --edition 2024 --config-path rustfmt.toml --config skip_children=true
+          crates/tracedecay-code-index/src/production/helpers.rs
+          crates/tracedecay-code-index/src/languages.rs
+          crates/tracedecay-code-index/tests/code_index_suite/cross_file_import_calls.rs
+      - name: Run code-index unit and production suites
+        run: |
+          bazel test --config=ci //crates/tracedecay-code-index:unit_test //crates/tracedecay-code-index:code_index_suite --test_output=errors
+          bazel build --config=ci //crates/tracedecay-code-index:rustfmt_check_2024
+          git diff --check
+      - name: Stage only verified edits
+        run: |
+          mkdir -p "$RUNNER_TEMP/ruby-resolution"
+          git diff --binary -- \
+            crates/tracedecay-code-index/src/production/helpers.rs \
+            crates/tracedecay-code-index/src/languages.rs \
+            crates/tracedecay-code-index/tests/code_index_suite/cross_file_import_calls.rs \
+            > "$RUNNER_TEMP/ruby-resolution/verified.patch"
+          test -s "$RUNNER_TEMP/ruby-resolution/verified.patch"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: verified-ruby-resolution
+          path: ${{ runner.temp }}/ruby-resolution/verified.patch
+          retention-days: 1
+          if-no-files-found: error
+  publish:
+    needs: verify
+    if: github.repository == 'ScriptedAlchemy/tracedecay' && github.actor == 'ScriptedAlchemy'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: verified-ruby-resolution
+          path: ${{ runner.temp }}/ruby-resolution
+      - name: Publish tested edits without overwriting concurrent work
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          branch=fix/4227-ruby-caller-cache
+          actual=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+          test "$actual" = "$EXPECTED_HEAD"
+          git apply --check "$RUNNER_TEMP/ruby-resolution/verified.patch"
+          git apply "$RUNNER_TEMP/ruby-resolution/verified.patch"
+          git diff --check
+          git add -- \
+            crates/tracedecay-code-index/src/production/helpers.rs \
+            crates/tracedecay-code-index/src/languages.rs \
+            crates/tracedecay-code-index/tests/code_index_suite/cross_file_import_calls.rs
+          git rm -- scripts/ci/apply-ruby-resolution-scope.py .github/workflows/ruby-resolution-verification.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(code-index): scope reference memoization to the caller' -m 'Fixes #4227'
+          git push origin "HEAD:refs/heads/$branch"
