@@ -128,7 +128,7 @@ async fn maintenance_debt_bypasses_sub_threshold_noop_guard() {
             LcmSummarizerMode::Fake {
                 summary_text: "first chunk summary".into(),
             },
-            Some(4),
+            Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
         ))
@@ -328,7 +328,7 @@ async fn dynamic_chunking_compacts_bounded_oldest_leaf_chunk_and_records_backlog
             LcmSummarizerMode::Fake {
                 summary_text: "first chunk summary".into(),
             },
-            Some(4),
+            Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
         ))

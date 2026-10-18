@@ -83,7 +83,7 @@ async fn daemon_on_the_native_root_serves_tool_mcp_and_dashboard_then_stops_clea
         String::from_utf8_lossy(&tool.stderr)
     );
 
-    let (port, launch_url) = start_hosted_dashboard(&mut session);
+    let (_, launch_url) = start_hosted_dashboard(&mut session);
 
     let agent = tracedecay_application::http_agent::http_agent(
         ureq::Agent::config_builder()
@@ -94,13 +94,12 @@ async fn daemon_on_the_native_root_serves_tool_mcp_and_dashboard_then_stops_clea
     );
     let launched = agent.get(&launch_url).call().expect("launch URL response");
     assert_eq!(launched.status().as_u16(), 303);
-    let token = launch_url
-        .split_once("?token=")
-        .map(|(_, token)| token)
-        .expect("launch token");
+    assert!(launched.headers().get("set-cookie").is_none());
     let mut capabilities = agent
-        .get(&format!("http://127.0.0.1:{port}/api/capabilities"))
-        .header("Cookie", &format!("tracedecay_dashboard_{port}={token}"))
+        .get(&format!(
+            "{}/api/capabilities",
+            common::dashboard_api_base_url(&launch_url)
+        ))
         .call()
         .expect("dashboard capabilities response");
     assert_eq!(capabilities.status().as_u16(), 200);
