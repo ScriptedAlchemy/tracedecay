@@ -47,7 +47,7 @@ import { SectionsRail } from './SettingsSections.tsx';
  *   - WRITE per key: editable through the compare-and-swap PATCH path, locked
  *     by a named gate, or without any write path at all.
  *
- * Hover and focus inspect; click selects and opens the review under the row.
+ * Hover and focus inspect; click selects and opens the editor under the row.
  * The effective value stays authoritative until the write authority validates,
  * persists against the held revision, reports its apply requirement, and the
  * read comes back.
@@ -228,7 +228,7 @@ function SettingsSurface({
           <p className="shrink-0 border-t border-edge-subtle px-3 py-1.5 text-sm leading-relaxed text-text-muted">
             Showing effective configuration only. Origins are shown only when the server names
             them; otherwise a key's provenance is <span className="td-value">unserved</span>. Hover
-            or focus a row to inspect it; Enter or click opens its review; Escape closes.
+            or focus a row to inspect it; Enter or click opens its editor; Escape closes.
           </p>
         </section>
 
@@ -275,7 +275,7 @@ function groupBySection(model: SettingsModel, rows: readonly EffectiveRow[]): Se
  * The register under the header: the search over key, value, and served
  * description, and the three readings a reader needs before touching a row , 
  * what the scope permits, that this is the effective-only mode, and where the
- * one review the editor can hold currently stands.
+ * edits the editor holds currently stand.
  */
 function SettingsRegister({
   query,
@@ -294,7 +294,7 @@ function SettingsRegister({
   writability: ScopeWritability;
   state: SettingsEditorState;
 }) {
-  const review = reviewReading(state);
+  const edits = editsReading(state);
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge-subtle bg-surface-1 px-3 py-2">
       <div className="relative min-w-0 flex-1 basis-64 md:max-w-md">
@@ -339,8 +339,8 @@ function SettingsRegister({
           {writability.state === 'writable' ? 'writable' : writability.state.replace('_', '-')}
         </Register>
         <Register label="mode">effective-only</Register>
-        <Register label="review" tone={review.tone} data-review={review.value}>
-          {review.value}
+        <Register label="edits" tone={edits.tone} data-edits={edits.value}>
+          {edits.value}
         </Register>
       </dl>
     </div>
@@ -356,7 +356,7 @@ function Register({
   label: string;
   tone?: string;
   children: ReactNode;
-  'data-review'?: string;
+  'data-edits'?: string;
 }) {
   return (
     <div className="flex items-baseline gap-2" {...data}>
@@ -366,8 +366,8 @@ function Register({
   );
 }
 
-/** Where the editor's one review stands, as one word the register can carry. */
-function reviewReading(state: SettingsEditorState): { value: string; tone: string } {
+/** Where the editor's edits stand, as one word the register can carry. */
+function editsReading(state: SettingsEditorState): { value: string; tone: string } {
   switch (state.status) {
     case 'editor_unavailable':
       return { value: 'unavailable', tone: 'text-state-error' };
@@ -384,19 +384,11 @@ function reviewReading(state: SettingsEditorState): { value: string; tone: strin
       if (settingsApplied(state)) return { value: 'applied', tone: 'text-state-ready' };
       return { value: 'none', tone: 'text-text-muted' };
     }
-    case 'reviewing':
-      return { value: 'pending', tone: 'text-accent' };
-    case 'confirmed':
-      return { value: 'confirmed', tone: 'text-accent' };
     case 'submitting':
-      return { value: 'applying', tone: 'text-state-loading' };
+      return { value: 'saving', tone: 'text-state-loading' };
     case 'conflicted':
       return { value: 'conflict', tone: 'text-state-conflicting' };
-    case 'review_superseded':
-      return { value: 'superseded', tone: 'text-state-conflicting' };
-    case 'authority_withdrawn':
-      return { value: 'withdrawn', tone: 'text-state-offline' };
-    case 'submit_failed':
+    case 'failed':
       return { value: 'failed', tone: 'text-state-error' };
     default: {
       const exhaustive: never = state;

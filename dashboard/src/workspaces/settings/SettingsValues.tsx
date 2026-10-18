@@ -251,7 +251,7 @@ export function ProvenanceChip({ kind }: { kind: RowProvenance }) {
 /**
  * When a persisted change takes effect, as the product states it: the one
  * documented requirement in its own register, or the statement that the write
- * authority reports it on apply. Shared by the review panel and the inspector.
+ * authority reports it on apply. Shared by the edit panel and the inspector.
  */
 export function ApplyRequirementText({ requirement }: { requirement: ApplyRequirement }) {
   switch (requirement.kind) {
@@ -280,21 +280,14 @@ export function ApplyRequirementText({ requirement }: { requirement: ApplyRequir
   }
 }
 
-/** The held review's state as one word a sentence can carry. */
-export function reviewStatusWord(status: SettingsEditorState['status']): string {
+/** The held save attempt's state as one word a sentence can carry. */
+export function attemptStatusWord(status: SettingsEditorState['status']): string {
   switch (status) {
-    case 'reviewing':
-    case 'confirmed':
-      return 'pending';
     case 'submitting':
-      return 'applying';
+      return 'saving';
     case 'conflicted':
       return 'in conflict';
-    case 'review_superseded':
-      return 'superseded';
-    case 'authority_withdrawn':
-      return 'withdrawn';
-    case 'submit_failed':
+    case 'failed':
       return 'failed';
     case 'editor_unavailable':
     case 'editing':

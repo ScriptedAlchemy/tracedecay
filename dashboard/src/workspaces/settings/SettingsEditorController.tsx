@@ -3,15 +3,16 @@
  * issued from.
  *
  * It holds no state of its own beyond the machine. The authority is whatever
- * the last parsed read produced, the draft and the review live in the machine,
- * and a request exists only where the machine has reached `submitting`, which
- * it only does after re-deriving the confirmed change against the revision the
- * editor currently holds. There is no path from a click straight to a PATCH.
+ * the last parsed read produced, the draft and the save attempt live in the
+ * machine, and a request exists only where the machine has reached
+ * `submitting`, which it only does after planning the draft against the
+ * revision the editor currently holds. There is no path from a click straight
+ * to a PATCH.
  *
  * It is a hook rather than a panel because the effective-configuration table,
- * the inline review, and the inspector all read the same machine: the row that
- * says `edited`, the panel that shows the frozen patch, and the register that
- * says `review pending` are three views of one state.
+ * the inline editor, and the inspector all read the same machine: the row that
+ * says `edited`, the panel that saves it, and the register that says
+ * `saving` are three views of one state.
  */
 
 import { useMutation } from '@tanstack/react-query';
@@ -34,15 +35,14 @@ import { authorityValue, withFieldValue, type SettingsBinding } from './settings
 
 export interface SettingsEditorHandle {
   readonly state: SettingsEditorState;
-  /** Replace one bound field in the draft. Drops any open review, as the machine does. */
+  /** Replace one bound field in the draft. Drops any held save attempt, as the machine does. */
   readonly edit: (binding: SettingsBinding, value: unknown) => void;
   /** Take the authority's value back for one bound field, leaving other edits alone. */
   readonly revert: (binding: SettingsBinding) => void;
-  /** Freeze this scope's change against the held revision. */
-  readonly review: (scope: SettingsScope) => void;
-  readonly setConfirmed: (confirmed: boolean) => void;
-  readonly apply: () => void;
-  readonly dismiss: () => void;
+  /** Save this scope's valid change against the held revision. */
+  readonly save: (scope: SettingsScope) => void;
+  /** Resend a failed save under the identity it first went out with. */
+  readonly retry: () => void;
   /** Discard every draft and take the authority's current values. */
   readonly reload: () => void;
 }
@@ -72,12 +72,12 @@ export function useSettingsEditor({
   const { mutate } = useMutation({
     mutationFn: applySettingsMutation,
     onSuccess: (result) => {
-      dispatch({ type: 'submit_settled', result });
+      dispatch({ type: 'save_settled', result });
       if (result.outcome === 'success') onApplied();
     },
     onError: (error) => {
       dispatch({
-        type: 'submit_settled',
+        type: 'save_settled',
         result: { outcome: 'error', detail: unreportedFailureDetail(error) },
       });
     },
@@ -92,8 +92,8 @@ export function useSettingsEditor({
       inFlight.current = null;
       return;
     }
-    if (inFlight.current === state.review.reviewId) return;
-    inFlight.current = state.review.reviewId;
+    if (inFlight.current === state.attempt.idempotencyKey) return;
+    inFlight.current = state.attempt.idempotencyKey;
     // Project and ordinary user writes use the current project gateway reading.
     // The ProfileSessions worker preference is profile-global, so its request
     // never inherits selected-project writability.
@@ -126,27 +126,23 @@ export function useSettingsEditor({
     [state],
   );
 
-  const review = useCallback((scope: SettingsScope) => {
+  const save = useCallback((scope: SettingsScope) => {
     dispatch({
-      type: 'review_requested',
+      type: 'save_requested',
       scope,
       idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
     });
   }, []);
 
-  const setConfirmed = useCallback((confirmed: boolean) => {
-    dispatch({ type: 'confirmation_set', confirmed });
-  }, []);
-  const apply = useCallback(() => dispatch({ type: 'submit_started' }), []);
-  const dismiss = useCallback(() => dispatch({ type: 'review_dismissed' }), []);
+  const retry = useCallback(() => dispatch({ type: 'retry_requested' }), []);
   const reload = useCallback(() => {
     dispatch({ type: 'reloaded_from_authority' });
     onApplied();
   }, [onApplied]);
 
   return useMemo(
-    () => ({ state, edit, revert, review, setConfirmed, apply, dismiss, reload }),
-    [state, edit, revert, review, setConfirmed, apply, dismiss, reload],
+    () => ({ state, edit, revert, save, retry, reload }),
+    [state, edit, revert, save, retry, reload],
   );
 }
 

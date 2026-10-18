@@ -21,7 +21,7 @@ import { formatMicrosUtc } from '../../ui/format.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { MultiRootPanel } from './MultiRootPanel.tsx';
 import { RemoteBrainPanel } from './RemoteBrainPanel.tsx';
-import { settingsReviewOf, type SettingsEditorState } from './settingsEditorMachine.ts';
+import { settingsAttemptOf, type SettingsEditorState } from './settingsEditorMachine.ts';
 import type { WritableScopes } from './settingsGates.ts';
 import { settingsRevisionId, type SettingsModel } from './settingsModel.ts';
 import {
@@ -38,8 +38,8 @@ import {
   ProvenanceChip,
   ValueCell,
   WriteCell,
+  attemptStatusWord,
   provenanceSentence,
-  reviewStatusWord,
   type RowProvenance,
 } from './SettingsValues.tsx';
 
@@ -257,7 +257,7 @@ function SnapshotFacts({
         <Fact term="scope">
           <ScopeFact writability={writability} />
         </Fact>
-        <HeldReviewFact state={state} />
+        <HeldAttemptFact state={state} />
         {model.overrides.length > 0 ? (
           <Fact term="environment overrides">
             <span className="td-value text-sm text-text-secondary" data-cell="numeric">
@@ -267,9 +267,9 @@ function SnapshotFacts({
         ) : null}
         <Fact term="concurrent edit detection">
           <span className="text-body leading-relaxed text-text-muted">
-            A proposal is validated against the revision it was planned from and checked again
-            immediately before apply. If the revision changes first, the patch is rejected as a
-            conflict and nothing is written.
+            A save is validated against the revision you edited from and checked again
+            immediately before it is written. If the revision changes first, nothing is written
+            and you are asked to load the current values.
           </span>
         </Fact>
       </dl>
@@ -278,20 +278,20 @@ function SnapshotFacts({
 }
 
 /**
- * The one review the editor can hold, stated here so a verdict, a conflict,
- * a withdrawn authority, a failed write, stays visible after its row's panel
- * is closed, rather than surviving only as a word in the register.
+ * The one save attempt the editor can hold, stated here so a conflict or a
+ * failed write stays visible after its row's panel is closed, rather than
+ * surviving only as a word in the register.
  */
-function HeldReviewFact({ state }: { state: SettingsEditorState }) {
-  const review = settingsReviewOf(state);
-  if (review === null) return null;
+function HeldAttemptFact({ state }: { state: SettingsEditorState }) {
+  const attempt = settingsAttemptOf(state);
+  if (attempt === null) return null;
   return (
-    <Fact term="held review">
-      <span className="text-body leading-relaxed text-text-secondary" data-settings-held-review={state.status}>
-        <span className="td-value text-text-primary">{reviewStatusWord(state.status)}</span> ·{' '}
-        {scopeNoun(review.scope)} change against revision{' '}
-        <span className="td-value">{review.expectedRevisionId}</span>. Select a{' '}
-        {scopeNoun(review.scope)} key to resolve it.
+    <Fact term="held save">
+      <span className="text-body leading-relaxed text-text-secondary" data-settings-held-attempt={state.status}>
+        <span className="td-value text-text-primary">{attemptStatusWord(state.status)}</span> ·{' '}
+        {scopeNoun(attempt.scope)} change against revision{' '}
+        <span className="td-value">{attempt.expectedRevisionId}</span>. Select a{' '}
+        {scopeNoun(attempt.scope)} key to resolve it.
       </span>
     </Fact>
   );

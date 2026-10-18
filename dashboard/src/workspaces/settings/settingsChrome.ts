@@ -3,7 +3,7 @@
  * bezel inside a larger hit area the way the panel-header controls do. `+2px`
  * on the input is its two hairlines, so the content box lands on 44.
  *
- * Shared by the editor fields and the review dialog, which are one control
+ * Shared by the editor fields and the edit panel, which are one control
  * surface split across two modules. */
 
 export const settingsInputClass =

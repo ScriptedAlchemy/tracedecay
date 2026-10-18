@@ -474,8 +474,8 @@ export function settingsRevisionId(current: SettingsEditor, scope: SettingsScope
  * The project change a draft represents against a known-current snapshot.
  *
  * Planning against a snapshot rather than a payload is what lets the state
- * machine replan without re-parsing: replanning is how a confirmation is
- * checked against the review it was given for.
+ * machine replan without re-parsing: replanning is how a retry is checked
+ * against the attempt it would resend.
  */
 export function planProjectChangeAgainst(
   current: SettingsEditor | null,

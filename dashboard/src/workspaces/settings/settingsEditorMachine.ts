@@ -1,23 +1,19 @@
 /**
  * The settings editor as one state machine.
  *
- * The editor used to be six independent `useState` slices, the project draft,
- * the user draft, the pending review, a `confirmed` boolean, the validation
- * errors, and the saved notice, that only added up to a correct screen when
- * they happened to agree. Nothing stopped them disagreeing. A confirmation was
- * a bare boolean beside the review it was supposedly given for, so a refetch
- * could replace the draft underneath a confirmed review and the next apply
- * would send a patch nobody had confirmed against a revision nobody was
- * looking at. A saved notice sat beside a fresh pending change, telling the
- * reader the change was already applied.
- *
- * Here those combinations do not exist to be reached. Every state names one
+ * The editor used to be six independent `useState` slices that only added up to
+ * a correct screen when they happened to agree. Here every state names one
  * situation and carries exactly what that situation has: only `editing` has
- * rest state, only the review-bearing states have a review, and a confirmation
- * is not a flag beside a review but a state that contains one. A review is
- * identified by the exact change against the exact revision it was planned
- * from (`reviewId`), so replanning is enough to tell whether the thing the
- * user confirmed is still the thing about to be sent.
+ * rest state, and only the states that follow a save request carry the
+ * `attempt` that request stands for.
+ *
+ * An ordinary valid change saves directly: `save_requested` plans the draft
+ * against the revision the editor holds and enters `submitting` in one step.
+ * The planned patch, the revision it was planned against, and the idempotency
+ * key it is sent under are fixed together as the attempt, so a retry after an
+ * outcome the editor could not see is the same request, never a new one, and a
+ * resource that moved in the meantime ends in `conflicted` instead of being
+ * written over.
  *
  * Everything here is pure. No DOM, no transport, no clock.
  */
@@ -43,7 +39,7 @@ import {
 } from './settingsModel.ts';
 import type { SettingsMutationRequest, SettingsMutationResult } from './settingsMutation.ts';
 
-/** The two drafts the editor holds, always for the same authority snapshot. */
+/** The drafts the editor holds, always for the same authority snapshot. */
 export interface SettingsDraft {
   readonly project: ProjectSettingsValues;
   readonly user: UserSettingsValues;
@@ -51,21 +47,17 @@ export interface SettingsDraft {
 }
 
 /**
- * A validated change frozen against the revision it was planned from.
- *
- * `reviewId` is the identity of that pairing. Two reviews with the same id are
- * the same change against the same revision; anything else, an edited draft,
- * a moved authority, produces a different id, which is how a confirmation
- * given for one review is refused for another.
+ * One save request: a validated patch against the revision it was planned
+ * from, and the idempotency key it is sent under. Fixed when the save starts
+ * and reused unchanged by every retry.
  */
-interface SettingsReview {
+interface SettingsAttempt {
   readonly scope: SettingsScope;
   readonly expectedRevisionId: string;
   readonly patch:
     | ProjectSettingsChangeSet
     | UserSettingsChangeSet
     | CodeIndexWorkerSettingsChangeSet;
-  readonly reviewId: string;
   readonly idempotencyKey: string;
 }
 
@@ -96,17 +88,22 @@ type SettingsRejection =
 
 /**
  * What the editor is resting on between writes: nothing, one completed write,
- * or one refused write. Never a completed write and a refusal at once, the
- * old pair of slices could hold "Project settings saved" above a field still
- * marked invalid by an earlier attempt.
+ * or one refused write. Never a completed write and a refusal at once.
  */
 type SettingsResting =
   | { readonly rest: 'clean' }
   | { readonly rest: 'applied'; readonly applied: SettingsAppliedRecord }
   | { readonly rest: 'rejected'; readonly rejection: SettingsRejection };
 
-/** A write that did not reach a verdict. Distinct from a refusal, which did. */
-type SettingsSubmitFailure =
+/**
+ * A save that did not land and was not refused on its merits.
+ *
+ * `not_sent` is the absence of a write: the scope or the authority declined it
+ * and nothing changed. The other three did not reach a verdict, so whether the
+ * write took effect is not known; retrying them reuses the attempt's identity.
+ */
+type SettingsSaveFailure =
+  | { readonly kind: 'not_sent'; readonly detail: string }
   | { readonly kind: 'offline'; readonly detail: string }
   | { readonly kind: 'error'; readonly detail: string }
   | { readonly kind: 'protocol_error'; readonly authority: string; readonly detail: string };
@@ -116,34 +113,22 @@ interface SettingsEditable {
   readonly draft: SettingsDraft;
 }
 
-interface SettingsUnderReview extends SettingsEditable {
-  readonly review: SettingsReview;
+interface SettingsAttempting extends SettingsEditable {
+  readonly attempt: SettingsAttempt;
 }
 
 export type SettingsEditorState =
   /** The read parsed, but it named no revision the editor could hold a write against. */
   | { readonly status: 'editor_unavailable' }
   | (SettingsEditable & { readonly status: 'editing'; readonly resting: SettingsResting })
-  | (SettingsUnderReview & { readonly status: 'reviewing' })
-  | (SettingsUnderReview & { readonly status: 'confirmed' })
-  | (SettingsUnderReview & { readonly status: 'submitting' })
-  /** The write authority refused: it holds a different revision. Nothing was applied. */
-  | (SettingsUnderReview & {
+  | (SettingsAttempting & { readonly status: 'submitting' })
+  /** The resource holds a different revision than the one this save was based on. Nothing was applied. */
+  | (SettingsAttempting & {
       readonly status: 'conflicted';
       readonly conflict: SettingsRevisionConflict;
     })
-  /** The authority for this write is not mounted. Nothing was attempted. */
-  | (SettingsUnderReview & { readonly status: 'authority_withdrawn'; readonly detail: string })
-  /** The write was attempted and did not reach a verdict. */
-  | (SettingsUnderReview & {
-      readonly status: 'submit_failed';
-      readonly failure: SettingsSubmitFailure;
-    })
-  /** The resource moved while this change was held. Nothing was attempted. */
-  | (SettingsUnderReview & {
-      readonly status: 'review_superseded';
-      readonly currentRevisionId: string;
-    });
+  /** The save did not land. `failure.kind` says whether anything was attempted. */
+  | (SettingsAttempting & { readonly status: 'failed'; readonly failure: SettingsSaveFailure });
 
 export type SettingsEditorAction =
   /** A fresh snapshot of the resource; `null` when it carries no usable revision. */
@@ -152,14 +137,13 @@ export type SettingsEditorAction =
   | { readonly type: 'user_drafted'; readonly values: UserSettingsValues }
   | { readonly type: 'code_index_workers_drafted'; readonly values: CodeIndexWorkerSettingsValues }
   | {
-      readonly type: 'review_requested';
+      readonly type: 'save_requested';
       readonly scope: SettingsScope;
       readonly idempotencyKey: string;
     }
-  | { readonly type: 'review_dismissed' }
-  | { readonly type: 'confirmation_set'; readonly confirmed: boolean }
-  | { readonly type: 'submit_started' }
-  | { readonly type: 'submit_settled'; readonly result: SettingsMutationResult }
+  /** Resend the attempt a failed save held, under the same identity. */
+  | { readonly type: 'retry_requested' }
+  | { readonly type: 'save_settled'; readonly result: SettingsMutationResult }
   /** Discard the draft and take the authority's current values. */
   | { readonly type: 'reloaded_from_authority' };
 
@@ -184,23 +168,12 @@ export function reduceSettingsEditor(
       return redraft(state, (draft) => ({ ...draft, user: action.values }));
     case 'code_index_workers_drafted':
       return redraft(state, (draft) => ({ ...draft, codeIndexWorkers: action.values }));
-    case 'review_requested':
-      return requestReview(state, action.scope, action.idempotencyKey);
-    case 'review_dismissed':
-      // A dismissal cannot cancel a write already in flight, and it cannot
-      // clear a verdict the editor is resting on, closing the dialog after a
-      // save must not take the save with it.
-      return state.status === 'editor_unavailable' ||
-        state.status === 'editing' ||
-        state.status === 'submitting'
-        ? state
-        : editing(state.authority, state.draft, CLEAN);
-    case 'confirmation_set':
-      return setConfirmation(state, action.confirmed);
-    case 'submit_started':
-      return startSubmit(state);
-    case 'submit_settled':
-      return settleSubmit(state, action.result);
+    case 'save_requested':
+      return requestSave(state, action.scope, action.idempotencyKey);
+    case 'retry_requested':
+      return retrySave(state);
+    case 'save_settled':
+      return settleSave(state, action.result);
     case 'reloaded_from_authority':
       return state.status === 'editor_unavailable'
         ? state
@@ -216,10 +189,11 @@ export function reduceSettingsEditor(
  * A fresh read of the resource.
  *
  * The draft always follows the authority, the editor shows what is there, not
- * what was there. A review does not: it is a statement about a specific
- * revision, so when the authority moves past that revision the review is
- * superseded rather than quietly re-aimed at the new one. The one exception is
- * a write already in flight, whose own pre-flight check owns that decision.
+ * what was there. A held attempt does not: it is a statement about a specific
+ * revision, so when the authority moves past that revision the attempt ends in
+ * a conflict rather than being quietly re-aimed at the new one. The one
+ * exception is a write already in flight, whose own pre-flight check owns that
+ * decision.
  */
 function observeAuthority(
   state: SettingsEditorState,
@@ -244,16 +218,15 @@ function observeAuthority(
       );
     case 'submitting':
       return { ...state, authority, draft };
-    case 'reviewing':
-    case 'confirmed':
     case 'conflicted':
-    case 'authority_withdrawn':
-    case 'submit_failed':
-    case 'review_superseded': {
-      const current = settingsRevisionId(authority, state.review.scope);
-      return current === state.review.expectedRevisionId
+    case 'failed': {
+      const current = settingsRevisionId(authority, state.attempt.scope);
+      return current === state.attempt.expectedRevisionId
         ? { ...state, authority, draft }
-        : superseded(authority, draft, state.review, current);
+        : conflicted(authority, draft, state.attempt, {
+            expectedRevisionId: state.attempt.expectedRevisionId,
+            actualRevisionId: current,
+          });
     }
     default: {
       const exhaustive: never = state;
@@ -263,14 +236,14 @@ function observeAuthority(
 }
 
 /**
- * An edit. A review describes a draft; once the draft moves, the review
- * describes nothing, so it goes, along with any confirmation given for it.
+ * An edit. An attempt describes a draft; once the draft moves, the attempt
+ * describes nothing, so it goes, and the next save is a new request.
  *
  * A write in flight is the exception: leaving `submitting` would make
- * `settleSubmit` discard the verdict when it lands, so the edit waits. A
- * refusal the editor is resting on judged the draft as it was; once the draft
- * moves it is no longer about anything and goes too, while a completed write
- * stays true and stays.
+ * `settleSave` discard the verdict when it lands, so the edit waits. A refusal
+ * the editor is resting on judged the draft as it was; once the draft moves it
+ * is no longer about anything and goes too, while a completed write stays true
+ * and stays.
  */
 function redraft(
   state: SettingsEditorState,
@@ -287,14 +260,18 @@ function redraft(
   return editing(state.authority, next(state.draft), CLEAN);
 }
 
-function requestReview(
+/**
+ * Save a scope's draft: plan it against the revision held and send it. Only an
+ * editing state may start a save, so a failed or conflicted attempt is resolved
+ * through `retry_requested` or a reload and can never be replaced by a request
+ * under a new identity by accident.
+ */
+function requestSave(
   state: SettingsEditorState,
   scope: SettingsScope,
   idempotencyKey: string,
 ): SettingsEditorState {
-  // A review opened over a write in flight would replace the state that
-  // write's verdict is delivered to. It waits for the verdict.
-  if (state.status === 'editor_unavailable' || state.status === 'submitting') return state;
+  if (state.status !== 'editing') return state;
   const plan = planFor(state.authority, state.draft, scope);
   switch (plan.outcome) {
     case 'invalid':
@@ -303,20 +280,18 @@ function requestReview(
         rejection: { origin: 'client', scope, errors: plan.errors },
       });
     case 'unchanged':
-      return editing(state.authority, state.draft, {
-        rest: 'rejected',
-        rejection: {
-          origin: 'client',
-          scope,
-          errors: [{ field: scope, message: `No ${scope} settings have changed.` }],
-        },
-      });
+      return state;
     case 'ready':
       return {
-        status: 'reviewing',
+        status: 'submitting',
         authority: state.authority,
         draft: state.draft,
-        review: reviewOf(scope, plan, idempotencyKey),
+        attempt: {
+          scope,
+          expectedRevisionId: plan.expectedRevisionId,
+          patch: plan.patch,
+          idempotencyKey,
+        },
       };
     default: {
       const exhaustive: never = plan;
@@ -326,88 +301,34 @@ function requestReview(
 }
 
 /**
- * A confirmation is not a flag: it is the state that holds the review. So it
- * can only be given while a review is open, and it can only be withdrawn from
- * a state whose review it was given for.
+ * Resending a failed save. The attempt is replanned against the authority the
+ * editor now holds, and only an identical patch against the identical revision
+ * keeps its identity; anything else means the attempt no longer describes the
+ * resource, and it ends in a conflict instead of being sent.
  */
-function setConfirmation(
-  state: SettingsEditorState,
-  confirmed: boolean,
-): SettingsEditorState {
-  switch (state.status) {
-    case 'reviewing':
-      return confirmed
-        ? {
-            status: 'confirmed',
-            authority: state.authority,
-            draft: state.draft,
-            review: state.review,
-          }
-        : state;
-    case 'confirmed':
-    case 'authority_withdrawn':
-    case 'submit_failed':
-      return confirmed
-        ? state
-        : {
-            status: 'reviewing',
-            authority: state.authority,
-            draft: state.draft,
-            review: state.review,
-          };
-    // A write in flight, a refused revision, and a superseded review are past
-    // the point where a checkbox decides anything.
-    case 'editor_unavailable':
-    case 'editing':
-    case 'submitting':
-    case 'conflicted':
-    case 'review_superseded':
-      return state;
-    default: {
-      const exhaustive: never = state;
-      return exhaustive;
-    }
-  }
-}
-
-/**
- * Entering the write.
- *
- * The confirmation is re-derived rather than trusted: the change is replanned
- * against the authority the editor now holds, and only an identical review id
- * lets the write proceed. The id carries the revision as well as the change,
- * so one comparison catches both a resource that moved and a draft that no
- * longer produces what was confirmed, either way the review is superseded
- * instead of applied.
- */
-function startSubmit(state: SettingsEditorState): SettingsEditorState {
-  // Reachable only from a confirmation: `submit_failed` and
-  // `authority_withdrawn` are themselves only reachable through one, so
-  // retrying from them is retrying a change the user did confirm.
-  if (
-    state.status !== 'confirmed' &&
-    state.status !== 'authority_withdrawn' &&
-    state.status !== 'submit_failed'
-  ) {
-    return state;
-  }
-  const { authority, draft, review } = state;
-  const replanned = planFor(authority, draft, review.scope);
+function retrySave(state: SettingsEditorState): SettingsEditorState {
+  if (state.status !== 'failed') return state;
+  const { authority, draft, attempt } = state;
+  const replanned = planFor(authority, draft, attempt.scope);
   if (
     replanned.outcome !== 'ready' ||
-    reviewOf(review.scope, replanned, review.idempotencyKey).reviewId !== review.reviewId
+    replanned.expectedRevisionId !== attempt.expectedRevisionId ||
+    stableJson(replanned.patch) !== stableJson(attempt.patch)
   ) {
-    return superseded(authority, draft, review, settingsRevisionId(authority, review.scope));
+    return conflicted(authority, draft, attempt, {
+      expectedRevisionId: attempt.expectedRevisionId,
+      actualRevisionId: settingsRevisionId(authority, attempt.scope),
+    });
   }
-  return { status: 'submitting', authority, draft, review };
+  return { status: 'submitting', authority, draft, attempt };
 }
 
-function settleSubmit(
+function settleSave(
   state: SettingsEditorState,
   result: SettingsMutationResult,
 ): SettingsEditorState {
   if (state.status !== 'submitting') return state;
-  const { authority, draft, review } = state;
+  const { authority, draft, attempt } = state;
   switch (result.outcome) {
     case 'success':
       return editing(authority, draft, {
@@ -425,30 +346,22 @@ function settleSubmit(
         rest: 'rejected',
         rejection: {
           origin: 'server',
-          scope: review.scope,
+          scope: attempt.scope,
           detail: result.detail,
           errors: result.errors,
         },
       });
     case 'conflict':
-      return {
-        status: 'conflicted',
-        authority,
-        draft,
-        review,
-        conflict: {
-          expectedRevisionId: result.expectedRevisionId,
-          actualRevisionId: result.actualRevisionId,
-        },
-      };
-    // Three ways for nothing to have been applied, and they share a state
-    // because they share the statement the reader needs: the draft is intact,
-    // the revision is untouched, and the detail says why. They differ only in
-    // the reason, which each one carries.
+      return conflicted(authority, draft, attempt, {
+        expectedRevisionId: result.expectedRevisionId,
+        actualRevisionId: result.actualRevisionId,
+      });
+    // Three ways for nothing to have been applied: the draft is intact, the
+    // revision is untouched, and the detail says why.
     case 'unavailable':
     case 'not_dispatched':
     case 'read_only_scope':
-      return { status: 'authority_withdrawn', authority, draft, review, detail: result.detail };
+      return failed(state, { kind: 'not_sent', detail: result.detail });
     case 'offline':
       return failed(state, { kind: 'offline', detail: result.detail });
     case 'error':
@@ -483,55 +396,33 @@ export type SubmittingSettingsState = Extract<SettingsEditorState, { status: 'su
  * The request a submitting state stands for.
  *
  * Total, and reachable from nowhere else: a request exists only where the
- * machine has already checked the held revision against the authority, so
- * there is no path that sends a patch from a stale review.
+ * machine has already planned the draft against the held revision, so there is
+ * no path that sends a patch built from anything but the attempt.
  *
- * Scope writability is deliberately absent. It is not a property of the review
- * this machine holds, it is a property of the dashboard the routes point at,
- * and it can change while a review sits open. The controller supplies it at
- * dispatch so the write refuses on the current reading rather than one captured
- * when the draft was confirmed.
+ * Scope writability is deliberately absent. It is a property of the dashboard
+ * the routes point at, and it can change while an attempt is held. The
+ * controller supplies it at dispatch so the write refuses on the current
+ * reading rather than one captured when the draft was planned.
  */
 export function settingsSubmission(
   state: SubmittingSettingsState,
   routes: SettingsRoutes,
 ): Omit<SettingsMutationRequest, 'writability'> {
   return {
-    scope: state.review.scope,
-    expectedRevisionId: state.review.expectedRevisionId,
-    idempotencyKey: state.review.idempotencyKey,
-    readUrl: readUrlFor(state.review.scope, routes),
-    patchUrl: patchUrlFor(state.review.scope, routes),
-    patch: state.review.patch,
+    scope: state.attempt.scope,
+    expectedRevisionId: state.attempt.expectedRevisionId,
+    idempotencyKey: state.attempt.idempotencyKey,
+    readUrl: readUrlFor(state.attempt.scope, routes),
+    patchUrl: patchUrlFor(state.attempt.scope, routes),
+    patch: state.attempt.patch,
   };
 }
 
-/** The review the dialog is about, if the machine is holding one. */
-export function settingsReviewOf(state: SettingsEditorState): SettingsReview | null {
+/** The save the editor is holding, if it is holding one. */
+export function settingsAttemptOf(state: SettingsEditorState): SettingsAttempt | null {
   return state.status === 'editor_unavailable' || state.status === 'editing'
     ? null
-    : state.review;
-}
-
-/** Whether the review on screen is one the user has confirmed. */
-export function settingsConfirmationHeld(state: SettingsEditorState): boolean {
-  switch (state.status) {
-    case 'confirmed':
-    case 'submitting':
-    case 'conflicted':
-    case 'authority_withdrawn':
-    case 'submit_failed':
-      return true;
-    case 'editor_unavailable':
-    case 'editing':
-    case 'reviewing':
-    case 'review_superseded':
-      return false;
-    default: {
-      const exhaustive: never = state;
-      return exhaustive;
-    }
-  }
+    : state.attempt;
 }
 
 export function settingsRejection(state: SettingsEditorState): SettingsRejection | null {
@@ -558,10 +449,10 @@ export function settingsScopeDirty(
 /**
  * The change this scope's draft currently amounts to, replanned live.
  *
- * This is the same plan `review_requested` freezes, computed without freezing
- * it, so a surface can state validity, `ready`, `unchanged`, or `invalid`
- * with the daemon-shaped field errors, while the value is still being typed.
- * `null` while the read names no revision to plan against.
+ * This is the same plan `save_requested` sends, computed without sending it,
+ * so a surface can state validity, `ready`, `unchanged`, or `invalid` with the
+ * daemon-shaped field errors, while the value is still being typed. `null`
+ * while the read names no revision to plan against.
  */
 export function settingsScopePlan(
   state: SettingsEditorState,
@@ -583,24 +474,24 @@ function editing(
   return { status: 'editing', authority, draft, resting };
 }
 
-function superseded(
+function conflicted(
   authority: SettingsEditor,
   draft: SettingsDraft,
-  review: SettingsReview,
-  currentRevisionId: string,
+  attempt: SettingsAttempt,
+  conflict: SettingsRevisionConflict,
 ): SettingsEditorState {
-  return { status: 'review_superseded', authority, draft, review, currentRevisionId };
+  return { status: 'conflicted', authority, draft, attempt, conflict };
 }
 
 function failed(
   state: SubmittingSettingsState,
-  failure: SettingsSubmitFailure,
+  failure: SettingsSaveFailure,
 ): SettingsEditorState {
   return {
-    status: 'submit_failed',
+    status: 'failed',
     authority: state.authority,
     draft: state.draft,
-    review: state.review,
+    attempt: state.attempt,
     failure,
   };
 }
@@ -634,20 +525,6 @@ function planFor(
       return exhaustive;
     }
   }
-}
-
-function reviewOf(
-  scope: SettingsScope,
-  plan: Extract<SettingsPlan, { outcome: 'ready' }>,
-  idempotencyKey: string,
-): SettingsReview {
-  return {
-    scope,
-    expectedRevisionId: plan.expectedRevisionId,
-    patch: plan.patch,
-    reviewId: `${scope}@${plan.expectedRevisionId}#${stableJson(plan.patch)}`,
-    idempotencyKey,
-  };
 }
 
 function patchUrlFor(scope: SettingsScope, routes: SettingsRoutes): string {

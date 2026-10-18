@@ -3,8 +3,8 @@
  * one row per served scalar, grouped under sticky section rows.
  *
  * Hover and focus INSPECT a row: the inspector shows its exact evidence and
- * nothing on the row changes. Click, Enter, or Space SELECT it: the review
- * state opens directly under it. Escape closes the review, then clears the
+ * nothing on the row changes. Click, Enter, or Space SELECT it: the editor
+ * opens directly under it. Escape closes the editor, then clears the
  * inspection. Arrow keys rove between rows so a reader never has to Tab through
  * fifty keys to reach the one they want.
  *
@@ -30,7 +30,7 @@ import type { SettingsEditorHandle } from './SettingsEditorController.tsx';
 import type { SettingsEditorState } from './settingsEditorMachine.ts';
 import type { WritableScopes } from './settingsGates.ts';
 import type { ConfigSection } from './settingsModel.ts';
-import { SettingsReviewPanel } from './SettingsReviewPanel.tsx';
+import { SettingsEditPanel } from './SettingsEditPanel.tsx';
 import {
   bindingFor,
   draftValue,
@@ -67,15 +67,11 @@ const COLUMNS =
   '@min-[41rem]:grid-cols-[minmax(9rem,1.3fr)_minmax(8rem,1.2fr)_6.5rem_minmax(9.5rem,1.2fr)_4.5rem]';
 const COLUMN_GAP = 'gap-x-2';
 
-/** The machine states in which a frozen review, and its controls, are on screen. */
-const REVIEW_BEARING: ReadonlySet<SettingsEditorState['status']> = new Set([
-  'reviewing',
-  'confirmed',
+/** The machine states in which a held save attempt, and its controls, are on screen. */
+const ATTEMPT_BEARING: ReadonlySet<SettingsEditorState['status']> = new Set([
   'submitting',
   'conflicted',
-  'authority_withdrawn',
-  'submit_failed',
-  'review_superseded',
+  'failed',
 ]);
 
 export function EffectiveConfigTable({
@@ -117,15 +113,15 @@ export function EffectiveConfigTable({
   // hide the verdict the reader is waiting for.
   const pinned = editor.state.status === 'submitting';
 
-  // Focus returns to the edited row when a frozen review resolves and the
-  // control the reader was on, Apply, Retry, Load current values, unmounts
-  // with the review stage. Only when focus was actually lost to the document:
-  // a keystroke in another scope's input also ends a staged review, and that
-  // input must keep its focus.
+  // Focus returns to the edited row when a held save attempt resolves and the
+  // control the reader was on, Save, Retry, Load current values, goes away
+  // with it. Only when focus was actually lost to the document: a keystroke in
+  // another scope's input also drops a held attempt, and that input must keep
+  // its focus.
   const status = editor.state.status;
   const previousStatus = useRef(status);
   useEffect(() => {
-    const wasStaged = REVIEW_BEARING.has(previousStatus.current);
+    const wasStaged = ATTEMPT_BEARING.has(previousStatus.current);
     previousStatus.current = status;
     if (!wasStaged || status !== 'editing' || selectedKey === null) return;
     const active = document.activeElement;
@@ -151,7 +147,7 @@ export function EffectiveConfigTable({
         }
         return;
       }
-      // Rove only from a row; a key pressed inside the review panel's inputs
+      // Rove only from a row; a key pressed inside the edit panel's inputs
       // belongs to the input.
       if (!(event.target instanceof HTMLElement) || event.target.getAttribute('role') !== 'row') {
         return;
@@ -236,7 +232,7 @@ export function EffectiveConfigTable({
                 {selected ? (
                   <div role="row" aria-selected={false}>
                     <div role="gridcell" aria-colspan={5}>
-                      <SettingsReviewPanel
+                      <SettingsEditPanel
                         row={row}
                         capability={capability}
                         editor={editor}
