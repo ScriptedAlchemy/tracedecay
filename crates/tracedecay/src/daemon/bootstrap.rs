@@ -29,6 +29,21 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 const DAEMON_SHUTDOWN_COORDINATION_DEADLINE: std::time::Duration =
     DAEMON_SHUTDOWN_DEADLINE.saturating_sub(std::time::Duration::from_millis(100));
 
+/// Exit status (`EX_NOINPUT`) of a daemon whose profile was deleted or
+/// replaced under it. It is non-zero so a supervisor that restarts only after
+/// a failed exit (launchd with `SuccessfulExit=false`) starts it again on
+/// whatever profile is at the path.
+pub const PROFILE_LOST_EXIT_CODE: i32 = 66;
+
+/// How a foreground daemon run ended after a clean shutdown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonRunEnd {
+    Stopped,
+    /// The profile was deleted or replaced; the process should exit with
+    /// [`PROFILE_LOST_EXIT_CODE`].
+    ProfileLost,
+}
+
 /// How a client connection task ended. The error is rendered because a
 /// native task's outcome must be `Clone`.
 pub(super) type ClientOutcome = NativeTaskOutcome<std::result::Result<(), String>>;
@@ -61,7 +76,7 @@ pub fn run_foreground(
     profile: tracedecay_runtime_core::config::ProfileRoot,
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DaemonRunEnd>> + Send>> {
     Box::pin(tracing::Instrument::instrument(
         run_foreground_unix(profile, socket_path, remote_tls),
         tracing::trace_span!("daemon.bootstrap.run_foreground"),
@@ -73,9 +88,10 @@ pub fn run_foreground(
     profile: tracedecay_runtime_core::config::ProfileRoot,
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DaemonRunEnd>> + Send>> {
     Box::pin(tracing::Instrument::instrument(
-        run_foreground_loopback(profile, socket_path, remote_tls),
+        run_foreground_loopback(profile, socket_path, remote_tls)
+            .map_ok(|()| DaemonRunEnd::Stopped),
         tracing::trace_span!("daemon.bootstrap.run_foreground"),
     ))
 }
@@ -618,7 +634,7 @@ async fn run_foreground_unix(
     profile: tracedecay_runtime_core::config::ProfileRoot,
     socket_path: PathBuf,
     remote_tls: Option<RemoteBrainTlsConfig>,
-) -> Result<()> {
+) -> Result<DaemonRunEnd> {
     let bootstrap_started = Instant::now();
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = native_runtime::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
@@ -661,7 +677,7 @@ async fn run_foreground_unix(
             "remote_account_deletion_resume",
             &[("outcome", format!("{:?}", receipt.status))],
         );
-        return Ok(());
+        return Ok(DaemonRunEnd::Stopped);
     }
     let (worker_plan, catalog_prewarm) = tokio::join!(
         install_profile_worker_plan(&engine.store_administration, &engine.invocation),
@@ -803,6 +819,7 @@ async fn run_foreground_unix(
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
     let mut shutdown_signals = ShutdownSignals::listen()?;
+    let mut run_end = DaemonRunEnd::Stopped;
     let lateness_canary = spawn_lateness_canary();
     let spooled_hook_opener =
         hook_v2_replay_consumer::spawn_spooled_hook_opener(engine.clone(), profile.clone());
@@ -866,6 +883,7 @@ async fn run_foreground_unix(
                         ("profile", profile_root.display().to_string()),
                     ],
                 );
+                run_end = DaemonRunEnd::ProfileLost;
                 break;
             },
         };
@@ -969,7 +987,7 @@ async fn run_foreground_unix(
     log_background_shutdown_receipt(&shutdown.background);
     log_project_server_shutdown_receipt(&shutdown.project_servers);
     log_runtime_hazards();
-    endpoint_cleanup
+    endpoint_cleanup.map(|()| run_end)
 }
 
 /// Install the daemon-wide worker authority from the profile's exact
@@ -1184,7 +1202,7 @@ mod tests {
         assert_eq!(
             std::mem::size_of_val(&future),
             std::mem::size_of::<
-                std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>,
+                std::pin::Pin<Box<dyn std::future::Future<Output = Result<DaemonRunEnd>> + Send>>,
             >(),
         );
     }

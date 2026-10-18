@@ -55,6 +55,11 @@ fn deleting_the_profile_under_a_running_daemon_ends_it_as_profile_lost() {
         .expect("wait for the daemon to exit")
         .unwrap_or_else(|| panic!("a daemon whose profile is lost must exit; log={}", log()));
     let log = log();
+    assert_eq!(
+        exit.code(),
+        Some(tracedecay::daemon::PROFILE_LOST_EXIT_CODE),
+        "launchd restarts only a non-zero exit; log={log}"
+    );
     assert!(
         !log.contains("still held at shutdown"),
         "every store runtime must close before the exit; exit={exit} log={log}"
