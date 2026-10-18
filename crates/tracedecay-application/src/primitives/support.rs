@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use tracedecay_domain::errors::Result;
+use tracedecay_graph_query::GraphQueryResult as Result;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankedAffectedTest {
