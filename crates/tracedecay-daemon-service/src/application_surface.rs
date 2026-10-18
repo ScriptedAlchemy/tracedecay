@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use axum::response::Response;
 use serde_json::Value;
 use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationRequest, is_http_application_operation_exposed,
