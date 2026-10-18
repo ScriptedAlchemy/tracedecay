@@ -404,6 +404,13 @@ function isCommittedEffectReceipt(value: unknown, requestId: string): boolean {
   );
 }
 
+/** Concealed denials omit binding identity; other problems name their expected binding. */
+export function applicationProblemBindingMatches(envelope: HttpProblemEnvelope, bindingIds: readonly string[]): boolean {
+  return envelope.problem.kind === "not_found_or_not_authorized"
+    ? envelope.binding_id === undefined
+    : bindingIds.some((bindingId) => bindingId === envelope.binding_id);
+}
+
 export function applicationProblemStatusMatches(status: number, kind: string): boolean {
   switch (kind) {
     case "invalid_request":

@@ -24,6 +24,7 @@ import {
 
 import {
   TraceDecayAbortError,
+  TraceDecayDeniedError,
   TraceDecayMalformedResponseError,
   TraceDecayResetRequiredError,
   TraceDecayStaleError,
@@ -1295,6 +1296,41 @@ describe("TraceDecayClient generated operation bindings", () => {
 });
 
 describe("TraceDecayClient transport envelopes", () => {
+  it("requires concealed problems to omit identity and ordinary problems to bind it", async () => {
+    const concealed = problemEnvelope("not_found_or_not_authorized", "concealed");
+    const disclosed = problemEnvelope("not_found_or_not_authorized", "concealed", {
+      bindingId: "binding.http.workflow.list_definitions",
+    });
+    const wrongBinding = problemEnvelope("not_found_or_not_authorized", "concealed", {
+      bindingId: "binding.http.different.v1",
+    });
+    const unbound = problemEnvelope("unavailable", "service_unavailable");
+
+    await withServer(
+      [
+        (_request, response) => json(response, 404, concealed),
+        (_request, response) => json(response, 404, disclosed),
+        (_request, response) => json(response, 404, wrongBinding),
+        (_request, response) => json(response, 503, unbound),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayDeniedError,
+        );
+        for (let response = 0; response < 3; response += 1) {
+          await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+            TraceDecayMalformedResponseError,
+          );
+        }
+      },
+    );
+  });
+
   it("classifies admitted terminal problems and requires committed_receipt", async () => {
     const bindingId = "binding.http.workflow.list_definitions";
     const reset = problemEnvelope("reset_required", "store_reset_required", {

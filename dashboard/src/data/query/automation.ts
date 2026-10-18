@@ -373,6 +373,11 @@ export async function runAutomaticCurator(
       const { binding_id: _bindingId, ...applicationProblem } = decoded;
       const problem = ApplicationProblemEnvelopeSchema.parse(applicationProblem);
       switch (problem.problem.kind) {
+        case "not_found_or_not_authorized":
+          return {
+            outcome: "denied",
+            detail: "the automatic run was not found or not authorized",
+          };
         case "partial_effect":
           return { outcome: "partial_effect", problem };
         case "reset_required":

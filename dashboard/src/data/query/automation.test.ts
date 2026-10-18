@@ -143,6 +143,49 @@ describe("runAutomaticCurator", () => {
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
+  it("recognizes a concealed 404 without disclosing a binding", async () => {
+    respond(automaticProblem("not_found_or_not_authorized"), {
+      ok: false,
+      statusCode: 404,
+    });
+    expect(await runAutomaticCurator()).toEqual({
+      outcome: "denied",
+      detail: "the automatic run was not found or not authorized",
+    });
+  });
+
+  it("rejects a concealed problem that discloses any binding", async () => {
+    for (const bindingId of [
+      "binding.http.fact_store_curate.v1",
+      "binding.http.fact_store_get.v1",
+    ]) {
+      const problem = automaticProblem("not_found_or_not_authorized");
+      problem.value.binding_id = bindingId;
+      respond(problem, { ok: false, statusCode: 404 });
+      expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+    }
+  });
+
+  it("requires binding identity for ordinary problems", async () => {
+    const problem = automaticProblem("conflict");
+    delete problem.value.binding_id;
+    respond(problem, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("still validates the status and result contract of concealed problems", async () => {
+    respond(automaticProblem("not_found_or_not_authorized"), {
+      ok: false,
+      statusCode: 503,
+    });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const wrongContract = automaticProblem("not_found_or_not_authorized");
+    wrongContract.value.contract.schema_revision = 2;
+    respond(wrongContract, { ok: false, statusCode: 404 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("rejects malformed success request identity and scope digest", async () => {
     const wrongRequest = curatorSuccess(startedReceipt("request.dashboard.success"));
     wrongRequest.value.request_id = " request.dashboard.success";
@@ -395,8 +438,11 @@ function curatorSuccess(run: unknown) {
   };
 }
 
-function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required") {
+function automaticProblem(
+  kind: "conflict" | "partial_effect" | "reset_required" | "not_found_or_not_authorized",
+) {
   const requestId = `request.dashboard.${kind}`;
+  const concealed = kind === "not_found_or_not_authorized";
   const scope = {
     project_id: "project.dashboard",
     repository_id: "repository.dashboard",
@@ -432,7 +478,7 @@ function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required"
   return {
     kind: "problem",
     value: {
-      binding_id: "binding.http.fact_store_curate.v1",
+      ...(concealed ? {} : { binding_id: "binding.http.fact_store_curate.v1" }),
       contract: {
         schema_id: "schema.application.retained.fact-store-curate.result",
         schema_revision: 1,
@@ -441,20 +487,26 @@ function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required"
       problem: {
         revision: 1,
         kind,
-        code: `automation.memory-curator.${kind}`,
-        message: kind === "partial_effect"
+        code: concealed
+          ? "application.not_found_or_not_authorized"
+          : `automation.memory-curator.${kind}`,
+        message: concealed
+          ? "The operation was not found or not authorized."
+          : kind === "partial_effect"
           ? "curation committed before projection failed"
           : kind === "reset_required"
           ? "the retained memory store must be reset"
           : "the retained operation conflicts with current state",
-        diagnostic: {
+        diagnostic: concealed ? null : {
           code: `application.retained.${kind}`,
           message: "The retained operation could not complete.",
         },
         detail: null,
         committed_receipt: effectReceipt,
         owning_layer: "runtime",
-        terminality: kind === "conflict" ? "pre_admission" : "admitted_terminal",
+        terminality: kind === "partial_effect" || kind === "reset_required"
+          ? "admitted_terminal"
+          : "pre_admission",
         retryable: kind === "conflict",
         retry: kind === "conflict" ? "after_revalidate" : "never",
         retry_scope: kind === "conflict" ? "fresh_request" : null,
@@ -464,7 +516,7 @@ function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required"
         request_id: requestId,
         trace_id: requestId,
         details: [],
-        legal_actions: [
+        legal_actions: concealed ? [] : [
           kind === "partial_effect"
             ? "reconcile"
             : kind === "reset_required"

@@ -404,6 +404,13 @@ function isCommittedEffectReceipt(value: unknown, requestId: string): boolean {
   );
 }
 
+/** Concealed denials omit binding identity; other problems name their expected binding. */
+export function applicationProblemBindingMatches(envelope: HttpProblemEnvelope, bindingIds: readonly string[]): boolean {
+  return envelope.problem.kind === "not_found_or_not_authorized"
+    ? envelope.binding_id === undefined
+    : bindingIds.some((bindingId) => bindingId === envelope.binding_id);
+}
+
 export function applicationProblemStatusMatches(status: number, kind: string): boolean {
   switch (kind) {
     case "invalid_request":
@@ -586,4 +593,4 @@ export const APPLICATION_HTTP_BINDINGS = {
 } as const satisfies Readonly<Record<string, ApplicationHttpBinding>>;
 export type ApplicationHttpOperationId = keyof typeof APPLICATION_HTTP_BINDINGS;
 export function decodeApplicationHttpSuccess<T>(operationId: ApplicationHttpOperationId, value: unknown, decode: Decoder<T>): HttpSuccessEnvelope<T> { const binding: ApplicationHttpBinding = APPLICATION_HTTP_BINDINGS[operationId]; const answered = typeof value === "object" && value !== null ? (value as { binding_id?: unknown }).binding_id : undefined; const bindingId = binding.bindingIds.find((candidate) => candidate === answered) ?? binding.bindingIds[0]; return decodeHttpSuccessEnvelope(value, bindingId, binding.resultSchema.schemaId, binding.resultSchema.revision, binding.terminalStates, binding.cancellation, binding.receipt, binding.reconciliation, decode); }
-export function decodeApplicationHttpProblem(operationId: ApplicationHttpOperationId, status: number, value: unknown): HttpProblemEnvelope { const binding: ApplicationHttpBinding = APPLICATION_HTTP_BINDINGS[operationId]; if (!isHttpProblemEnvelope(value) || !applicationProblemStatusMatches(status, value.problem.kind) || !binding.bindingIds.some((candidate) => candidate === value.binding_id) || value.contract.schema_id !== binding.resultSchema.schemaId || value.contract.schema_revision !== binding.resultSchema.revision) throw new TypeError("malformed canonical envelope: application problem does not match the operation"); return value; }
+export function decodeApplicationHttpProblem(operationId: ApplicationHttpOperationId, status: number, value: unknown): HttpProblemEnvelope { const binding: ApplicationHttpBinding = APPLICATION_HTTP_BINDINGS[operationId]; if (!isHttpProblemEnvelope(value) || !applicationProblemStatusMatches(status, value.problem.kind) || !applicationProblemBindingMatches(value, binding.bindingIds) || value.contract.schema_id !== binding.resultSchema.schemaId || value.contract.schema_revision !== binding.resultSchema.revision) throw new TypeError("malformed canonical envelope: application problem does not match the operation"); return value; }

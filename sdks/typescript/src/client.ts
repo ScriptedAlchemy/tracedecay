@@ -14,6 +14,7 @@ import {
 } from "./request-control";
 export type { OperationRequestOptions, PageOptions } from "./request-control";
 import {
+  applicationProblemBindingMatches,
   applicationProblemStatusMatches,
   factStoreCurateReceiptMatches,
   isHttpProblemEnvelope,
@@ -780,9 +781,7 @@ export class TraceDecayClient {
       }
       const validBinding =
         expectedBinding === undefined ||
-        (problemEnvelope.problem.kind === "not_found_or_not_authorized"
-          ? problemEnvelope.binding_id === undefined
-          : problemEnvelope.binding_id === expectedBinding);
+        applicationProblemBindingMatches(problemEnvelope, [expectedBinding]);
       if (
         response.ok ||
         !validBinding ||
