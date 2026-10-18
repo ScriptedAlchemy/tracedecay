@@ -260,6 +260,14 @@ impl StoreRuntimeLeaseSource {
         self.physical_snapshot().writer_present
     }
 
+    fn file_lost(&self) -> bool {
+        self.attachment.file_lost()
+    }
+
+    fn lost_file_closed(&self) -> bool {
+        self.attachment.lost_file_closed()
+    }
+
     fn validate_database_write_authority(
         &self,
         authority: &crate::db::DatabaseAuthority,
@@ -1455,6 +1463,42 @@ struct RegistryState {
     next_profile_pin_token: u64,
 }
 
+impl RegistryState {
+    /// Unmaps a ready runtime whose file was unlinked or replaced, so the next
+    /// open of its key publishes a fresh runtime through the resolver. Leases
+    /// already issued keep the closed runtime and answer `FileLost`.
+    ///
+    /// Returns `true` while the lost runtime's connections are still closing.
+    /// The entry stays mapped until they are, because a successor published
+    /// now would run beside readers still open on the old file.
+    fn evict_lost_runtime(&mut self, key: &StoreRuntimeKey) -> bool {
+        match self.entries.get(key) {
+            Some(RegistryEntry::Ready(ready)) if ready.owner.file_lost() => {
+                if !ready.owner.lost_file_closed() {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+        let Some(RegistryEntry::Ready(lost)) = self.entries.remove(key) else {
+            return false;
+        };
+        let _ = lost
+            .owner
+            .runtime()
+            .transition(RuntimeMaintenanceStateV1::Faulted);
+        self.profile_pin_tokens.remove(key);
+        if self
+            .profile_authorities
+            .get(key.shard_id())
+            .is_some_and(|binding| binding == lost.owner.binding())
+        {
+            self.profile_authorities.remove(key.shard_id());
+        }
+        false
+    }
+}
+
 struct StoreRuntimeRegistryInner {
     resolver: Arc<dyn StoreRuntimeResolver>,
     publisher: Arc<dyn ShardRuntimePublisher>,
@@ -1549,7 +1593,10 @@ impl StoreRuntimeRegistry {
 
     pub fn lookup(&self, expected: &StoreRuntimeBindingV1) -> StoreRuntimeLookup {
         let key = StoreRuntimeKey::from_binding(expected);
-        let state = self.lock_state();
+        let mut state = self.lock_state();
+        if state.evict_lost_runtime(&key) {
+            return StoreRuntimeLookup::Evicting { key: Box::new(key) };
+        }
         match state.entries.get(&key) {
             Some(RegistryEntry::Ready(ready)) => {
                 let actual = ready.owner.binding();

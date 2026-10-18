@@ -52,3 +52,4 @@ vendor/grafeo/*/Cargo.lock
 # Bazel
 bazel-*
 MODULE.bazel.lock
+/.bazelrc.local
