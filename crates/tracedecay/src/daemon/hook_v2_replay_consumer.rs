@@ -26,7 +26,8 @@ use tracedecay_hooks::{
 
 use tracedecay_mcp::handlers::hook_runtime::{
     HookV2AdmissionOutcomeV1, admit_hook_v2_envelope,
-    admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_pending_work_envelopes,
+    admit_hook_v2_replayed_envelope_with_lifecycle, hook_v2_native_lifecycle_enabled,
+    hook_v2_pending_work_envelopes,
 };
 
 mod spool_opener;
@@ -305,6 +306,7 @@ async fn redrive_pending_work(
                         tracedecay_hooks::HookEventV2::ToolLifecycle { .. }
                             | tracedecay_hooks::HookEventV2::SavedEdit { .. }
                     )
+                    && hook_v2_native_lifecycle_enabled(graph, host).await
                 {
                     return HookV2AdmissionOutcomeV1::Backpressured;
                 }
@@ -677,32 +679,30 @@ mod tests {
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout())
                 .unwrap();
         let now = hook_replay_now();
-        let binding = HookScopeBindingV1 {
-            host,
-            project_id,
-            repository_id: [2; 16],
-            worktree_id: [3; 16],
-            worktree_epoch: 1,
-            binding_token: [4; 32],
-            capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
-                family: tracedecay_hooks::HookEventFamily::SavedEdit,
-                support: tracedecay_hooks::stock_event_support(
-                    host,
-                    tracedecay_hooks::HookEventFamily::SavedEdit,
-                ),
-            }],
-        };
-        tracedecay_hooks::HookConfigurationFileWriterV1::new(
-            tracedecay_hooks::hook_configuration_path(data_root, binding.worktree_id, host),
+        let hook_runtime = crate::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::new(
+            fixture._temp.path().join("profile"),
+        ));
+        let project = tracedecay_domain::ProjectId::new(
+            graph
+                .hook_store_layout()
+                .identity
+                .project_id
+                .clone()
+                .unwrap(),
         )
-        .publish(tracedecay_hooks::HookConfigurationSnapshotV1 {
-            schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
-            revision: 1,
-            published_at: now,
-            expires_at: UtcMicros(now.0 + 60_000_000),
-            binding: binding.clone(),
-        })
         .unwrap();
+        let scope = (hook_runtime.scope_resolver)(graph.project_root(), &project).unwrap();
+        let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
+            &hook_runtime,
+            graph.hook_store_layout(),
+        )
+        .unwrap();
+        let binding = published_hook_scope_binding(data_root, worktree_id, host, now).unwrap();
+        let admission_runtime = graph.test_runtime_for_test().unwrap();
+        let project_sessions = admission_runtime
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+            .unwrap();
+        let background_cpu = admission_runtime.background_cpu();
         let lifecycle = tracedecay_hooks::NativeContextScoutLifecycleV1::new(
             "session.replay.edit",
             "call.replay.edit",
@@ -741,9 +741,9 @@ mod tests {
             tracedecay_daemon_service::context_scout_lifecycle::register_context_scout_lifecycle_authority(
                 project_id,
                 binding.worktree_id,
-                tracedecay_domain::ProjectId::new("project.replay.owner").unwrap(),
-                tracedecay_domain::WorktreeId::new("worktree.replay.edit").unwrap(),
-                &fixture.project_sessions,
+                scope.project_id.clone(),
+                scope.worktree_id.clone(),
+                &project_sessions,
             ),
             tracedecay_daemon_service::context_scout_lifecycle::AuthorityRegistrationV1::Registered
         );
@@ -767,8 +767,8 @@ mod tests {
             &graph,
             data_root,
             &fixture.settlements,
-            &fixture.project_sessions,
-            &fixture.background_cpu,
+            &project_sessions,
+            &background_cpu,
         )
         .await;
         assert!(
@@ -791,8 +791,8 @@ mod tests {
             &graph,
             data_root,
             &fixture.settlements,
-            &fixture.project_sessions,
-            &fixture.background_cpu,
+            &project_sessions,
+            &background_cpu,
         )
         .await;
         let mounted = tokio::time::timeout(Duration::from_secs(10), runs.recv())
@@ -808,20 +808,85 @@ mod tests {
         })
         .await
         .expect("mounted work must settle its ledger obligation");
+        assert!(
+            runs.try_recv().is_err(),
+            "the mounted edit executes exactly once"
+        );
+        // Claude deliberately omits lifecycle writes while intent is disabled;
+        // an acknowledged edit can therefore need ledger-only recovery.
+        tracedecay_daemon_service::unregister_hook_orchestration_runtime(
+            project_id,
+            binding.worktree_id,
+            &runtime,
+        );
+        let claude = NativeHostIdentityV1::ClaudeCode;
+        let claude_binding =
+            published_hook_scope_binding(data_root, binding.worktree_id, claude, hook_replay_now())
+                .unwrap();
+        let disabled_edit = tracedecay_hooks::HookEventEnvelopeV2 {
+            event_id: [10; 16],
+            producer: claude,
+            protected_session_id: tracedecay_agent_hosts::hooks::protected_native_session_id(
+                "session.replay.disabled-edit",
+            ),
+            project_id: claude_binding.project_id,
+            repository_id: claude_binding.repository_id,
+            worktree_id: claude_binding.worktree_id,
+            worktree_epoch: claude_binding.worktree_epoch,
+            binding_token: claude_binding.binding_token,
+            ..envelope
+        };
+        assert!(matches!(
+            admit_hook_v2_envelope(&graph, &disabled_edit, None, hook_replay_now()).await,
+            HookV2AdmissionOutcomeV1::Admitted { .. }
+        ));
+        let disabled_pending =
+            || hook_v2_pending_work_envelopes(data_root, claude, hook_replay_now()).unwrap();
+        assert_eq!(disabled_pending(), vec![disabled_edit]);
+        assert!(
+            tracedecay_daemon_service::register_hook_orchestration_runtime(
+                project_id,
+                binding.worktree_id,
+                &runtime,
+            )
+        );
+        drain_all_hosts(
+            &graph,
+            data_root,
+            &fixture.settlements,
+            &project_sessions,
+            &background_cpu,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), runs.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none(),
+            "disabled Claude edits settle without mounting a lifecycle"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !disabled_pending().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disabled Claude work must settle without a spool");
         assert!(runtime.shutdown().await);
         assert!(
             pending().is_empty(),
             "completed lifecycle work settles its durable obligation"
         );
         assert!(!HookSpoolV1::has_records(&root).unwrap());
-        assert!(runs.try_recv().is_err(), "the edit executes exactly once");
+        assert!(runs.try_recv().is_err(), "each edit executes exactly once");
         tracedecay_daemon_service::unregister_hook_orchestration_runtime(
             project_id,
             binding.worktree_id,
             &runtime,
         );
         assert!(tracedecay_daemon_service::context_scout_lifecycle::unregister_context_scout_lifecycle_authority(
-            project_id, binding.worktree_id, &fixture.project_sessions,
+            project_id, binding.worktree_id, &project_sessions,
         ));
     }
 
