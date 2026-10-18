@@ -751,7 +751,7 @@ changes a file that holds memory.
   session-memory, schema stages and invariants, `remote/*`, graph publication),
   then deletion of the interactive APIs in runtime-core and global-db, and last in
   rusqlite-runtime.
-  - Slice 2 (2026-10-18, branch `refactor/storage-write-tx`). runtime-core's
+  - Slice 2 (2026-10-18, #4248). runtime-core's
     `WriteTx` implements `QueryExecutor` and `Executor` over the job transaction,
     so a helper written against `&impl Executor` runs inside a job unchanged.
     `Database::transact` and `transact_bulk` check the write scope at begin and
