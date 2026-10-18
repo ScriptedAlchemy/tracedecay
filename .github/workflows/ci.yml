@@ -238,8 +238,10 @@ jobs:
           python3 scripts/test-check-ambient-tokio.py
           python3 scripts/check-ambient-tokio.py
 
-      - name: Check rusqlite stays inside storage owners
-        run: python3 scripts/check-rusqlite-storage-boundary.py
+      - name: Test and check rusqlite stays inside storage owners
+        run: |
+          python3 scripts/test-check-rusqlite-storage-boundary.py
+          python3 scripts/check-rusqlite-storage-boundary.py
 
       # Lint proposed commits without rejudging already-published history.
       - name: Validate commit messages
