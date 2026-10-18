@@ -1,0 +1,18 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+# Offline grader self-tests: no agents, no tokens.
+py_test(
+    name = "selftest",
+    srcs = [
+        "carry_claude_profile.py",
+        "grade.py",
+        "selftest.py",
+    ],
+    data = glob([
+        "learned_skills/**",
+        "scenarios/*.json",
+    ]),
+    imports = ["."],
+    legacy_create_init = 0,
+    main = "selftest.py",
+)

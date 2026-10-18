@@ -5,8 +5,8 @@ use tempfile::NamedTempFile;
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 use super::{
-    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedReaderError, open,
-    open_immutable_reader, open_verified_reader, open_writer, with_progress_cancellation,
+    ConnectionMode, Durability, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedReaderError,
+    open, open_immutable_reader, open_verified_reader, open_writer, with_progress_cancellation,
 };
 
 fn database() -> NamedTempFile {
@@ -31,9 +31,9 @@ fn sidecar_path(path: &Path, suffix: &str) -> std::path::PathBuf {
     sidecar.into()
 }
 
-/// Production writer policy: WAL, `synchronous=NORMAL`, and no automatic
-/// checkpoint. This is the durability contract; it does not consult any
-/// process environment variable.
+/// Writer policy: WAL, `synchronous=NORMAL` unless the store holds durable
+/// memory, and no automatic checkpoint. It does not consult any process
+/// environment variable.
 #[test]
 fn writer_mode_applies_wal_integrity_and_write_policy() {
     let file = database();
@@ -268,6 +268,47 @@ fn writer_bootstraps_fresh_incremental_auto_vacuum_before_wal() {
     );
 }
 
+/// Facts and the anchors they cite are never rebuilt, so the stores that hold
+/// them sync every commit; session and registry stores keep `NORMAL` until
+/// their durable rows move into classes of their own.
+#[cfg(any(unix, windows))]
+#[test]
+fn stores_holding_durable_memory_commit_at_full_sync() {
+    use tracedecay_store::StoreShardScopeV1;
+
+    let project_id = tracedecay_domain::ProjectId::new("project.durability").unwrap();
+    for (scope, synchronous) in [
+        (
+            StoreShardScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            2,
+        ),
+        (StoreShardScopeV1::ProfileMemory, 2),
+        (StoreShardScopeV1::ProjectSessions { project_id }, 1),
+        (StoreShardScopeV1::ProfileSessions, 1),
+        (StoreShardScopeV1::Profile, 1),
+    ] {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("store.sqlite3");
+        let pinned = OpenedDatabaseFile::create_new(&path).expect("pin fresh database");
+        let worker_path = pinned.writer_open_path(&path).expect("select writer path");
+        let connection = open_writer(
+            &worker_path,
+            Some(&pinned),
+            &path,
+            Durability::for_scope(&scope),
+        )
+        .expect("writer policy");
+
+        assert_eq!(
+            pragma_i64(&connection, "synchronous"),
+            synchronous,
+            "{scope:?}"
+        );
+    }
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn fresh_writer_uses_a_sidecar_compatible_path() {
@@ -275,7 +316,8 @@ fn fresh_writer_uses_a_sidecar_compatible_path() {
     let path = directory.path().join("fresh-writer.sqlite3");
     let pinned = OpenedDatabaseFile::create_new(&path).expect("pin fresh database");
     let worker_path = pinned.writer_open_path(&path).expect("select writer path");
-    let connection = open_writer(&worker_path, Some(&pinned), &path).expect("writer policy");
+    let connection =
+        open_writer(&worker_path, Some(&pinned), &path, Durability::Normal).expect("writer policy");
 
     connection
         .execute_batch(

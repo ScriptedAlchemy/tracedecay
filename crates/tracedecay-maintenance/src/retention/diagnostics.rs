@@ -282,7 +282,7 @@ fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
     true
 }
 
-fn bounded_statement(statement: &str) -> String {
+pub(super) fn bounded_statement(statement: &str) -> String {
     let cleaned = tracedecay_domain::fold_control_characters(statement);
     let cleaned = cleaned.trim();
     if cleaned.len() <= DOCTOR_TEXT_LIMIT {

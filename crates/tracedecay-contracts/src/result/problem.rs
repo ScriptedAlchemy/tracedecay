@@ -16,6 +16,9 @@ use crate::error::ApplicationContractError;
 /// the daemon's answer and must not be reconnected.
 pub const RUNTIME_MOUNTING_REASON_CODE: &str = "application.runtime.mounting";
 
+/// Reason code for a request refused because its capability grant expired.
+pub const GRANT_EXPIRED_REASON_CODE: &str = "application.grant.expired";
+
 /// Safe adapter-independent retry instruction. Adapters preserve it verbatim.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -134,6 +137,24 @@ pub enum ApplicationProblemKind {
     Saturated,
     Cancelled,
     TimedOut,
+}
+
+impl ApplicationProblemKind {
+    /// Canonical HTTP status code for this problem kind. Servers and clients
+    /// share this one mapping; it is an integer so no HTTP framework is needed.
+    pub const fn http_status(self) -> u16 {
+        match self {
+            Self::InvalidRequest => 400,
+            Self::NotFoundOrNotAuthorized => 404,
+            Self::Conflict | Self::PartialEffect | Self::Stale => 409,
+            Self::Unsupported => 422,
+            Self::ResetRequired | Self::Unavailable => 503,
+            Self::ExecutionFailed => 500,
+            Self::Saturated => 429,
+            Self::Cancelled => 408,
+            Self::TimedOut => 504,
+        }
+    }
 }
 
 /// Stable reason an application authority is unavailable.
@@ -445,6 +466,21 @@ impl ApplicationProblem {
         }
     }
 
+    /// The request's capability grant expired before admission. Grants are
+    /// minted per request, so the caller revalidates and sends a new request.
+    pub fn grant_expired_before_admission() -> Self {
+        Self::Unavailable {
+            classification: ApplicationUnavailableClassV1::Authority,
+            diagnostic: SafeDiagnostic {
+                code: GRANT_EXPIRED_REASON_CODE.to_owned(),
+                message: "The request's capability grant expired before admission".to_owned(),
+            },
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Retry],
+            detail: None,
+        }
+    }
+
     /// Admitted requests continue. Cancellation and deadline expiry become
     /// the matching pre-admission problems.
     pub fn ensure_admitted(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Self> {
@@ -452,6 +488,7 @@ impl ApplicationProblem {
             RequestAdmission::Admitted => Ok(()),
             RequestAdmission::Cancelled => Err(Self::cancelled_before_admission()),
             RequestAdmission::TimedOut => Err(Self::timed_out_before_admission()),
+            RequestAdmission::GrantExpired => Err(Self::grant_expired_before_admission()),
         }
     }
 

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread;
 use std::time::Duration;
 
 use std::collections::BTreeSet;
@@ -42,7 +41,6 @@ use super::test_support::{
 use super::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionPort, DaemonGitIndexTransactionService,
     DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
-    SharedDaemonGitIndexTransactionStore,
 };
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
@@ -53,8 +51,8 @@ fn test_catalog_snapshot() -> Result<CatalogSnapshotV1, CatalogCompositionError>
     Ok(CatalogSnapshotBuilderV1::new().build()?)
 }
 
-#[test]
-fn same_repository_mutations_never_enter_the_native_section_together() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_repository_mutations_never_enter_the_native_section_together() {
     let queue = Arc::new(RepositoryMutationQueue::default());
     let repository = RepositoryId::new("repository.fixture").expect("repository id");
     let active = Arc::new(AtomicUsize::new(0));
@@ -66,31 +64,35 @@ fn same_repository_mutations_never_enter_the_native_section_together() {
             let repository = repository.clone();
             let active = Arc::clone(&active);
             let peak = Arc::clone(&peak);
-            thread::spawn(move || {
+            tokio::spawn(async move {
                 queue
-                    .with_repository(&repository, || {
+                    .with_repository(&repository, || async {
                         let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                         peak.fetch_max(current, Ordering::SeqCst);
-                        thread::sleep(Duration::from_millis(5));
+                        tokio::time::sleep(Duration::from_millis(5)).await;
                         active.fetch_sub(1, Ordering::SeqCst);
                     })
+                    .await
                     .expect("queue is available");
             })
         })
         .collect();
     for worker in workers {
-        worker.join().expect("worker joins");
+        worker.await.expect("worker joins");
     }
 
     assert_eq!(peak.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn repository_mutation_capacity_fails_closed_before_waiting() {
+#[tokio::test]
+async fn repository_mutation_capacity_fails_closed_before_waiting() {
     let queue = RepositoryMutationQueue::with_capacity_for_test(1);
     let repository = RepositoryId::new("repository.capacity").expect("repository id");
     let nested = queue
-        .with_repository(&repository, || queue.with_repository(&repository, || ()))
+        .with_repository(&repository, || {
+            queue.with_repository(&repository, || std::future::ready(()))
+        })
+        .await
         .expect("outer mutation admitted");
 
     assert!(matches!(
@@ -98,19 +100,23 @@ fn repository_mutation_capacity_fails_closed_before_waiting() {
         Err(RepositoryMutationQueueError::Saturated)
     ));
     assert!(
-        queue.with_repository(&repository, || ()).is_ok(),
+        queue
+            .with_repository(&repository, || std::future::ready(()))
+            .await
+            .is_ok(),
         "capacity is released when an operation exits"
     );
 }
 
-#[test]
-fn completed_repository_mutation_gates_are_reclaimed() {
+#[tokio::test]
+async fn completed_repository_mutation_gates_are_reclaimed() {
     let queue = RepositoryMutationQueue::default();
     for index in 0..256 {
         let repository =
             RepositoryId::new(format!("repository.reclaimed.{index}")).expect("repository id");
         queue
-            .with_repository(&repository, || ())
+            .with_repository(&repository, || std::future::ready(()))
+            .await
             .expect("repository mutation");
     }
 
@@ -123,32 +129,32 @@ fn completed_repository_mutation_gates_are_reclaimed() {
     );
 }
 
-#[test]
-fn queued_repository_mutation_observes_live_cancellation() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_repository_mutation_observes_live_cancellation() {
     let queue = Arc::new(RepositoryMutationQueue::default());
     let repository = RepositoryId::new("repository.cancellation").expect("repository id");
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let holder_queue = Arc::clone(&queue);
     let holder_repository = repository.clone();
-    let holder = thread::spawn(move || {
+    let holder = tokio::spawn(async move {
         holder_queue
-            .with_repository(&holder_repository, || {
+            .with_repository(&holder_repository, || async {
                 entered_tx.send(()).expect("signal queue holder");
-                release_rx.recv().expect("release queue holder");
+                release_rx.await.expect("release queue holder");
             })
+            .await
             .expect("holder queue");
     });
-    entered_rx.recv().expect("queue holder entered");
+    entered_rx.await.expect("queue holder entered");
 
     let cancellation = Arc::new(AtomicBool::new(false));
     let checks = Arc::new(AtomicUsize::new(0));
     let waiter_queue = Arc::clone(&queue);
     let waiter_cancellation = Arc::clone(&cancellation);
     let waiter_checks = Arc::clone(&checks);
-    let (waiter_result_tx, waiter_result_rx) = std::sync::mpsc::channel();
-    let waiter = thread::spawn(move || {
-        let result = waiter_queue
+    let waiter = tokio::spawn(async move {
+        waiter_queue
             .with_repository_cancellable(
                 &repository,
                 || {
@@ -157,10 +163,10 @@ fn queued_repository_mutation_observes_live_cancellation() {
                         .load(Ordering::SeqCst)
                         .then_some(fixture_time(25))
                 },
-                |observed| observed.is_some(),
+                |observed| std::future::ready(observed.is_some()),
             )
-            .expect("waiter queue");
-        waiter_result_tx.send(result).expect("waiter result");
+            .await
+            .expect("waiter queue")
     });
 
     let polling = std::time::Instant::now() + Duration::from_secs(5);
@@ -169,22 +175,22 @@ fn queued_repository_mutation_observes_live_cancellation() {
             std::time::Instant::now() < polling,
             "queued waiter never polled its cancellation"
         );
-        thread::yield_now();
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     // The waiter returns only from a check that observed the cancellation, so
     // its result is the signal to wait for; a check count read after the store
     // can already include that final check.
     cancellation.store(true, Ordering::SeqCst);
     assert!(
-        waiter_result_rx
-            .recv_timeout(Duration::from_secs(5))
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
             .expect("cancelled waiter exits before repository holder")
+            .expect("waiter joins")
     );
     assert!(checks.load(Ordering::SeqCst) > 2);
     release_tx.send(()).expect("release holder");
 
-    holder.join().expect("holder joins");
-    waiter.join().expect("waiter joins");
+    holder.await.expect("holder joins");
 }
 
 #[test]
@@ -259,55 +265,57 @@ fn daemon_policy_recheck_rejects_a_capability_revoked_after_preview() {
 struct StartupUnavailableStore(DaemonGitIndexTransactionStore);
 
 impl GitIndexTransactionStore for StartupUnavailableStore {
-    fn save_preview_input(
+    async fn save_preview_input(
         &self,
         input: GitIndexPreviewInputV1,
     ) -> GitIndexTransactionStoreResult<()> {
-        self.0.save_preview_input(input)
+        self.0.save_preview_input(input).await
     }
 
-    fn read_preview_input(
+    async fn read_preview_input(
         &self,
         preview_id: &GitIndexPreviewId,
         observed_at: UtcMicros,
     ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1> {
-        self.0.read_preview_input(preview_id, observed_at)
+        self.0.read_preview_input(preview_id, observed_at).await
     }
 
-    fn purge_expired_preview_inputs(
+    async fn purge_expired_preview_inputs(
         &self,
         observed_at: UtcMicros,
         limit: usize,
     ) -> GitIndexTransactionStoreResult<usize> {
-        self.0.purge_expired_preview_inputs(observed_at, limit)
+        self.0
+            .purge_expired_preview_inputs(observed_at, limit)
+            .await
     }
 
-    fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
-        self.0.save_preview(preview)
+    async fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
+        self.0.save_preview(preview).await
     }
 
-    fn read_preview(
+    async fn read_preview(
         &self,
         preview_id: &GitIndexPreviewId,
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
-        self.0.read_preview(preview_id)
+        self.0.read_preview(preview_id).await
     }
 
-    fn read_record(
+    async fn read_record(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
     ) -> GitIndexTransactionStoreResult<Option<tracedecay_store::GitIndexTransactionRecordV1>> {
-        self.0.read_record(idempotency_key)
+        self.0.read_record(idempotency_key).await
     }
 
-    fn begin_or_replay(
+    async fn begin_or_replay(
         &self,
         request: GitIndexTransactionBeginRequestV1,
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1> {
-        self.0.begin_or_replay(request)
+        self.0.begin_or_replay(request).await
     }
 
-    fn compare_and_swap_journal(
+    async fn compare_and_swap_journal(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
         expected_phase_epoch: u64,
@@ -315,37 +323,42 @@ impl GitIndexTransactionStore for StartupUnavailableStore {
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionJournalV1> {
         self.0
             .compare_and_swap_journal(idempotency_key, expected_phase_epoch, replacement)
+            .await
     }
 
-    fn write_terminal(
+    async fn write_terminal(
         &self,
         write: GitIndexTransactionTerminalWriteV1,
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1> {
-        self.0.write_terminal(write)
+        self.0.write_terminal(write).await
     }
 
-    fn recovery_candidates(
+    async fn recovery_candidates(
         &self,
         repository_id: &RepositoryId,
     ) -> GitIndexTransactionStoreResult<Vec<tracedecay_store::GitIndexTransactionRecordV1>> {
-        self.0.recovery_candidates(repository_id)
+        self.0.recovery_candidates(repository_id).await
     }
 
-    fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
-        Err(GitIndexTransactionStoreError::Unavailable(
+    fn recovery_repositories(
+        &self,
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<Vec<RepositoryId>>> + Send {
+        std::future::ready(Err(GitIndexTransactionStoreError::Unavailable(
             "recovery repository enumeration is unavailable in this fixture".to_string(),
-        ))
+        )))
     }
 
-    fn quarantine_repository(
+    async fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
         transaction_id: &GitIndexTransactionId,
     ) -> GitIndexTransactionStoreResult<()> {
-        self.0.quarantine_repository(repository_id, transaction_id)
+        self.0
+            .quarantine_repository(repository_id, transaction_id)
+            .await
     }
 
-    fn clear_repository_quarantine(
+    async fn clear_repository_quarantine(
         &self,
         repository_id: &RepositoryId,
         transaction_id: &GitIndexTransactionId,
@@ -353,19 +366,24 @@ impl GitIndexTransactionStore for StartupUnavailableStore {
     ) -> GitIndexTransactionStoreResult<()> {
         self.0
             .clear_repository_quarantine(repository_id, transaction_id, recovery_receipt)
+            .await
     }
 }
 
-fn test_port(
+async fn test_port(
     native_modes: impl IntoIterator<Item = NativeMode>,
     recovery_modes: impl IntoIterator<Item = RecoveryMode>,
 ) -> TestHarness {
-    let (database, store) = test_store();
+    let (database, store) = test_store().await;
     let preview = preview();
     store
         .save_preview_input(preview_input(&preview))
+        .await
         .expect("save preview input");
-    store.save_preview(preview.clone()).expect("save preview");
+    store
+        .save_preview(preview.clone())
+        .await
+        .expect("save preview");
     let request = apply_request(&preview, "idempotency.fixture");
     let native = FakeNative::new(native_modes, recovery_modes);
     let apply_calls = Arc::clone(&native.apply_calls);
@@ -395,7 +413,7 @@ fn test_port(
     }
 }
 
-fn seed_prepared_transaction(
+async fn seed_prepared_transaction(
     store: &DaemonGitIndexTransactionStore,
     preview: &GitIndexPreviewV1,
     request: &GitIndexApplyRequestV1,
@@ -414,17 +432,17 @@ fn seed_prepared_transaction(
         .expect("prepared journal"),
     };
     assert!(matches!(
-        store.begin_or_replay(begin),
+        store.begin_or_replay(begin).await,
         Ok(GitIndexTransactionBeginResultV1::Started(_))
     ));
 }
 
-fn seed_terminal_abort(
+async fn seed_terminal_abort(
     store: &DaemonGitIndexTransactionStore,
     preview: &GitIndexPreviewV1,
     request: &GitIndexApplyRequestV1,
 ) {
-    seed_prepared_transaction(store, preview, request);
+    seed_prepared_transaction(store, preview, request).await;
     let transaction_id = transaction_id_for(request, preview);
     let mut journal = GitIndexTransactionJournalV1::prepared(
         transaction_id.clone(),
@@ -449,16 +467,18 @@ fn seed_terminal_abort(
                 GitIndexReceiptOutcomeV1::AbortedNoChange,
             ),
         })
+        .await
         .expect("terminal receipt");
 }
 
-#[test]
-fn safe_native_failure_receives_terminal_abort_and_replays_without_native_work() {
-    let harness = test_port([NativeMode::ProvenNoMutation], []);
+#[tokio::test]
+async fn safe_native_failure_receives_terminal_abort_and_replays_without_native_work() {
+    let harness = test_port([NativeMode::ProvenNoMutation], []).await;
 
     let first = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("safe failure is receipted");
     assert_eq!(
         first.receipt.outcome,
@@ -468,6 +488,7 @@ fn safe_native_failure_receives_terminal_abort_and_replays_without_native_work()
     let replay = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("terminal replay");
     assert_eq!(replay.receipt, first.receipt);
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
@@ -475,21 +496,24 @@ fn safe_native_failure_receives_terminal_abort_and_replays_without_native_work()
     assert_eq!(harness.policy_calls.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn terminal_replay_bypasses_revalidated_policy_but_conflicting_effect_input_rejects() {
+#[tokio::test]
+async fn terminal_replay_bypasses_revalidated_policy_but_conflicting_effect_input_rejects() {
     let harness = test_port(
         [NativeMode::Completed(GitIndexReceiptOutcomeV1::Committed)],
         [],
-    );
+    )
+    .await;
 
     let first = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("complete transaction");
     harness.allow.store(false, Ordering::SeqCst);
     let replay = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("replay ignores later policy denial");
     assert_eq!(replay.receipt, first.receipt);
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
@@ -500,24 +524,25 @@ fn terminal_replay_bypasses_revalidated_policy_but_conflicting_effect_input_reje
     let replay = harness
         .port
         .apply(&revalidated)
+        .await
         .expect("authorization evidence does not change semantic effect identity");
     assert_eq!(replay.receipt, first.receipt);
 
     let mut conflicting = harness.request.clone();
     conflicting.preview_digest = digest('f');
     assert_eq!(
-        harness.port.apply(&conflicting),
+        harness.port.apply(&conflicting).await,
         Err(GitIndexTransactionPortError::IdempotencyConflict)
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn rejected_admitted_apply_never_reaches_native_git() {
-    let harness = test_port([], []);
+#[tokio::test]
+async fn rejected_admitted_apply_never_reaches_native_git() {
+    let harness = test_port([], []).await;
     harness.allow.store(false, Ordering::SeqCst);
 
-    let result = harness.port.apply(&harness.request);
+    let result = harness.port.apply(&harness.request).await;
 
     assert!(
         result.is_ok(),
@@ -526,9 +551,9 @@ fn rejected_admitted_apply_never_reaches_native_git() {
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn deadline_elapsed_during_policy_recheck_never_reaches_native_git() {
-    let harness = test_port([], []);
+#[tokio::test]
+async fn deadline_elapsed_during_policy_recheck_never_reaches_native_git() {
+    let harness = test_port([], []).await;
     *harness
         .policy_evaluated_at
         .lock()
@@ -537,6 +562,7 @@ fn deadline_elapsed_during_policy_recheck_never_reaches_native_git() {
     let result = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("elapsed deadline is a durable no-change result");
 
     assert_eq!(
@@ -546,9 +572,9 @@ fn deadline_elapsed_during_policy_recheck_never_reaches_native_git() {
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn cancellation_at_the_last_pre_native_boundary_returns_a_cancelled_receipt() {
-    let harness = test_port([], []);
+#[tokio::test]
+async fn cancellation_at_the_last_pre_native_boundary_returns_a_cancelled_receipt() {
+    let harness = test_port([], []).await;
     let cancellation_checks = AtomicUsize::new(0);
 
     let result = harness
@@ -557,6 +583,7 @@ fn cancellation_at_the_last_pre_native_boundary_returns_a_cancelled_receipt() {
             (cancellation_checks.fetch_add(1, Ordering::SeqCst) + 1 >= 5)
                 .then_some(fixture_time(25))
         })
+        .await
         .expect("pre-native cancellation is a durable no-change result");
 
     assert_eq!(
@@ -580,9 +607,9 @@ fn cancellation_at_the_last_pre_native_boundary_returns_a_cancelled_receipt() {
         .expect("cancelled apply result contract");
 }
 
-#[test]
-fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
-    let harness = test_port([NativeMode::ProvenNoMutation], []);
+#[tokio::test]
+async fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
+    let harness = test_port([NativeMode::ProvenNoMutation], []).await;
 
     let result = harness
         .port
@@ -592,6 +619,7 @@ fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
                 .load(Ordering::SeqCst)
                 .then_some(fixture_time(25))
         })
+        .await
         .expect("native outcome remains authoritative");
 
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
@@ -603,12 +631,12 @@ fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
     assert!(result.execution.cancellation.is_none());
 }
 
-#[test]
-fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
-    let (_database, store) = test_store();
+#[tokio::test]
+async fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
+    let (_database, store) = test_store().await;
     let preview = preview_with_expiry(fixture_time(14));
     let request = apply_request(&preview, "idempotency.expired-replay");
-    seed_terminal_abort(&store, &preview, &request);
+    seed_terminal_abort(&store, &preview, &request).await;
     let native = FakeNative::new([], []);
     let apply_calls = Arc::clone(&native.apply_calls);
     let policy = TestPolicy::allowing();
@@ -622,7 +650,7 @@ fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
         Arc::new(RepositoryMutationQueue::default()),
     );
 
-    let replay = port.apply(&request).expect("expired terminal replay");
+    let replay = port.apply(&request).await.expect("expired terminal replay");
     assert_eq!(
         replay.receipt.outcome,
         GitIndexReceiptOutcomeV1::AbortedNoChange
@@ -631,15 +659,17 @@ fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
     assert_eq!(policy_calls.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn unstarted_apply_reports_expired_private_input_without_entering_native_git() {
-    let (_database, store) = test_store();
+#[tokio::test]
+async fn unstarted_apply_reports_expired_private_input_without_entering_native_git() {
+    let (_database, store) = test_store().await;
     let preview = preview_with_expiry(fixture_time(14));
     store
         .save_preview_input(preview_input(&preview))
+        .await
         .expect("save preview input");
     store
         .save_preview(preview.clone())
+        .await
         .expect("save public preview");
     let mut request = apply_request(&preview, "idempotency.expired-unstarted");
     request.observed_at = fixture_time(14);
@@ -654,22 +684,24 @@ fn unstarted_apply_reports_expired_private_input_without_entering_native_git() {
     );
 
     assert_eq!(
-        port.apply(&request),
+        port.apply(&request).await,
         Err(GitIndexTransactionPortError::ExpiredPreview)
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn ambiguous_boundary_reconciles_once_without_replaying_native_apply() {
+#[tokio::test]
+async fn ambiguous_boundary_reconciles_once_without_replaying_native_apply() {
     let harness = test_port(
         [NativeMode::CommitBoundaryUnknown],
         [RecoveryMode::AbortedNoChange],
-    );
+    )
+    .await;
 
     let result = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("reconciliation result");
     assert_eq!(
         result.receipt.outcome,
@@ -679,16 +711,18 @@ fn ambiguous_boundary_reconciles_once_without_replaying_native_apply() {
     assert_eq!(harness.recovery_calls.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn needs_inspection_quarantines_new_keys_but_allows_terminal_replay() {
+#[tokio::test]
+async fn needs_inspection_quarantines_new_keys_but_allows_terminal_replay() {
     let harness = test_port(
         [NativeMode::CommitBoundaryUnknown],
         [RecoveryMode::NeedsInspection],
-    );
+    )
+    .await;
 
     let first = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("inspection receipt");
     assert_eq!(
         first.receipt.outcome,
@@ -697,24 +731,26 @@ fn needs_inspection_quarantines_new_keys_but_allows_terminal_replay() {
     let replay = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("terminal replay remains available");
     assert_eq!(replay.receipt, first.receipt);
     let new_key = apply_request(&harness.preview, "idempotency.new-key");
     assert_eq!(
-        harness.port.apply(&new_key),
+        harness.port.apply(&new_key).await,
         Err(GitIndexTransactionPortError::RecoveryRequired)
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.recovery_calls.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn indeterminate_recovery_keeps_durable_quarantine_without_native_replay() {
-    let harness = test_port([NativeMode::CommitBoundaryUnknown], [RecoveryMode::Error]);
+#[tokio::test]
+async fn indeterminate_recovery_keeps_durable_quarantine_without_native_replay() {
+    let harness = test_port([NativeMode::CommitBoundaryUnknown], [RecoveryMode::Error]).await;
 
     let first = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("unobservable recovery terminalizes inspection");
     assert_eq!(
         first.receipt.outcome,
@@ -724,23 +760,24 @@ fn indeterminate_recovery_keeps_durable_quarantine_without_native_replay() {
     let replay = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("inspection receipt replays");
     assert_eq!(replay.receipt, first.receipt);
     let new_key = apply_request(&harness.preview, "idempotency.indeterminate-new-key");
     assert_eq!(
-        harness.port.apply(&new_key),
+        harness.port.apply(&new_key).await,
         Err(GitIndexTransactionPortError::RecoveryRequired)
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.recovery_calls.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
-    let (_database, store) = test_store();
+#[tokio::test]
+async fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
+    let (_database, store) = test_store().await;
     let preview = preview();
     let request = apply_request(&preview, "idempotency.fixture");
-    seed_prepared_transaction(&store, &preview, &request);
+    seed_prepared_transaction(&store, &preview, &request).await;
     let native = FakeNative::new([], [RecoveryMode::AbortedNoChange]);
     let apply_calls = Arc::clone(&native.apply_calls);
     let recovery_calls = Arc::clone(&native.recovery_calls);
@@ -754,12 +791,13 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
     );
 
     assert_eq!(
-        port.apply(&request),
+        port.apply(&request).await,
         Err(GitIndexTransactionPortError::RecoveryRequired)
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
     let recovered = port
         .recover_startup(fixture_time(20))
+        .await
         .expect("startup recovery");
     assert_eq!(recovered.len(), 1);
     assert_eq!(
@@ -768,6 +806,7 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
     );
     assert_eq!(
         port.recover_startup(fixture_time(21))
+            .await
             .expect("idempotent startup recovery")
             .len(),
         0
@@ -775,12 +814,12 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
     assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn startup_service_recovers_before_exposing_the_mutation_port() {
-    let (_database, store) = test_store();
+#[tokio::test]
+async fn startup_service_recovers_before_exposing_the_mutation_port() {
+    let (_database, store) = test_store().await;
     let preview = preview();
     let request = apply_request(&preview, "idempotency.startup-service");
-    seed_prepared_transaction(&store, &preview, &request);
+    seed_prepared_transaction(&store, &preview, &request).await;
     let native = FakeNative::new([], [RecoveryMode::AbortedNoChange]);
     let apply_calls = Arc::clone(&native.apply_calls);
     let recovery_calls = Arc::clone(&native.recovery_calls);
@@ -793,11 +832,13 @@ fn startup_service_recovers_before_exposing_the_mutation_port() {
         Arc::new(RepositoryMutationQueue::default()),
         fixture_time(20),
     )
+    .await
     .expect("startup recovery completes before service publication");
     assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
 
     let replay = service
         .apply(&request)
+        .await
         .expect("recovered terminal receipt is immediately replayable");
     assert_eq!(
         replay.receipt.outcome,
@@ -806,9 +847,9 @@ fn startup_service_recovers_before_exposing_the_mutation_port() {
     assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn startup_recovery_failure_returns_no_mutation_service() {
-    let (_database, store) = test_store();
+#[tokio::test]
+async fn startup_recovery_failure_returns_no_mutation_service() {
+    let (_database, store) = test_store().await;
     let store = StartupUnavailableStore(store);
     let native = FakeNative::new([], []);
     let apply_calls = Arc::clone(&native.apply_calls);
@@ -820,7 +861,8 @@ fn startup_recovery_failure_returns_no_mutation_service() {
         TestPolicy::allowing(),
         Arc::new(RepositoryMutationQueue::default()),
         fixture_time(20),
-    );
+    )
+    .await;
 
     assert!(matches!(
         result,
@@ -829,28 +871,31 @@ fn startup_recovery_failure_returns_no_mutation_service() {
     assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
 }
 
-#[test]
-fn quarantine_clears_only_after_a_proven_recovery_receipt() {
+#[tokio::test]
+async fn quarantine_clears_only_after_a_proven_recovery_receipt() {
     let harness = test_port(
         [NativeMode::CommitBoundaryUnknown],
         [RecoveryMode::NeedsInspection, RecoveryMode::AbortedNoChange],
-    );
+    )
+    .await;
     let receipt = harness
         .port
         .apply(&harness.request)
+        .await
         .expect("inspection receipt")
         .receipt;
     assert_eq!(receipt.outcome, GitIndexReceiptOutcomeV1::NeedsInspection);
 
     let new_key = apply_request(&harness.preview, "idempotency.blocked");
     assert_eq!(
-        harness.port.apply(&new_key),
+        harness.port.apply(&new_key).await,
         Err(GitIndexTransactionPortError::RecoveryRequired)
     );
 
     let cleared = harness
         .port
         .recover_startup(fixture_time(20))
+        .await
         .expect("proven clear");
     assert_eq!(cleared.len(), 1);
     assert_eq!(
@@ -860,6 +905,7 @@ fn quarantine_clears_only_after_a_proven_recovery_receipt() {
     let admitted = harness
         .port
         .apply(&new_key)
+        .await
         .expect("new key after proven clear");
     assert_eq!(
         admitted.receipt.outcome,
@@ -903,7 +949,7 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
 }
 
 #[tokio::test]
-async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_actor() {
+async fn daemon_owner_shutdown_fences_admission_clears_services_and_closes_store() {
     let directory = tempfile::tempdir().expect("project directory");
     let database = RegisteredGlobalDbHarness::open("git-index-owner-shutdown").await;
     let registry = DaemonGitIndexTransactionServiceRegistry::new(test_catalog_snapshot);
@@ -950,7 +996,8 @@ async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_
     assert_eq!(
         owner
             .service
-            .read_preview(&GitIndexPreviewId::new("preview.after-shutdown").unwrap()),
+            .read_preview(&GitIndexPreviewId::new("preview.after-shutdown").unwrap())
+            .await,
         Err(GitIndexTransactionPortError::DaemonUnavailable)
     );
 }
@@ -977,7 +1024,7 @@ async fn daemon_owner_racing_a_cold_mount_is_absent_until_published_with_authori
         privacy_digest: digest('4'),
         evaluated_at: fixture_time(20),
     };
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let mount = tokio::spawn({
         let registry = Arc::clone(&registry);
@@ -996,12 +1043,10 @@ async fn daemon_owner_racing_a_cold_mount_is_absent_until_published_with_authori
                     project_id,
                     source,
                     fixture_time(20),
-                    move || {
+                    async move {
                         entered_tx.send(()).expect("mount reached the store open");
-                        release_rx.recv().expect("test releases the store open");
-                        DaemonGitIndexTransactionStore::open(store_database).map(|store| {
-                            SharedDaemonGitIndexTransactionStore::from_arc(Arc::new(store))
-                        })
+                        release_rx.await.expect("test releases the store open");
+                        DaemonGitIndexTransactionStore::open(store_database).await
                     },
                 )
                 .await

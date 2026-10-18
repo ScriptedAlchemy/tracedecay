@@ -227,65 +227,70 @@ impl GitIndexTransactionTerminalWriteV1 {
 }
 
 /// Append-only preview/receipt store with a mutable, compare-and-swap journal.
-pub trait GitIndexTransactionStore {
+pub trait GitIndexTransactionStore: Sync {
     fn save_preview_input(
         &self,
         input: GitIndexPreviewInputV1,
-    ) -> GitIndexTransactionStoreResult<()>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<()>> + Send;
 
     fn read_preview_input(
         &self,
         preview_id: &GitIndexPreviewId,
         observed_at: UtcMicros,
-    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1>> + Send;
 
     fn purge_expired_preview_inputs(
         &self,
         observed_at: UtcMicros,
         limit: usize,
-    ) -> GitIndexTransactionStoreResult<usize>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<usize>> + Send;
 
-    fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()>;
+    fn save_preview(
+        &self,
+        preview: GitIndexPreviewV1,
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<()>> + Send;
 
     fn read_preview(
         &self,
         preview_id: &tracedecay_domain::GitIndexPreviewId,
-    ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>>> + Send;
 
     fn read_record(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
-    ) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>>> + Send;
 
     fn begin_or_replay(
         &self,
         request: GitIndexTransactionBeginRequestV1,
-    ) -> GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1>> + Send;
 
     fn compare_and_swap_journal(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
         expected_phase_epoch: u64,
         replacement: GitIndexTransactionJournalV1,
-    ) -> GitIndexTransactionStoreResult<GitIndexTransactionJournalV1>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<GitIndexTransactionJournalV1>> + Send;
 
     fn write_terminal(
         &self,
         write: GitIndexTransactionTerminalWriteV1,
-    ) -> GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1>> + Send;
 
     fn recovery_candidates(
         &self,
         repository_id: &RepositoryId,
-    ) -> GitIndexTransactionStoreResult<Vec<GitIndexTransactionRecordV1>>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<Vec<GitIndexTransactionRecordV1>>> + Send;
 
-    fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>>;
+    fn recovery_repositories(
+        &self,
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<Vec<RepositoryId>>> + Send;
 
     fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
         transaction_id: &tracedecay_domain::GitIndexTransactionId,
-    ) -> GitIndexTransactionStoreResult<()>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<()>> + Send;
 
     /// Clear one active repository quarantine only with a fresh, native
     /// recovery proof. Implementations retain the proof durably so a later
@@ -295,5 +300,5 @@ pub trait GitIndexTransactionStore {
         repository_id: &RepositoryId,
         transaction_id: &tracedecay_domain::GitIndexTransactionId,
         recovery_receipt: GitIndexTransactionReceiptV1,
-    ) -> GitIndexTransactionStoreResult<()>;
+    ) -> impl Future<Output = GitIndexTransactionStoreResult<()>> + Send;
 }

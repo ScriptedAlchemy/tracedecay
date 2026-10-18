@@ -154,6 +154,7 @@ async fn admitted_automation_route_carries_the_backend_sized_deadline() {
 }
 
 mod automatic_fact_receipts_routes;
+mod credential_isolation;
 
 /// The loopback authority every admitted-router fixture binds. Requests
 /// must carry it as their `Host` header for the admission layer to admit
@@ -182,7 +183,9 @@ fn admitted_request(uri: impl AsRef<str>) -> Request<Body> {
 
 /// Other local accounts reach the same loopback port, so the Host and
 /// Origin checks alone must not admit a request: only the listener's
-/// token does, as a Basic password, a session cookie, or a launch URL.
+/// token does, as a Basic password or a launch URL. The page shell is the one
+/// public surface: it carries no secret and a browser cannot attach headers to
+/// a navigation or `<script>` fetch.
 #[tokio::test]
 async fn loopback_requests_need_the_listener_access_token() {
     async fn probe() -> StatusCode {
@@ -244,7 +247,12 @@ async fn loopback_requests_need_the_listener_access_token() {
             .unwrap(),
     )
     .await;
-    assert_eq!(wrong_launch.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        wrong_launch.status(),
+        StatusCode::NO_CONTENT,
+        "a forged launch URL is just the public shell, never a redirect that carries a token"
+    );
+    assert!(!wrong_launch.headers().contains_key(header::LOCATION));
     let posted_launch = send(
         request(Method::POST, launch_path)
             .body(Body::empty())
@@ -252,6 +260,21 @@ async fn loopback_requests_need_the_listener_access_token() {
     )
     .await;
     assert_eq!(posted_launch.status(), StatusCode::UNAUTHORIZED);
+    let api_launch = send(
+        request(
+            Method::GET,
+            &format!("/api/automation/scheduler/status?{}", &launch_path[2..]),
+        )
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        api_launch.status(),
+        StatusCode::UNAUTHORIZED,
+        "the launch token in an API query authenticates nothing"
+    );
+    let token = launch_path.strip_prefix("/?token=").expect("launch token");
     let launch = send(
         request(Method::GET, &format!("{launch_path}&view=brain"))
             .body(Body::empty())
@@ -259,29 +282,31 @@ async fn loopback_requests_need_the_listener_access_token() {
     )
     .await;
     assert_eq!(launch.status(), StatusCode::SEE_OTHER);
-    assert_eq!(launch.headers()[header::LOCATION], "/?view=brain");
-    let set_cookie = launch.headers()[header::SET_COOKIE]
-        .to_str()
-        .expect("cookie text");
-    let token = launch_path.strip_prefix("/?token=").expect("launch token");
     assert_eq!(
-        set_cookie,
-        format!("tracedecay_dashboard_{port}={token}; Path=/; HttpOnly; SameSite=Strict")
+        launch.headers()[header::LOCATION],
+        format!("/?view=brain#token={token}").as_str()
     );
+    assert!(
+        !launch.headers().contains_key(header::SET_COOKIE),
+        "a cookie would be replayed to every other loopback port"
+    );
+    assert_eq!(launch.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(launch.headers()[header::REFERRER_POLICY], "no-referrer");
 
-    let session = send(
-        request(Method::POST, "/api/automation/scheduler/pause")
-            .header(
-                header::COOKIE,
-                format!("theme=dark; tracedecay_dashboard_{port}={token}"),
-            )
+    let relaunch = send(
+        request(Method::GET, launch_path)
+            .header(header::AUTHORIZATION, access.basic_authorization())
             .body(Body::empty())
             .unwrap(),
     )
     .await;
-    assert_eq!(session.status(), StatusCode::NO_CONTENT);
-    let relaunch = send(
-        request(Method::GET, launch_path)
+    assert_eq!(relaunch.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        relaunch.headers()[header::LOCATION],
+        format!("/#token={token}").as_str()
+    );
+    let session_cookie = send(
+        request(Method::POST, "/api/automation/scheduler/pause")
             .header(
                 header::COOKIE,
                 format!("tracedecay_dashboard_{port}={token}"),
@@ -290,16 +315,7 @@ async fn loopback_requests_need_the_listener_access_token() {
             .unwrap(),
     )
     .await;
-    assert_eq!(relaunch.status(), StatusCode::SEE_OTHER);
-    assert_eq!(relaunch.headers()[header::LOCATION], "/");
-    let other_port_cookie = send(
-        request(Method::POST, "/api/automation/scheduler/pause")
-            .header(header::COOKIE, format!("tracedecay_dashboard_1={token}"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(other_port_cookie.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(session_cookie.status(), StatusCode::UNAUTHORIZED);
 }
 
 /// The router as production serves it.
@@ -388,15 +404,15 @@ impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
     }
 }
 
-struct DashboardStateFixture {
-    state: DashboardState,
+pub(super) struct DashboardStateFixture {
+    pub(super) state: DashboardState,
     layout: StoreLayout,
     _database_authority: tracedecay_runtime_core::db::DatabaseAuthority,
     _temporary: tempfile::TempDir,
 }
 
 impl DashboardStateFixture {
-    async fn open(project_id: &str) -> Self {
+    pub(super) async fn open(project_id: &str) -> Self {
         let temporary = tempfile::tempdir().expect("dashboard fixture");
         let project_root = temporary.path().join("project");
         let profile_root = temporary.path().join("profile");

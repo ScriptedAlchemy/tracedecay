@@ -1,7 +1,9 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_store::SnapshotLeaseIdV1;
 
+use super::controller::Drain;
+use super::types::{EXPIRED_RETRY_MIN, FENCE_LIMIT};
 use super::*;
 
 fn inventory(id: &str) -> CheckpointBlockers {
@@ -47,8 +49,52 @@ fn report(busy: bool, log_frames: u64, checkpointed_frames: u64) -> CheckpointRe
     }
 }
 
+/// One RESTART attempt through the drain policy the controller applies.
+fn decide(
+    report: CheckpointReport,
+    pressure: WalPressure,
+    wal_bytes: u64,
+    snapshot_blockers: CheckpointBlockers,
+    drain: Drain,
+    now: Instant,
+) -> (CheckpointDecision, Drain) {
+    super::controller::checkpoint_decision(
+        super::controller::CheckpointAttempt {
+            report,
+            mode: CheckpointMode::Restart,
+            pressure,
+            wal_bytes,
+            snapshot_blockers,
+            elapsed: Duration::ZERO,
+        },
+        drain,
+        CheckpointConfig::default().hard_wal_bytes,
+        now,
+    )
+}
+
+fn blocks_writes(decision: &CheckpointDecision) -> bool {
+    matches!(
+        decision,
+        CheckpointDecision::Pending {
+            hard_drain_required: true,
+            ..
+        }
+    )
+}
+
+fn fence_expired(decision: &CheckpointDecision) -> bool {
+    matches!(
+        decision,
+        CheckpointDecision::Pending {
+            fence_expired: true,
+            ..
+        }
+    )
+}
+
 #[test]
-fn below_soft_is_a_noop_and_soft_pressure_is_passive() {
+fn below_soft_is_a_noop_and_soft_pressure_restarts() {
     let config = CheckpointConfig::default();
     let mut fixture = CheckpointFixture::open(config);
     assert_eq!(
@@ -66,7 +112,7 @@ fn below_soft_is_a_noop_and_soft_pressure_is_passive() {
             .evaluate(config.soft_wal_bytes, CheckpointBlockers::default())
             .unwrap(),
         CheckpointDecision::Complete {
-            mode: CheckpointMode::Passive,
+            mode: CheckpointMode::Restart,
             pressure: WalPressure::Soft,
             ..
         }
@@ -106,17 +152,16 @@ fn a_configured_wal_budget_moves_the_controller_thresholds() {
             ..
         }
     ));
-    // A live PASSIVE checkpoint of this small WAL finishes completely, including
-    // while another writer holds BEGIN IMMEDIATE, so the partial report is applied
-    // through the decision function the controller uses after the driver returns.
-    let (decision, hard_drain_required) = super::controller::checkpoint_decision(
+    // A live RESTART checkpoint of this small WAL finishes completely, so the
+    // partial report is applied through the decision function the controller
+    // uses after the driver returns.
+    let (decision, drain) = decide(
         report(true, 100, 40),
-        CheckpointMode::Passive,
         WalPressure::Hard,
         budget.hard_limit_bytes,
         CheckpointBlockers::default(),
-        false,
-        Duration::ZERO,
+        Drain::Open,
+        Instant::now(),
     );
     assert!(matches!(
         decision,
@@ -126,22 +171,21 @@ fn a_configured_wal_budget_moves_the_controller_thresholds() {
             ..
         }
     ));
-    assert!(hard_drain_required);
+    assert!(matches!(drain, Drain::Fenced { .. }));
 }
 
 #[test]
 fn controller_reports_inventory_without_owning_snapshot_state() {
     let blockers = inventory("lease.soft");
-    let (decision, hard_drain_required) = super::controller::checkpoint_decision(
+    let (decision, drain) = decide(
         report(true, 100, 40),
-        CheckpointMode::Passive,
         WalPressure::Soft,
         CheckpointConfig::default().soft_wal_bytes,
         blockers.clone(),
-        false,
-        Duration::ZERO,
+        Drain::Open,
+        Instant::now(),
     );
-    assert!(!hard_drain_required);
+    assert_eq!(drain, Drain::Open);
     assert!(matches!(
         decision,
         CheckpointDecision::Pending {
@@ -153,7 +197,7 @@ fn controller_reports_inventory_without_owning_snapshot_state() {
 }
 
 #[test]
-fn scheduled_checkpoint_samples_frames_and_bytes_before_passive() {
+fn scheduled_checkpoint_samples_frames_and_bytes_before_restart() {
     let mut idle = CheckpointFixture::open(CheckpointConfig::default());
     assert!(matches!(
         idle.controller
@@ -178,7 +222,7 @@ fn scheduled_checkpoint_samples_frames_and_bytes_before_passive() {
         CheckpointResult::Decision {
             sample,
             decision: CheckpointDecision::Complete {
-                mode: CheckpointMode::Passive,
+                mode: CheckpointMode::Restart,
                 pressure: WalPressure::Soft,
                 wal_bytes,
                 ..
@@ -207,16 +251,16 @@ fn scheduled_checkpoint_surfaces_typed_cancellation_before_driver_work() {
 }
 
 #[test]
-fn incomplete_hard_checkpoint_requires_drain_until_passive_completes() {
+fn incomplete_hard_checkpoint_requires_drain_until_restart_completes() {
     let config = CheckpointConfig::default();
-    let (pending, hard_drain_required) = super::controller::checkpoint_decision(
+    let now = Instant::now();
+    let (pending, drain) = decide(
         report(false, 1_000, 500),
-        CheckpointMode::Passive,
         WalPressure::Hard,
         config.hard_wal_bytes,
         inventory("lease.hard"),
-        false,
-        Duration::ZERO,
+        Drain::Open,
+        now,
     );
     assert!(matches!(
         pending,
@@ -226,25 +270,129 @@ fn incomplete_hard_checkpoint_requires_drain_until_passive_completes() {
             ..
         }
     ));
-    assert!(hard_drain_required);
-    let (complete, hard_drain_required) = super::controller::checkpoint_decision(
+    assert_eq!(drain, Drain::Fenced { since: now });
+    let (complete, drain) = decide(
         report(false, 500, 500),
-        CheckpointMode::Passive,
         WalPressure::BelowSoft,
         config.soft_wal_bytes - 1,
         CheckpointBlockers::default(),
-        hard_drain_required,
-        Duration::ZERO,
+        drain,
+        now,
     );
     assert!(matches!(
         complete,
         CheckpointDecision::Complete {
-            mode: CheckpointMode::Passive,
+            mode: CheckpointMode::Restart,
             pressure: WalPressure::BelowSoft,
             ..
         }
     ));
-    assert!(!hard_drain_required);
+    assert_eq!(drain, Drain::Open);
+}
+
+/// #4097: a drain behind a reader that never lets go used to block writes and
+/// retry every 100 ms forever. The fence now expires after its limit, writes
+/// resume, retries back off to a minute, and only a WAL past twice the hard
+/// limit blocks writes again.
+#[test]
+fn a_hard_drain_fence_expires_backs_off_and_blocks_only_past_the_write_ceiling() {
+    let hard = CheckpointConfig::default().hard_wal_bytes;
+    let start = Instant::now();
+    let pinned = || report(true, 1_000, 500);
+    let (fenced, drain) = decide(
+        pinned(),
+        WalPressure::Hard,
+        hard,
+        CheckpointBlockers::default(),
+        Drain::Open,
+        start,
+    );
+    assert!(blocks_writes(&fenced));
+
+    let just_inside = start + FENCE_LIMIT - Duration::from_millis(1);
+    let (still_fenced, drain) = decide(
+        pinned(),
+        WalPressure::Hard,
+        hard,
+        CheckpointBlockers::default(),
+        drain,
+        just_inside,
+    );
+    assert!(blocks_writes(&still_fenced));
+    assert!(!fence_expired(&still_fenced));
+
+    let expiry = start + FENCE_LIMIT;
+    let (expired, mut drain) = decide(
+        pinned(),
+        WalPressure::Hard,
+        hard,
+        inventory("lease.wedged"),
+        drain,
+        expiry,
+    );
+    assert!(
+        !blocks_writes(&expired),
+        "writes resume once the fence expires"
+    );
+    assert!(fence_expired(&expired));
+    assert!(matches!(
+        &expired,
+        CheckpointDecision::Pending { snapshot_blockers, .. }
+            if *snapshot_blockers == inventory("lease.wedged")
+    ));
+    assert_eq!(
+        drain,
+        Drain::Expired {
+            retry_at: expiry + EXPIRED_RETRY_MIN,
+            backoff: EXPIRED_RETRY_MIN,
+            wal_bytes: hard,
+        }
+    );
+
+    let mut now = expiry;
+    let mut backoffs = Vec::new();
+    for _ in 0..8 {
+        now += Duration::from_secs(1);
+        let (_, next) = decide(
+            pinned(),
+            WalPressure::Hard,
+            hard,
+            CheckpointBlockers::default(),
+            drain,
+            now,
+        );
+        let Drain::Expired { backoff, .. } = next else {
+            panic!("an incomplete retry keeps the expired fence: {next:?}");
+        };
+        backoffs.push(backoff.as_secs());
+        drain = next;
+    }
+    assert_eq!(backoffs, [2, 4, 8, 16, 32, 60, 60, 60]);
+
+    let (ceiling, drain) = decide(
+        pinned(),
+        WalPressure::Hard,
+        hard * 2,
+        CheckpointBlockers::default(),
+        drain,
+        now,
+    );
+    assert!(
+        blocks_writes(&ceiling),
+        "past twice the hard limit writes block"
+    );
+    assert!(fence_expired(&ceiling));
+
+    let (complete, drain) = decide(
+        report(false, 1_000, 1_000),
+        WalPressure::Hard,
+        hard * 2,
+        CheckpointBlockers::default(),
+        drain,
+        now,
+    );
+    assert!(matches!(complete, CheckpointDecision::Complete { .. }));
+    assert_eq!(drain, Drain::Open);
 }
 
 #[test]
@@ -294,7 +442,7 @@ fn rusqlite_driver_samples_and_checkpoints_its_owned_writer_connection() {
 
     driver.disable_auto_checkpoint().unwrap();
     let sample = driver.sample_wal().unwrap();
-    let report = driver.checkpoint(CheckpointMode::Passive).unwrap();
+    let report = driver.checkpoint(CheckpointMode::Restart).unwrap();
 
     assert!(sample.frames >= 1);
     assert!(sample.bytes >= 1);
@@ -377,7 +525,7 @@ fn scheduled_checkpoint_defers_while_another_connection_checkpoints() {
             result,
             Ok(CheckpointResult::Decision {
                 decision: CheckpointDecision::Pending {
-                    mode: CheckpointMode::Passive,
+                    mode: CheckpointMode::Restart,
                     report: CheckpointReport { busy: true, .. },
                     ..
                 },

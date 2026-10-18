@@ -1,5 +1,6 @@
 load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_library")
 load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//sdks/typescript:vitest/package_json.bzl", vitest_bin = "bin")
 load("@npm//sdks/typescript:@rslib/core/package_json.bzl", rslib_bin = "bin")
 
 npm_link_all_packages(name = "node_modules")
@@ -28,4 +29,11 @@ js_binary(
     entry_point = "test/typed-terminal-live.mjs",
     data = [":dist", "package.json"],
     visibility = ["//visibility:public"],
+)
+
+vitest_bin.vitest_test(
+    name = "unit_test",
+    data = [":pkg", ":node_modules"] + glob(["test/**", "*.json", "*.ts"]),
+    args = ["run", "--exclude", "test/installed-package.test.ts"],
+    chdir = package_name(),
 )

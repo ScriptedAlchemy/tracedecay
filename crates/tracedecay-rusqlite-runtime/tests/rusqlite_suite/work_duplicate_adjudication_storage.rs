@@ -5,8 +5,9 @@ use std::num::NonZeroU16;
 
 use tracedecay_contracts::{
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkDuplicateAdjudicationPortV1,
-    WorkDuplicateAdjudicationStorageErrorV1, WorkDuplicateAdjudicationWriteV1,
-    WorkOwnerObservationKindV1, WorkOwnerObservationMarkOutcomeV1, WorkOwnerObservationReceiptV1,
+    WorkDuplicateAdjudicationRecordPortV1, WorkDuplicateAdjudicationStorageErrorV1,
+    WorkDuplicateAdjudicationWriteV1, WorkOwnerObservationKindV1,
+    WorkOwnerObservationMarkOutcomeV1, WorkOwnerObservationReceiptV1,
     WorkOwnerObservationStoragePortV1, work_duplicate_adjudication_input_digest,
 };
 use tracedecay_domain::{
@@ -104,6 +105,19 @@ fn write_observing(
     }
 }
 
+fn record(
+    store: &RegisteredWorkStore,
+    authority: &WorkAuthority,
+    write: &WorkDuplicateAdjudicationWriteV1,
+) -> Result<WorkDuplicateAdjudicationAppendOutcomeV1, WorkDuplicateAdjudicationStorageErrorV1> {
+    let (authority, write) = (authority.clone(), write.clone());
+    tracedecay_rusqlite_runtime::native_runtime::block_on(store.storage().transact(
+        move |storage| storage.compare_and_record_duplicate_adjudication(&authority, &write),
+    ))
+    .expect("native runtime")
+    .expect("the writer runs the job")
+}
+
 fn insert_attempts(connection: &rusqlite::Connection) {
     insert_attempts_for(connection, &authority());
 }
@@ -152,14 +166,8 @@ fn pending_scan_cursor_does_not_skip_the_same_command_in_another_authority() {
         None,
         DuplicateEffortKindV1::ExactDuplicate,
     ));
-    store
-        .storage()
-        .compare_and_record_duplicate_adjudication(&authority(), &write)
-        .unwrap();
-    store
-        .storage()
-        .compare_and_record_duplicate_adjudication(&second_authority, &write)
-        .unwrap();
+    record(&store, &authority(), &write).unwrap();
+    record(&store, &second_authority, &write).unwrap();
 
     let first = store
         .storage()
@@ -185,20 +193,14 @@ fn adjudication_is_revision_cas_and_exact_replay_on_the_registered_store() {
         None,
         DuplicateEffortKindV1::ExactDuplicate,
     ));
-    let appended = store
-        .storage()
-        .compare_and_record_duplicate_adjudication(&authority(), &first)
-        .unwrap();
+    let appended = record(&store, &authority(), &first).unwrap();
     let WorkDuplicateAdjudicationAppendOutcomeV1::Appended(receipt) = appended else {
         panic!("first adjudication must append")
     };
     assert_eq!(receipt.revision().get(), 1);
 
     assert!(matches!(
-        store
-            .storage()
-            .compare_and_record_duplicate_adjudication(&authority(), &first)
-            .unwrap(),
+        record(&store, &authority(), &first).unwrap(),
         WorkDuplicateAdjudicationAppendOutcomeV1::Replayed(_)
     ));
     assert_eq!(store.count("work_duplicate_adjudications_v1"), 1);
@@ -209,10 +211,7 @@ fn adjudication_is_revision_cas_and_exact_replay_on_the_registered_store() {
         DuplicateEffortKindV1::NotDuplicate,
     ));
     assert_eq!(
-        store
-            .storage()
-            .compare_and_record_duplicate_adjudication(&authority(), &stale)
-            .unwrap_err(),
+        record(&store, &authority(), &stale).unwrap_err(),
         WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict
     );
 
@@ -224,10 +223,7 @@ fn adjudication_is_revision_cas_and_exact_replay_on_the_registered_store() {
     changed_pair.second_attempt =
         attempt("task.duplicate.3", "run.duplicate.3", "attempt.duplicate.3");
     assert_eq!(
-        store
-            .storage()
-            .compare_and_record_duplicate_adjudication(&authority(), &write(changed_pair))
-            .unwrap_err(),
+        record(&store, &authority(), &write(changed_pair)).unwrap_err(),
         WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict,
         "an adjudication revision cannot change its exact attempt pair"
     );
@@ -237,10 +233,7 @@ fn adjudication_is_revision_cas_and_exact_replay_on_the_registered_store() {
         Some(WorkDuplicateAdjudicationRevisionV1::initial()),
         DuplicateEffortKindV1::NotDuplicate,
     ));
-    let corrected = store
-        .storage()
-        .compare_and_record_duplicate_adjudication(&authority(), &correction)
-        .unwrap();
+    let corrected = record(&store, &authority(), &correction).unwrap();
     let WorkDuplicateAdjudicationAppendOutcomeV1::Appended(receipt) = corrected else {
         panic!("correction must append")
     };
@@ -284,13 +277,12 @@ fn adjudication_refuses_evidence_the_owner_did_not_observe_but_replays_committed
         DuplicateEffortKindV1::ExactDuplicate,
     );
     assert_eq!(
-        store
-            .storage()
-            .compare_and_record_duplicate_adjudication(
-                &authority(),
-                &write_observing(fabricated, advanced.clone()),
-            )
-            .unwrap_err(),
+        record(
+            &store,
+            &authority(),
+            &write_observing(fabricated, advanced.clone()),
+        )
+        .unwrap_err(),
         WorkDuplicateAdjudicationStorageErrorV1::EvidenceStale
     );
     assert_eq!(store.count("work_duplicate_adjudications_v1"), 0);
@@ -300,19 +292,13 @@ fn adjudication_refuses_evidence_the_owner_did_not_observe_but_replays_committed
         None,
         DuplicateEffortKindV1::ExactDuplicate,
     );
-    let appended = store
-        .storage()
-        .compare_and_record_duplicate_adjudication(&authority(), &write(committed.clone()))
-        .unwrap();
+    let appended = record(&store, &authority(), &write(committed.clone())).unwrap();
     assert!(matches!(
         appended,
         WorkDuplicateAdjudicationAppendOutcomeV1::Appended(_)
     ));
     assert!(matches!(
-        store
-            .storage()
-            .compare_and_record_duplicate_adjudication(
-                &authority(),
+        record(&store, &authority(),
                 &write_observing(committed, advanced),
             )
             .unwrap(),
@@ -331,10 +317,7 @@ fn adjudication_refuses_attempts_outside_the_exact_work_authority() {
         DuplicateEffortKindV1::Unknown,
     ));
     assert_eq!(
-        store
-            .storage()
-            .compare_and_record_duplicate_adjudication(&authority(), &write)
-            .unwrap_err(),
+        record(&store, &authority(), &write).unwrap_err(),
         WorkDuplicateAdjudicationStorageErrorV1::NotFoundOrNotAuthorized
     );
     assert_eq!(store.count("work_duplicate_adjudications_v1"), 0);
@@ -346,17 +329,16 @@ fn adjudication_persists_a_pending_observation_marker_with_the_receipt() {
         "duplicate-adjudication-observation-marker",
         insert_attempts,
     );
-    store
-        .storage()
-        .compare_and_record_duplicate_adjudication(
-            &authority(),
-            &write(command(
-                "command.duplicate.observation-marker",
-                None,
-                DuplicateEffortKindV1::ExactDuplicate,
-            )),
-        )
-        .unwrap();
+    record(
+        &store,
+        &authority(),
+        &write(command(
+            "command.duplicate.observation-marker",
+            None,
+            DuplicateEffortKindV1::ExactDuplicate,
+        )),
+    )
+    .unwrap();
 
     let (state, digest): (String, String) = store.inspect(|connection| {
         connection
@@ -378,17 +360,16 @@ fn one_exact_attempt_pair_has_one_revisioned_adjudication_identity() {
         "duplicate-adjudication-pair-identity",
         insert_attempts,
     );
-    store
-        .storage()
-        .compare_and_record_duplicate_adjudication(
-            &authority(),
-            &write(command(
-                "command.duplicate.pair-identity.first",
-                None,
-                DuplicateEffortKindV1::ExactDuplicate,
-            )),
-        )
-        .unwrap();
+    record(
+        &store,
+        &authority(),
+        &write(command(
+            "command.duplicate.pair-identity.first",
+            None,
+            DuplicateEffortKindV1::ExactDuplicate,
+        )),
+    )
+    .unwrap();
 
     let duplicate_identity = command(
         "command.duplicate.pair-identity.second",
@@ -396,10 +377,7 @@ fn one_exact_attempt_pair_has_one_revisioned_adjudication_identity() {
         DuplicateEffortKindV1::ExactDuplicate,
     );
     assert_eq!(
-        store
-            .storage()
-            .compare_and_record_duplicate_adjudication(&authority(), &write(duplicate_identity),)
-            .unwrap_err(),
+        record(&store, &authority(), &write(duplicate_identity),).unwrap_err(),
         WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict,
         "a second command cannot create a second relation for one exact attempt pair"
     );
@@ -412,17 +390,16 @@ fn pending_duplicate_receipt_is_recoverable_and_exactly_marked_durable() {
         "duplicate-adjudication-observation-recovery",
         insert_attempts,
     );
-    let appended = store
-        .storage()
-        .compare_and_record_duplicate_adjudication(
-            &authority(),
-            &write(command(
-                "command.duplicate.observation-recovery",
-                None,
-                DuplicateEffortKindV1::ExactDuplicate,
-            )),
-        )
-        .unwrap();
+    let appended = record(
+        &store,
+        &authority(),
+        &write(command(
+            "command.duplicate.observation-recovery",
+            None,
+            DuplicateEffortKindV1::ExactDuplicate,
+        )),
+    )
+    .unwrap();
     let store = store.restart("duplicate-adjudication-observation-recovery-restarted");
 
     let pending = store

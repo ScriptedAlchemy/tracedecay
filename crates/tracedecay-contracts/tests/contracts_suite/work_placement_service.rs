@@ -20,8 +20,8 @@ use tracedecay_contracts::{
     AdmitWorkPlacementCommand, ApplicationProblem, ApplicationProblemKind, CancellationContext,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, ReleaseWorkPlacementCommand,
     RequestContext, RequestId, ResolvedScope, WorkPlacementPreflightRequestV1,
-    WorkPlacementReadingV1, WorkPlacementService, WorkPlacementStatusRequestV1,
-    WorkPlacementStorageError, WorkPlacementStoragePort,
+    WorkPlacementPublicationPort, WorkPlacementReadingV1, WorkPlacementService,
+    WorkPlacementStatusRequestV1, WorkPlacementStorageError, WorkPlacementStoragePort,
 };
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority,
@@ -129,24 +129,25 @@ impl WorkPlacementStoragePort for TestStore {
             .cloned())
     }
 
-    fn target_holder(
+    fn target_held_by_other(
         &self,
         authority: &WorkAuthority,
+        identity: &WorkPlacementIdentityV1,
         root: &str,
-    ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError> {
-        Ok(self
-            .placements
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|((stored_authority, _), placement)| {
-                stored_authority == authority
+    ) -> Result<bool, WorkPlacementStorageError> {
+        Ok(self.placements.lock().unwrap().iter().any(
+            |((stored_authority, stored_identity), placement)| {
+                stored_authority.project_id() == authority.project_id()
+                    && stored_authority.repository_id() == authority.repository_id()
+                    && (stored_authority != authority || stored_identity != identity)
                     && placement.holds_target()
                     && placement.target().root() == Some(root)
-            })
-            .map(|((_, identity), _)| identity.clone()))
+            },
+        ))
     }
+}
 
+impl WorkPlacementPublicationPort for TestStore {
     fn publish_placement(
         &self,
         authority: &WorkAuthority,
@@ -275,6 +276,37 @@ fn a_second_run_cannot_take_a_root_an_admitted_placement_already_holds() {
         )
         .expect("holder preflight");
     assert!(preflight.is_admissible());
+}
+
+#[test]
+fn another_actor_cannot_take_a_root_even_with_the_holders_task_and_run_ids() {
+    let service = WorkPlacementService::new(TestStore::default());
+    let holder = context("actor.placement.holder");
+    let peer = context("actor.placement.peer");
+    service
+        .admit_placement(
+            &holder,
+            admit_command("run.placement.a", 200),
+            observer(clean()),
+        )
+        .expect("first admission");
+
+    // Identical task and run ids under a different actor must not read as the
+    // holder's own placement.
+    let problem = service
+        .admit_placement(
+            &peer,
+            admit_command("run.placement.a", 300),
+            observer(clean()),
+        )
+        .expect_err("a held root is exclusive across actors");
+    assert_eq!(problem.kind(), ApplicationProblemKind::Conflict);
+    let message = format!("{problem:?}");
+    assert!(message.contains("active_holder"), "{message}");
+    assert!(
+        !message.contains("actor.placement.holder"),
+        "the refusal must not disclose the holder: {message}"
+    );
 }
 
 #[test]

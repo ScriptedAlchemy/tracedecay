@@ -78,6 +78,57 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     );
 }
 
+/// A store minted for a linked worktree outlives the worktree: the repository,
+/// and so the git common directory the registry recorded, stays live. The
+/// store has no enrolled checkout left, so the sweep plans it for collection.
+#[asupersync::test]
+async fn sweep_plans_a_deleted_worktrees_store_while_its_repository_lives() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let live_common_dir = tmp.path().join("repository/.git");
+    std::fs::create_dir_all(&live_common_dir).unwrap();
+    let deleted_worktree = tmp.path().join("linked-worktree");
+
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let base = 1_700_000_000i64;
+    seed_store(
+        &db,
+        &profile_root,
+        "proj_worktree",
+        "store_worktree",
+        &deleted_worktree,
+        base - 100 * DAY,
+    )
+    .await;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE code_projects SET git_common_dir = ?1 WHERE project_id = 'proj_worktree'",
+            tracedecay_runtime_core::db::engine::params![
+                live_common_dir.to_string_lossy().into_owned()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, base, false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report
+            .plan
+            .collect
+            .iter()
+            .map(|finding| finding.store_id.as_str())
+            .collect::<Vec<_>>(),
+        ["store_worktree"],
+        "a live shared git directory must not keep a deleted worktree's store"
+    );
+}
+
 /// The collection plan is only an inspection receipt.  Replacing its directory
 /// with byte-identical contents in the same timestamp second must still abort
 /// the apply rather than retire a newly-created store identity.
@@ -381,6 +432,75 @@ async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
     assert_eq!(findings[0].project_dir_name, "proj_ghost");
     assert_eq!(findings[0].data_root, unregistered_dir);
     assert!(findings[0].size_bytes >= 4096);
+}
+
+/// The daemon's maintenance tick runs the cold-store page; an unregistered
+/// project directory past the window must be collected there, not only when
+/// someone asks Doctor.
+#[asupersync::test]
+async fn the_maintenance_cold_store_page_collects_an_unregistered_project_dir() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    // A store with a manifest and an inspectable, memory-free SQLite file, but
+    // no registry row: nothing the registered census would ever visit.
+    let unregistered_dir = profile_root.join("projects").join("proj_ghost");
+    std::fs::create_dir_all(&unregistered_dir).unwrap();
+    let graph_db = unregistered_dir.join("tracedecay.db");
+    rusqlite::Connection::open(&graph_db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE padding(value BLOB); INSERT INTO padding VALUES (zeroblob(4096));",
+        )
+        .unwrap();
+    tracedecay_runtime_core::storage::write_store_manifest_to_path(
+        &unregistered_dir.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+        &StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some("proj_ghost".to_owned()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root: tmp.path().join("deleted-checkout"),
+            data_root: unregistered_dir.clone(),
+            graph_db_relpath: PathBuf::from("tracedecay.db"),
+            sessions_db_relpath: PathBuf::from("sessions.db"),
+            branch_meta_relpath: PathBuf::from("branch-meta.json"),
+            sessions_schema_digest: None,
+        },
+    )
+    .unwrap();
+    let memory_dir = profile_root.join("projects").join("proj_ghost_memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    rusqlite::Connection::open(memory_dir.join(tracedecay_runtime_core::config::DB_FILENAME))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+             INSERT INTO memory_facts (fact_id, content) VALUES (1, 'durable fact');",
+        )
+        .unwrap();
+
+    let report = crate::retention::cold_store::run_cold_store_page(
+        &profile_root,
+        &db,
+        Some(0),
+        &BTreeSet::new(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !unregistered_dir.exists(),
+        "an unregistered project directory past the window must be collected"
+    );
+    assert!(report.reclaimed_bytes >= 4096, "{report:?}");
+    assert!(
+        memory_dir
+            .join(tracedecay_runtime_core::config::DB_FILENAME)
+            .is_file(),
+        "an unregistered directory holding durable memory must survive the tick"
+    );
 }
 
 #[asupersync::test]

@@ -171,6 +171,9 @@ impl Default for CodexDiscoveryHub {
 struct CodexDiscoveryHubState {
     discovery: CodexDiscoveryState,
     discovery_scanning: bool,
+    /// Shared scans started so far. A queued pass carries the count of the
+    /// scan that produced it.
+    shared_scans: u64,
     /// A consumer was told to wait for a scan in progress; the next scan to
     /// finish releases it.
     scan_waited: bool,
@@ -191,7 +194,8 @@ struct CodexDiscoveryConsumerState {
 
 enum CodexDiscoveryConsumerMode {
     Shared {
-        queue: VecDeque<CodexQueuedDiscoveryPass>,
+        /// Each pass with the shared scan that produced it.
+        queue: VecDeque<(u64, CodexQueuedDiscoveryPass)>,
     },
     Replay {
         generation: u128,
@@ -338,7 +342,6 @@ fn indexed_replay_pass(
     } else {
         frontier.for_coverage(false)
     };
-    let pin = std::sync::Arc::new(pin_shared_jsonl_paths(&paths));
     Ok((
         CodexDiscoveryPass {
             report: FileDiscoveryReport {
@@ -350,7 +353,7 @@ fn indexed_replay_pass(
             },
             next_frontier,
             selected_sources: Vec::new(),
-            _shared_page_pin: Some(pin),
+            _shared_page_pin: None,
         },
         next_position,
     ))
@@ -502,6 +505,7 @@ impl CodexDiscoveryHub {
         bounds: TranscriptDiscoveryBounds,
         frontier: CodexDiscoveryFrontier,
     ) -> TranscriptIngestResult<CodexDiscoveryDelivery> {
+        let mut scans_before_poll = None;
         loop {
             let work = {
                 let mut inner = self.inner.lock().map_err(|_| {
@@ -509,6 +513,7 @@ impl CodexDiscoveryHub {
                         detail: "Codex discovery hub lock is poisoned",
                     }
                 })?;
+                let scans_before_poll = *scans_before_poll.get_or_insert(inner.shared_scans);
                 let source_key = source.discovery_key();
                 let replay = {
                     let consumer_state = inner.consumers.get_mut(consumer).ok_or(
@@ -597,11 +602,25 @@ impl CodexDiscoveryHub {
                                 frontier,
                                 effective_position.as_ref(),
                             )?;
+                            drop(inner);
+                            let pass = std::sync::Arc::new(pass.with_page_pin());
+                            let mut inner = self.inner.lock().map_err(|_| {
+                                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                    detail: "Codex discovery hub lock is poisoned",
+                                }
+                            })?;
                             let state = inner.consumers.get_mut(consumer).ok_or(
                                 TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                     detail: "Codex replay consumer registration disappeared",
                                 },
                             )?;
+                            // Another poll may have delivered while the pages
+                            // were pinned; an unacknowledged pass is redelivered.
+                            if let Some(awaiting) = &state.awaiting_ack {
+                                return Ok(CodexDiscoveryDelivery::Ready(std::sync::Arc::clone(
+                                    &awaiting.pass,
+                                )));
+                            }
                             let CodexDiscoveryConsumerMode::Replay {
                                 generation,
                                 position,
@@ -614,7 +633,6 @@ impl CodexDiscoveryHub {
                                 *generation = index_generation;
                                 *position = None;
                             }
-                            let pass = std::sync::Arc::new(pass);
                             state.awaiting_ack = Some(CodexQueuedDiscoveryPass {
                                 base: frontier,
                                 pass: std::sync::Arc::clone(&pass),
@@ -660,7 +678,17 @@ impl CodexDiscoveryHub {
                         CodexDiscoveryConsumerMode::Shared { queue } => queue.pop_front(),
                         CodexDiscoveryConsumerMode::Replay { .. } => None,
                     };
-                    if let Some(queued) = queued {
+                    if let Some((scan, queued)) = queued {
+                        // An empty pass from a scan that began before this
+                        // poll proves nothing about changes since, so the
+                        // consumer scans again instead of converging on it.
+                        if scan <= scans_before_poll
+                            && queued.pass.report.paths.is_empty()
+                            && queued.pass.selected_sources.is_empty()
+                            && queued.pass.next_frontier == queued.base
+                        {
+                            continue;
+                        }
                         if queued.base == frontier {
                             consumer_state.awaiting_ack = Some(queued.clone());
                             return Ok(CodexDiscoveryDelivery::Ready(queued.pass));
@@ -692,6 +720,7 @@ impl CodexDiscoveryHub {
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     inner.discovery_scanning = true;
+                    inner.shared_scans += 1;
                     CodexDiscoveryWork::Shared {
                         state: std::mem::take(&mut inner.discovery),
                         frontier: shared_frontier,
@@ -713,7 +742,11 @@ impl CodexDiscoveryHub {
             // on directory entries, so a large Codex profile cannot emit any
             // rollout until the dated tree has been re-walked in capacity-sized
             // slices.
-            let result = source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
+            let mut result =
+                source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
+            if replay_source.is_none() {
+                result = result.map(CodexDiscoveryPass::with_page_pin);
+            }
             let mut inner = self.inner.lock().map_err(|_| {
                 TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                     detail: "Codex discovery hub lock is poisoned",
@@ -727,12 +760,9 @@ impl CodexDiscoveryHub {
             let Some(source_key) = replay_source else {
                 inner.discovery_scanning = false;
                 inner.discovery = discovery;
-                let mut pass = result?;
+                let pass = result?;
                 inner.discovery.acknowledge();
                 inner.frontier = Some(pass.next_frontier);
-                pass._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
-                    &pass.report.paths,
-                )));
                 let pass = std::sync::Arc::new(pass);
                 let queued = CodexQueuedDiscoveryPass {
                     base,
@@ -740,6 +770,7 @@ impl CodexDiscoveryHub {
                     indexed_ack: None,
                 };
                 let shared_source_key = inner.source_key.clone();
+                let scan = inner.shared_scans;
                 for state in inner.consumers.values_mut() {
                     let CodexDiscoveryConsumerMode::Shared { queue } = &mut state.mode else {
                         continue;
@@ -755,7 +786,7 @@ impl CodexDiscoveryHub {
                         };
                         state.awaiting_ack = None;
                     } else {
-                        queue.push_back(queued.clone());
+                        queue.push_back((scan, queued.clone()));
                     }
                 }
                 drop(inner);
@@ -1958,6 +1989,17 @@ pub struct CodexDiscoveryPass {
     pub(crate) next_frontier: CodexDiscoveryFrontier,
     selected_sources: Vec<CodexFileIdentity>,
     _shared_page_pin: Option<std::sync::Arc<SharedJsonlPathPin>>,
+}
+
+impl CodexDiscoveryPass {
+    /// Pinning canonicalizes every path. The hub pins outside its lock
+    /// because native ingest workers read their source ledgers under it.
+    fn with_page_pin(mut self) -> Self {
+        self._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
+            &self.report.paths,
+        )));
+        self
+    }
 }
 
 fn retained_scan_step(

@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use futures_util::FutureExt;
+
 use tracedecay_contracts::{
     CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, NativeIntegrationApplyRequestV1, NativeIntegrationCancelDispositionV1,
@@ -48,7 +50,7 @@ struct StatusStore {
 }
 
 impl NativeIntegrationStore for StatusStore {
-    fn save_preview(
+    async fn save_preview(
         &self,
         _preview: tracedecay_domain::NativeIntegrationPreviewV1,
     ) -> NativeIntegrationStoreResult<()> {
@@ -57,14 +59,14 @@ impl NativeIntegrationStore for StatusStore {
         ))
     }
 
-    fn read_preview(
+    async fn read_preview(
         &self,
         _preview_id: &NativeIntegrationPreviewId,
     ) -> NativeIntegrationStoreResult<Option<tracedecay_domain::NativeIntegrationPreviewV1>> {
         Ok(None)
     }
 
-    fn begin_or_replay(
+    async fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1> {
@@ -80,28 +82,28 @@ impl NativeIntegrationStore for StatusStore {
         Ok(NativeIntegrationBeginResultV1::Started(Box::new(record)))
     }
 
-    fn read_status(
+    async fn read_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationTransactionStatusV1>> {
         Ok(self.statuses.lock().unwrap().get(transaction_id).cloned())
     }
 
-    fn read_record(
+    async fn read_record(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationRecordV1>> {
         Ok(self.records.lock().unwrap().get(transaction_id).cloned())
     }
 
-    fn read_receipt(
+    async fn read_receipt(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<Option<tracedecay_domain::NativeIntegrationReceiptV1>> {
         Ok(self.receipts.lock().unwrap().get(transaction_id).cloned())
     }
 
-    fn compare_and_swap_status(
+    async fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
@@ -125,7 +127,7 @@ impl NativeIntegrationStore for StatusStore {
         Ok(replacement)
     }
 
-    fn write_terminal(
+    async fn write_terminal(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
@@ -152,14 +154,14 @@ impl NativeIntegrationStore for StatusStore {
         Ok(receipt)
     }
 
-    fn pending_transactions(
+    async fn pending_transactions(
         &self,
         _repository_id: Option<&RepositoryId>,
     ) -> NativeIntegrationStoreResult<Vec<NativeIntegrationRecordV1>> {
         Ok(Vec::new())
     }
 
-    fn live_candidate_generation_bindings(
+    async fn live_candidate_generation_bindings(
         &self,
         _repository_id: &RepositoryId,
         _observed_at: UtcMicros,
@@ -167,14 +169,14 @@ impl NativeIntegrationStore for StatusStore {
         Ok(Vec::new())
     }
 
-    fn approval_consumed(
+    async fn approval_consumed(
         &self,
         _approval_id: &NativeIntegrationApprovalId,
     ) -> NativeIntegrationStoreResult<bool> {
         Ok(false)
     }
 
-    fn quarantine_repository(
+    async fn quarantine_repository(
         &self,
         _repository_id: &RepositoryId,
         transaction_id: &NativeIntegrationTransactionId,
@@ -186,7 +188,7 @@ impl NativeIntegrationStore for StatusStore {
         Ok(())
     }
 
-    fn begin_worktree_cleanup(
+    async fn begin_worktree_cleanup(
         &self,
         _transaction: tracedecay_domain::NativeWorktreeCleanupTransactionV1,
     ) -> NativeIntegrationStoreResult<tracedecay_store::NativeWorktreeCleanupBeginResultV1> {
@@ -195,7 +197,7 @@ impl NativeIntegrationStore for StatusStore {
         ))
     }
 
-    fn read_worktree_cleanup(
+    async fn read_worktree_cleanup(
         &self,
         _confirmation_digest: &ManifestDigest,
     ) -> NativeIntegrationStoreResult<Option<tracedecay_domain::NativeWorktreeCleanupTransactionV1>>
@@ -203,7 +205,7 @@ impl NativeIntegrationStore for StatusStore {
         Ok(None)
     }
 
-    fn compare_and_swap_worktree_cleanup(
+    async fn compare_and_swap_worktree_cleanup(
         &self,
         _confirmation_digest: &ManifestDigest,
         _expected_phase_revision: u64,
@@ -214,7 +216,7 @@ impl NativeIntegrationStore for StatusStore {
         ))
     }
 
-    fn write_worktree_cleanup_terminal(
+    async fn write_worktree_cleanup_terminal(
         &self,
         _confirmation_digest: &ManifestDigest,
         _expected_phase_revision: u64,
@@ -371,6 +373,8 @@ impl NativeIntegrationMechanics for DurableCancelDuringRevalidation {
             let status = self
                 .store
                 .read_status(&transaction_id)
+                .now_or_never()
+                .expect("fixture store is synchronous")
                 .unwrap()
                 .expect("durable status");
             let mut cancelled = status.clone();
@@ -378,6 +382,8 @@ impl NativeIntegrationMechanics for DurableCancelDuringRevalidation {
             cancelled.cancellation_requested = true;
             self.store
                 .compare_and_swap_status(&transaction_id, status.phase_revision, cancelled)
+                .now_or_never()
+                .expect("fixture store is synchronous")
                 .expect("concurrent durable cancellation");
             return Ok(NativeIntegrationAnalysisRevalidationV1::Stale);
         }
@@ -649,8 +655,8 @@ fn status(
     }
 }
 
-#[test]
-fn cancellation_is_durable_only_before_the_ref_commit_boundary() {
+#[tokio::test]
+async fn cancellation_is_durable_only_before_the_ref_commit_boundary() {
     let store = Arc::new(StatusStore::default());
     for status in [
         status(
@@ -689,6 +695,7 @@ fn cancellation_is_durable_only_before_the_ref_commit_boundary() {
                 transaction_id: prepared.clone(),
                 requested_at: UtcMicros(2),
             })
+            .await
             .unwrap(),
         NativeIntegrationCancelDispositionV1::CancellationRequested
     );
@@ -696,6 +703,7 @@ fn cancellation_is_durable_only_before_the_ref_commit_boundary() {
         .status(&NativeIntegrationStatusRequestV1 {
             transaction_id: prepared,
         })
+        .await
         .unwrap()
         .unwrap();
     assert!(durable.cancellation_requested);
@@ -708,6 +716,7 @@ fn cancellation_is_durable_only_before_the_ref_commit_boundary() {
                     .unwrap(),
                 requested_at: UtcMicros(2),
             })
+            .await
             .unwrap(),
         NativeIntegrationCancelDispositionV1::CommitPointPassed
     );
@@ -718,6 +727,7 @@ fn cancellation_is_durable_only_before_the_ref_commit_boundary() {
                     .unwrap(),
                 requested_at: UtcMicros(2),
             })
+            .await
             .unwrap(),
         NativeIntegrationCancelDispositionV1::AlreadyTerminal(
             NativeIntegrationTerminalOutcomeV1::Committed
@@ -729,13 +739,14 @@ fn cancellation_is_durable_only_before_the_ref_commit_boundary() {
                 transaction_id: NativeIntegrationTransactionId::new("transaction.unknown").unwrap(),
                 requested_at: UtcMicros(2),
             })
+            .await
             .unwrap(),
         NativeIntegrationCancelDispositionV1::UnknownTransaction
     );
 }
 
-#[test]
-fn cancellation_after_begin_records_live_diverged_state() {
+#[tokio::test]
+async fn cancellation_after_begin_records_live_diverged_state() {
     let store = Arc::new(StatusStore::default());
     let diverged = NativeIntegrationProbeV1::Diverged {
         tip: oid('a'),
@@ -759,6 +770,7 @@ fn cancellation_after_begin_records_live_diverged_state() {
 
     let receipt = coordinator
         .apply(&request, &cancellation)
+        .await
         .expect("cancelled transaction must terminate from live state");
 
     assert_eq!(
@@ -771,8 +783,8 @@ fn cancellation_after_begin_records_live_diverged_state() {
     assert_eq!(receipt.final_worktree_digest, digest('d'));
 }
 
-#[test]
-fn durable_cancellation_revision_is_settled_after_candidate_verification() {
+#[tokio::test]
+async fn durable_cancellation_revision_is_settled_after_candidate_verification() {
     let store = Arc::new(StatusStore::default());
     let coordinator = NativeIntegrationTransactionCoordinator::new(
         store.clone(),
@@ -795,6 +807,7 @@ fn durable_cancellation_revision_is_settled_after_candidate_verification() {
 
     let receipt = coordinator
         .apply(&request, &cancellation)
+        .await
         .expect("durably cancelled apply must settle");
 
     assert_eq!(
@@ -806,14 +819,15 @@ fn durable_cancellation_revision_is_settled_after_candidate_verification() {
     assert_eq!(
         store
             .read_receipt(&transaction_id)
+            .await
             .unwrap()
             .expect("terminal receipt"),
         receipt
     );
 }
 
-#[test]
-fn apply_error_after_commit_start_writes_inspection_receipt() {
+#[tokio::test]
+async fn apply_error_after_commit_start_writes_inspection_receipt() {
     let store = Arc::new(StatusStore::default());
     let coordinator = NativeIntegrationTransactionCoordinator::new(
         store.clone(),
@@ -837,6 +851,7 @@ fn apply_error_after_commit_start_writes_inspection_receipt() {
 
     let receipt = coordinator
         .apply(&request, &cancellation)
+        .await
         .expect("post-begin apply error must produce an inspection receipt");
 
     assert_eq!(
@@ -846,6 +861,7 @@ fn apply_error_after_commit_start_writes_inspection_receipt() {
     assert_eq!(
         store
             .read_receipt(&transaction_id)
+            .await
             .expect("receipt read")
             .as_ref(),
         Some(&receipt)
@@ -856,8 +872,8 @@ fn apply_error_after_commit_start_writes_inspection_receipt() {
     );
 }
 
-#[test]
-fn probe_error_after_begin_writes_inspection_receipt() {
+#[tokio::test]
+async fn probe_error_after_begin_writes_inspection_receipt() {
     let store = Arc::new(StatusStore::default());
     let coordinator = NativeIntegrationTransactionCoordinator::new(
         store.clone(),
@@ -876,6 +892,7 @@ fn probe_error_after_begin_writes_inspection_receipt() {
 
     let receipt = coordinator
         .apply(&request, &cancellation)
+        .await
         .expect("post-begin probe error must produce an inspection receipt");
 
     assert_eq!(
@@ -885,11 +902,114 @@ fn probe_error_after_begin_writes_inspection_receipt() {
     assert!(
         store
             .read_receipt(&transaction_id)
+            .await
             .expect("receipt read")
             .is_some()
     );
     assert_eq!(
         store.quarantined.lock().unwrap().as_slice(),
         &[transaction_id]
+    );
+}
+
+/// Counts applies in flight. Each apply waits briefly for a second one to
+/// arrive, so two unserialized applies always overlap.
+#[derive(Default)]
+struct OverlapProbe {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl NativeIntegrationMechanics for OverlapProbe {
+    fn preflight(
+        &self,
+        _selection: &NativeIntegrationSelectionV1,
+        _request: &NativeIntegrationPreflightRequestV1,
+        _cancellation_signal: &CancellationSignal,
+        _cancellation: &CancellationToken,
+    ) -> Result<NativeIntegrationPreviewV1, NativeIntegrationPortError> {
+        Err(NativeIntegrationPortError::Unavailable)
+    }
+
+    fn apply(
+        &self,
+        _preview: &NativeIntegrationPreviewV1,
+        _cancellation: &CancellationToken,
+    ) -> Result<NativeApplyEffectV1, NativeIntegrationPortError> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while self.active.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        self.peak
+            .fetch_max(self.active.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(NativeApplyEffectV1::FailedNoChange)
+    }
+
+    fn revalidate_analysis(
+        &self,
+        _preview: &NativeIntegrationPreviewV1,
+        _deadline: &Deadline,
+        _cancellation: &CancellationSignal,
+    ) -> Result<NativeIntegrationAnalysisRevalidationV1, NativeIntegrationPortError> {
+        Ok(NativeIntegrationAnalysisRevalidationV1::Current)
+    }
+
+    fn probe(
+        &self,
+        _record: &NativeIntegrationRecordV1,
+    ) -> Result<NativeIntegrationProbeV1, NativeIntegrationPortError> {
+        Ok(NativeIntegrationProbeV1::OldState {
+            tip: oid('2'),
+            tree: oid('5'),
+            index_digest: digest('8'),
+            worktree_digest: digest('9'),
+        })
+    }
+
+    fn rollback(
+        &self,
+        _record: &NativeIntegrationRecordV1,
+        _committed_tip: &GitOidV1,
+    ) -> Result<NativeIntegrationProbeV1, NativeIntegrationPortError> {
+        Err(NativeIntegrationPortError::Unavailable)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_applies_to_one_repository_never_overlap() {
+    let mechanics = Arc::new(OverlapProbe::default());
+    let coordinator = Arc::new(NativeIntegrationTransactionCoordinator::new(
+        Arc::new(StatusStore::default()),
+        Arc::new(UnusedTopology),
+        Arc::clone(&mechanics),
+        Arc::new(Authorized),
+    ));
+    let applies = ["transaction.serial-first", "transaction.serial-second"].map(|transaction| {
+        let coordinator = Arc::clone(&coordinator);
+        let (request, _) = apply_fixture(transaction);
+        tokio::spawn(async move {
+            let cancellation =
+                CancellationSignal::active(format!("cancel.{transaction}")).expect("cancellation");
+            coordinator.apply(&request, &cancellation).await
+        })
+    });
+
+    for apply in applies {
+        let receipt = apply
+            .await
+            .expect("apply task")
+            .expect("apply settles from the live probe");
+        assert_eq!(
+            receipt.status.terminal_outcome,
+            Some(NativeIntegrationTerminalOutcomeV1::AbortedNoChange)
+        );
+    }
+    assert_eq!(
+        mechanics.peak.load(Ordering::SeqCst),
+        1,
+        "applies to one repository must hold its lock across the native commit"
     );
 }

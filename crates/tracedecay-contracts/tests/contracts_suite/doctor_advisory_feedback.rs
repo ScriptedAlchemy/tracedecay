@@ -29,7 +29,7 @@ impl AdvisoryFeedbackDoctorPort for StaticFeedback {
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
-    let mut future = Box::pin(future);
+    let mut future = std::pin::pin!(future);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("doctor fixture futures must complete immediately"),

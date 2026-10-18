@@ -44,12 +44,13 @@ impl Database {
     }
 
     /// Owner-bound workflow source and effect journal authority.
-    pub fn workflow_storage(
+    pub async fn workflow_storage(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_retained_exact_sql(
             self.retained_exact_sql_for_purpose("attach workflow storage")?,
         )
+        .await
         .map_err(|error| TraceDecayError::Database {
             message: format!("failed to validate workflow storage schema: {error:?}"),
             operation: "attach workflow storage".to_owned(),
@@ -68,12 +69,13 @@ impl Database {
     }
 
     /// Owner-bound single-use handoff-open authority.
-    pub fn handoff_open_storage(
+    pub async fn handoff_open_storage(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority> {
         tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority::from_retained_exact_sql(
             self.retained_exact_sql_for_purpose("attach handoff-open storage")?,
         )
+        .await
         .map_err(|error| TraceDecayError::Database {
             message: format!("failed to validate handoff-open storage schema: {error:?}"),
             operation: "attach handoff-open storage".to_owned(),

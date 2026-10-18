@@ -585,3 +585,34 @@ if __name__ == "__main__":
         ]
     );
 }
+
+#[test]
+fn imported_calls_respect_callable_bindings_and_default_scope() {
+    let source = "from dep import callback\nimport dep as ns\ndef direct():\n    return callback()\ndef param(callback):\n    return callback()\ndef local():\n    callback = lambda: 1\n    return callback()\ndef namespace(ns):\n    return ns.callback()\ndef defaults(callback=callback()):\n    return callback()\ndef decorated():\n    @wrap\n    def callback():\n        pass\n    return callback()\n";
+    let result = PythonExtractor
+        .extract_artifact("bindings.py", source)
+        .result;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    for (name, expected) in [
+        ("direct", 1),
+        ("param", 0),
+        ("local", 0),
+        ("namespace", 0),
+        ("defaults", 1),
+        ("decorated", 0),
+    ] {
+        let owner = result
+            .nodes
+            .iter()
+            .find(|node| node.name == name)
+            .expect("function");
+        let calls = result
+            .unresolved_refs
+            .iter()
+            .filter(|reference| {
+                reference.from_node_id == owner.id && reference.reference_kind == EdgeKind::Calls
+            })
+            .count();
+        assert_eq!(calls, expected, "{name}");
+    }
+}

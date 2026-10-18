@@ -32,6 +32,8 @@ use tracedecay_runtime_core::db::engine::{Executor, params};
 pub mod cold_store;
 /// Read-only diagnostics over retention-owned state.
 pub mod diagnostics;
+/// Bounded metadata census of every store family under a profile root.
+pub mod footprint;
 /// Exact-liveness mark-and-sweep for immutable derived code generations.
 /// Detection and deletion of corruption/recovery artifacts found beside live
 /// databases (plan 38, §5).

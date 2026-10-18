@@ -352,6 +352,50 @@ async fn mid_wait_branch_publication_surfaces_terminal_publication_park() {
     registry.shutdown().await;
 }
 
+/// The worker woke, passed its shutdown check, and then suppressed its pass
+/// for the terminal park. Shutdown landed in between; the suppression must
+/// not swallow shutdown's wake and leave the join waiting forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_joins_a_worker_suppressing_a_terminal_publication_park() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = mounted_registry(&fixture, &store).await;
+    assert!(
+        registry
+            .plant_terminal_publication_authority_park_for_test(
+                fixture.path(),
+                "terminal park before shutdown",
+            )
+            .await,
+        "fixture must stamp the terminal park on the mounted owner"
+    );
+    let (suppressing, release) =
+        registry.pause_next_terminal_suppression(fixture.path().to_path_buf());
+    assert!(registry.note_worker_wake_for_test(fixture.path()).await);
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, suppressing)
+        .await
+        .expect("woken worker reaches the terminal suppression")
+        .expect("suppression gate entered");
+
+    let shutdown_registry = registry.clone();
+    let shutdown = tokio::spawn(async move { shutdown_registry.shutdown().await });
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+        while registry.serving_code_scope(fixture.path()).await.is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown takes the mounted worktree");
+    // Shutdown's wakes are posted right after it takes the worktree.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    release.send(()).expect("release the suppressing worker");
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), shutdown)
+        .await
+        .expect("shutdown must join a worker that suppressed a terminal park")
+        .expect("shutdown task joins");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exact_branch_publication_completes_from_a_retained_graph_head() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);

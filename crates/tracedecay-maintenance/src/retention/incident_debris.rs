@@ -415,7 +415,6 @@ mod tests {
             store_id: "store.debris".to_string(),
             canonical_root: PathBuf::from("/repository"),
             display_root: None,
-            git_common_dir: None,
             alias_roots: Vec::new(),
             manifest_readable: false,
             data_root: store_root.to_path_buf(),

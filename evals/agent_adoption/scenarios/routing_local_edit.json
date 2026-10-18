@@ -8,10 +8,21 @@
   "fixture": "main",
   "status": "active",
   "prompt": "In src/inventory.rs, suggest a clearer replacement for the comment above check_availability. Return the proposed comment only; do not change the implementation.",
-  "ground_truth": [
-    "sku",
-    "qty"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states sku",
+          "pattern": "\\bsku\\b"
+        },
+        {
+          "id": "states qty",
+          "pattern": "\\bqty\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 2,
   "allowed_skills": [],
   "max_tracedecay_calls": 0

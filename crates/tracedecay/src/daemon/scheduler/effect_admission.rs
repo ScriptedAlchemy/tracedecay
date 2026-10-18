@@ -95,8 +95,11 @@ pub(super) fn log_scheduler_admission_conflict(
 fn log_scheduler_schedule_skip(
     project_path: &Path,
     task: AgentTaskKind,
-    reason: tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1,
+    decision: &tracedecay_automation_runtime::automation::scheduler::AutomationScheduleDecision,
 ) {
+    let Some(reason) = decision.skip_reason() else {
+        return;
+    };
     // Not-due/disabled tasks never reach durable admission; without this
     // event a silent schedule skip is indistinguishable from a lost tick.
     let mut fields = super::scheduler_project_task_fields(project_path, task);
@@ -104,6 +107,13 @@ fn log_scheduler_schedule_skip(
         ("outcome", "skipped".to_owned()),
         ("reason", reason.as_str().to_owned()),
     ]);
+    if let Some(gate) = decision.activity_gate() {
+        let secs = |value: Option<i64>| value.map_or_else(|| "none".to_owned(), |v| v.to_string());
+        fields.extend([
+            ("last_activity_secs", secs(gate.last_activity_secs)),
+            ("cadence_started_at", secs(gate.cadence_started_at)),
+        ]);
+    }
     log_daemon_event("scheduler_task", &fields);
 }
 
@@ -464,8 +474,12 @@ fn run_automation_scheduler_tick_inner<'a>(
             trigger: AutomationTrigger::Scheduler,
             ..MemoryCuratorAutomationOptions::default()
         };
-        if let Some(reason) = memory_curator_decision.skip_reason() {
-            log_scheduler_schedule_skip(project_path, AgentTaskKind::MemoryCurator, reason);
+        if !memory_curator_decision.is_due() {
+            log_scheduler_schedule_skip(
+                project_path,
+                AgentTaskKind::MemoryCurator,
+                &memory_curator_decision,
+            );
         } else {
             log_scheduler_task_start(project_path, AgentTaskKind::MemoryCurator);
             match scheduler_automation_effect(
@@ -589,8 +603,12 @@ fn run_automation_scheduler_tick_inner<'a>(
             }
         }
         if !combined_handled {
-            if let Some(reason) = session_reflector_decision.skip_reason() {
-                log_scheduler_schedule_skip(project_path, AgentTaskKind::SessionReflector, reason);
+            if !session_reflector_decision.is_due() {
+                log_scheduler_schedule_skip(
+                    project_path,
+                    AgentTaskKind::SessionReflector,
+                    &session_reflector_decision,
+                );
             } else {
                 log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
                 let session_options = SessionReflectorAutomationOptions {
@@ -678,8 +696,12 @@ fn run_automation_scheduler_tick_inner<'a>(
                     }
                 }
             }
-            if let Some(reason) = skill_writer_decision.skip_reason() {
-                log_scheduler_schedule_skip(project_path, AgentTaskKind::SkillWriter, reason);
+            if !skill_writer_decision.is_due() {
+                log_scheduler_schedule_skip(
+                    project_path,
+                    AgentTaskKind::SkillWriter,
+                    &skill_writer_decision,
+                );
             } else {
                 log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
                 let skill_options = SkillWriterAutomationOptions {

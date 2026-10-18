@@ -72,6 +72,42 @@ impl RegisteredWorkQuery for ExactSqlTransaction {
     }
 }
 
+impl RegisteredWorkQuery for crate::exact_sql::ExactSqlJobTransaction<'_> {
+    fn work_query(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError> {
+        self.query(statement)
+    }
+}
+
+/// A write transaction a Work storage body runs its statements in: an
+/// interactive transaction or a writer job.
+pub(crate) trait RegisteredWorkWrite: RegisteredWorkQuery {
+    fn work_execute(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<crate::exact_sql::ExactSqlExecuteResult, crate::exact_sql::ExactSqlError>;
+}
+
+impl RegisteredWorkWrite for ExactSqlTransaction {
+    fn work_execute(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<crate::exact_sql::ExactSqlExecuteResult, crate::exact_sql::ExactSqlError> {
+        self.execute(statement)
+    }
+}
+
+impl RegisteredWorkWrite for crate::exact_sql::ExactSqlJobTransaction<'_> {
+    fn work_execute(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<crate::exact_sql::ExactSqlExecuteResult, crate::exact_sql::ExactSqlError> {
+        self.execute(statement)
+    }
+}
+
 pub(crate) fn registered_work_query(
     source: &impl RegisteredWorkQuery,
     sql: &str,

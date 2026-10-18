@@ -1,8 +1,8 @@
 //! One retained native-integration transaction authority per daemon-owned
 //! project store.
 //!
-//! The registry composes the four coordinator inputs, the durable store
-//! actor, the exact-pair topology resolver, the native Gix mechanics, and the
+//! The registry composes the four coordinator inputs, the durable store,
+//! the exact-pair topology resolver, the native Gix mechanics, and the
 //! pinned-policy authorization, completes durable startup recovery, and only
 //! then exposes the owner to invocation routing. A project without a mounted
 //! owner keeps answering the typed unavailable result; nothing here guesses
@@ -43,14 +43,14 @@ use tracedecay_global_db::{RegisteredGlobalDbLeaseV1, VerifiedGraphRuntimePortV1
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;
-use super::store::{DaemonNativeIntegrationStore, SharedDaemonNativeIntegrationStore};
+use super::store::DaemonNativeIntegrationStore;
 use super::worktree::{DaemonAuthorizedScopeSetReader, DaemonNativeWorktreeAuthority};
 
 const MAX_PENDING_WORKTREE_CLEANUPS: u32 = 4_096;
 
 /// The one exact composition served to invocation routing.
 pub type DaemonProjectNativeIntegrationCoordinator = NativeIntegrationTransactionCoordinator<
-    SharedDaemonNativeIntegrationStore,
+    DaemonNativeIntegrationStore,
     ExactPairNativeIntegrationTopology,
     GixNativeIntegrationAdapter,
     DaemonNativeIntegrationAuthorization,
@@ -79,12 +79,11 @@ fn worktree_recovery_error(error: WorktreeContractError) -> NativeIntegrationPor
     }
 }
 
-/// Retains the one `DaemonNativeIntegrationStore` actor for each daemon-owned
-/// project database. Dropping the registry closes every actor when the daemon
-/// store administration shuts down.
+/// Retains the one `DaemonNativeIntegrationStore` for each daemon-owned
+/// project database. Shutdown releases every retained lease.
 #[derive(Default)]
 struct NativeIntegrationStoreRegistry {
-    stores: Mutex<HashMap<PathBuf, SharedDaemonNativeIntegrationStore>>,
+    stores: Mutex<HashMap<PathBuf, DaemonNativeIntegrationStore>>,
     closed: AtomicBool,
 }
 
@@ -92,7 +91,7 @@ impl NativeIntegrationStoreRegistry {
     fn ensure(
         &self,
         database: RegisteredGlobalDbLeaseV1,
-    ) -> NativeIntegrationStoreResult<SharedDaemonNativeIntegrationStore> {
+    ) -> NativeIntegrationStoreResult<DaemonNativeIntegrationStore> {
         // The registered runtime authority already supplies the canonical
         // database identity; a fresh SQLite shard may not have materialized
         // its path yet, so no filesystem lookup happens here.
@@ -104,9 +103,9 @@ impl NativeIntegrationStoreRegistry {
         &self,
         path: PathBuf,
         open: F,
-    ) -> NativeIntegrationStoreResult<SharedDaemonNativeIntegrationStore>
+    ) -> NativeIntegrationStoreResult<DaemonNativeIntegrationStore>
     where
-        F: FnOnce() -> NativeIntegrationStoreResult<DaemonNativeIntegrationStore>,
+        F: FnOnce() -> DaemonNativeIntegrationStore,
     {
         if self.closed.load(Ordering::SeqCst) {
             return Err(tracedecay_store::NativeIntegrationStoreError::unavailable(
@@ -125,29 +124,21 @@ impl NativeIntegrationStoreRegistry {
         if let Some(existing) = stores.get(&path) {
             return Ok(existing.clone());
         }
-        let store = SharedDaemonNativeIntegrationStore::from_arc(Arc::new(open()?));
+        let store = open();
         stores.insert(path, store.clone());
         Ok(store)
     }
 
-    async fn shutdown_all(&self) -> NativeIntegrationStoreResult<usize> {
+    fn shutdown_all(&self) -> NativeIntegrationStoreResult<usize> {
         self.closed.store(true, Ordering::SeqCst);
-        let stores = {
-            let mut retained = self
-                .stores
-                .lock()
-                .map_err(tracedecay_store::NativeIntegrationStoreError::unavailable)?;
-            retained.drain().map(|(_, store)| store).collect::<Vec<_>>()
-        };
-        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let mut joined = 0usize;
-            for store in stores {
-                joined = joined.saturating_add(usize::from(store.shutdown()?));
-            }
-            Ok(joined)
-        })
-        .await
-        .map_err(tracedecay_store::NativeIntegrationStoreError::unavailable)?
+        let mut retained = self
+            .stores
+            .lock()
+            .map_err(tracedecay_store::NativeIntegrationStoreError::unavailable)?;
+        Ok(retained
+            .drain()
+            .filter(|(_, store)| store.shutdown())
+            .count())
     }
 }
 
@@ -159,7 +150,7 @@ pub struct DaemonNativeIntegrationOwner {
     service: Arc<DaemonProjectNativeIntegrationService>,
     snapshots: Arc<NativeIntegrationStackSnapshotService<Arc<ExactPairNativeIntegrationTopology>>>,
     worktrees: Option<Arc<DaemonProjectNativeWorktreeService>>,
-    store: SharedDaemonNativeIntegrationStore,
+    store: DaemonNativeIntegrationStore,
     scope_sets: Option<AuthorizedScopeSetSqliteStorage>,
     stack_runtimes: Arc<Mutex<BTreeMap<ManifestDigest, Arc<DaemonGitHubStackRuntimeV1>>>>,
 }
@@ -212,14 +203,15 @@ impl DaemonNativeIntegrationOwner {
         self.snapshots.snapshot(request, cancellation)
     }
 
-    pub fn store(&self) -> &SharedDaemonNativeIntegrationStore {
+    pub fn store(&self) -> &DaemonNativeIntegrationStore {
         &self.store
     }
 
-    pub fn cleanup_recovery_roots(&self) -> Result<Vec<PathBuf>, NativeIntegrationPortError> {
+    pub async fn cleanup_recovery_roots(&self) -> Result<Vec<PathBuf>, NativeIntegrationPortError> {
         let mut roots = self
             .store
             .pending_worktree_cleanups(&self.repository_id, MAX_PENDING_WORKTREE_CLEANUPS)
+            .await
             .map_err(|_| NativeIntegrationPortError::Unavailable)?
             .into_iter()
             .map(|transaction| transaction.command.worktree_root)
@@ -243,9 +235,11 @@ impl DaemonNativeIntegrationOwner {
             .ok_or(NativeIntegrationPortError::Unavailable)?;
         let store = self.store.clone();
         let repository_id = self.repository_id.clone();
-        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        // Reconciliation interleaves store awaits with synchronous native Git.
+        tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
             let pending = store
                 .pending_worktree_cleanups(&repository_id, MAX_PENDING_WORKTREE_CLEANUPS)
+                .await
                 .map_err(|_| NativeIntegrationPortError::Unavailable)?;
             let mut reconciled = 0usize;
             for (index, transaction) in pending.into_iter().enumerate() {
@@ -268,6 +262,7 @@ impl DaemonNativeIntegrationOwner {
                         },
                         &signal,
                     )
+                    .await
                     .map_err(worktree_recovery_error)?;
                 match outcome {
                     WorktreeCleanupReconciliationV1::Removed { .. }
@@ -314,7 +309,7 @@ impl DaemonNativeIntegrationOwner {
 
     /// Mounts exactly one stack-delivery runtime for one exact project scope.
     /// Re-opening the project refreshes its source-access expiry but never
-    /// creates a second queue actor or a second background drain task.
+    /// creates a second delivery store or a second background drain task.
     pub fn mount_github_stack_runtime(
         &self,
         database: RegisteredGlobalDbLeaseV1,
@@ -385,7 +380,7 @@ pub struct NativeIntegrationTargetV1 {
     pub policy_digest: ManifestDigest,
 }
 
-/// Owns the store actor, topology resolver, native mechanics, authorization,
+/// Owns the store, topology resolver, native mechanics, authorization,
 /// and coordinator for each exact project/repository identity.
 #[derive(Default)]
 pub struct DaemonNativeIntegrationServiceRegistry {
@@ -397,7 +392,7 @@ pub struct DaemonNativeIntegrationServiceRegistry {
 
 impl DaemonNativeIntegrationServiceRegistry {
     /// Returns the retained owner for this exact identity, or composes exactly
-    /// one: store actor, topology, mechanics, pinned-policy authorization,
+    /// one: store, topology, mechanics, pinned-policy authorization,
     /// then durable startup recovery. A failed recovery mounts nothing.
     #[tracing::instrument(
         name = "daemon.native_integration.native_ensure",
@@ -485,7 +480,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         open_store: F,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError>
     where
-        F: FnOnce() -> NativeIntegrationStoreResult<SharedDaemonNativeIntegrationStore>,
+        F: FnOnce() -> NativeIntegrationStoreResult<DaemonNativeIntegrationStore>,
     {
         if self.shutdown_fenced.load(Ordering::SeqCst) {
             return Err(NativeIntegrationPortError::Unavailable);
@@ -511,8 +506,8 @@ impl DaemonNativeIntegrationServiceRegistry {
             return Ok(owner);
         }
 
-        // Open/retain the store actor under the creation gate before native
-        // recovery runs on a blocking thread. Later ensures reuse this actor.
+        // Open/retain the store under the creation gate before native
+        // recovery runs on a blocking thread. Later ensures reuse this store.
         let store = open_store().map_err(|_| NativeIntegrationPortError::Unavailable)?;
         let recovery_store = store.clone();
         let native_root = repository_root.clone();
@@ -522,7 +517,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         let owner_project_id = project_id.clone();
         let owner_repository_id = repository_id.clone();
         let (owner_project_id, owner_repository_id, service, snapshots, worktrees) =
-            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
                 let topology = Arc::new(match (topology_shard, topology_runtime) {
                     (Some(expected_shard), Some(runtime)) => {
                         ExactPairNativeIntegrationTopology::open_with_graph_runtime_provider(
@@ -576,12 +571,15 @@ impl DaemonNativeIntegrationServiceRegistry {
                 // serves a single request. Failing closed here mounts nothing.
                 let pending = recovery_store
                     .pending_transactions(None)
+                    .await
                     .map_err(|_| NativeIntegrationPortError::Unavailable)?;
                 for record in pending {
-                    coordinator.recover(&NativeIntegrationRecoveryRequestV1 {
-                        transaction_id: record.status.transaction_id.clone(),
-                        observed_at,
-                    })?;
+                    coordinator
+                        .recover(&NativeIntegrationRecoveryRequestV1 {
+                            transaction_id: record.status.transaction_id.clone(),
+                            observed_at,
+                        })
+                        .await?;
                 }
                 Ok::<_, NativeIntegrationPortError>((
                     owner_project_id,
@@ -687,7 +685,6 @@ impl DaemonNativeIntegrationServiceRegistry {
         self.owners.lock().await.clear();
         self.stores
             .shutdown_all()
-            .await
             .map_err(|_| NativeIntegrationPortError::Unavailable)
     }
 }
@@ -1075,33 +1072,22 @@ mod tests {
         // or a fabricated status.
         let unknown =
             NativeIntegrationTransactionId::new("transaction.native.unknown").expect("id");
-        let status_owner = owner.clone();
-        let status = tokio::task::spawn_blocking(move || {
-            status_owner
-                .service()
-                .status(NativeIntegrationStatusRequestV1 {
-                    transaction_id: NativeIntegrationTransactionId::new(
-                        "transaction.native.unknown",
-                    )
-                    .expect("id"),
-                })
-        })
-        .await
-        .expect("status join")
-        .expect("status read");
+        let status = owner
+            .service()
+            .status(NativeIntegrationStatusRequestV1 {
+                transaction_id: unknown.clone(),
+            })
+            .await
+            .expect("status read");
         assert_eq!(status, None);
-        let cancel_owner = owner.clone();
-        let disposition = tokio::task::spawn_blocking(move || {
-            cancel_owner
-                .service()
-                .cancel(NativeIntegrationCancelRequestV1 {
-                    transaction_id: unknown,
-                    requested_at: UtcMicros(2),
-                })
-        })
-        .await
-        .expect("cancel join")
-        .expect("cancel disposition");
+        let disposition = owner
+            .service()
+            .cancel(NativeIntegrationCancelRequestV1 {
+                transaction_id: unknown,
+                requested_at: UtcMicros(2),
+            })
+            .await
+            .expect("cancel disposition");
         assert_eq!(
             disposition,
             NativeIntegrationCancelDispositionV1::UnknownTransaction

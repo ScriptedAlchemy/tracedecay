@@ -272,6 +272,7 @@ mod tests {
         RegisteredWorkApplicationServicesV1::attach(sessions)
             .expect("Work topology attaches once deferred activation completes");
         RegisteredWorkflowApplicationServicesV1::attach(sessions)
+            .await
             .expect("workflow topology attaches once deferred activation completes");
         let bound = sessions
             .project_graph_runtime()

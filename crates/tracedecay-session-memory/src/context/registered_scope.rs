@@ -10,7 +10,8 @@ use tracedecay_runtime_core::storage::RepositoryIdentityMarker;
 
 use super::ApplicationScopeError;
 
-/// Resolves only an explicitly registered root or a proved linked worktree.
+/// Resolves only an explicitly registered root or another checkout whose
+/// repository marker names the project.
 pub struct RegisteredScopeResolver;
 
 impl RegisteredScopeResolver {
@@ -83,37 +84,36 @@ fn resolve_authorized_root(
 ) -> Result<AuthorizedRoot, ApplicationScopeError> {
     let registered_root = canonical_root(registered_root, "registered root")?;
     let requested_root = canonical_root(requested_root, "requested root")?;
-    let scope_root =
-        if requested_root == registered_root || requested_root.starts_with(&registered_root) {
-            registered_root.clone()
-        } else {
-            let registered_repository = git_common_dir(&registered_root)?;
-            let requested_repository = git_common_dir(&requested_root)?;
-            if registered_repository != requested_repository {
-                return Err(ApplicationScopeError::UnauthorizedSiblingRoot {
-                    registered_root: registered_root.display().to_string(),
-                    requested_root: requested_root.display().to_string(),
-                });
-            }
-            requested_root
-        };
-    let marker =
-        tracedecay_runtime_core::storage::read_repository_identity_marker(&registered_root)
-            .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))?;
-    if let Some(marker) = marker.as_ref() {
-        if marker.project_id != project_id.as_str() {
+    let scope_root = if requested_root.starts_with(&registered_root) {
+        registered_root.clone()
+    } else {
+        requested_root
+    };
+    let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(&scope_root)
+        .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))?;
+    match marker.as_ref() {
+        Some(marker) if marker.project_id == project_id.as_str() => {}
+        // A linked worktree or a clone outside the registered root is
+        // authorized only by its own repository marker naming the project.
+        _ if scope_root != registered_root => {
+            return Err(ApplicationScopeError::UnauthorizedSiblingRoot {
+                registered_root: registered_root.display().to_string(),
+                requested_root: scope_root.display().to_string(),
+            });
+        }
+        Some(_) => {
             return Err(ApplicationScopeError::Resolution(format!(
                 "registered identity authority rejected '{}'",
                 scope_root.display()
             )));
         }
-    } else if tracedecay_runtime_core::worktree::git_common_dir(&registered_root).is_some() {
-        return Err(ApplicationScopeError::Resolution(format!(
-            "registered identity marker is unavailable for '{}'",
-            registered_root.display()
-        )));
-    } else {
-        validate_non_git_project_identity(&registered_root, project_id)?;
+        None if tracedecay_runtime_core::worktree::git_common_dir(&registered_root).is_some() => {
+            return Err(ApplicationScopeError::Resolution(format!(
+                "registered identity marker is unavailable for '{}'",
+                registered_root.display()
+            )));
+        }
+        None => validate_non_git_project_identity(&registered_root, project_id)?,
     }
     Ok(AuthorizedRoot {
         registered_root,
@@ -176,21 +176,4 @@ fn canonical_root(root: &Path, label: &str) -> Result<PathBuf, ApplicationScopeE
             root.display()
         ))
     })
-}
-
-fn git_common_dir(root: &Path) -> Result<PathBuf, ApplicationScopeError> {
-    tracedecay_runtime_core::worktree::git_common_dir(root)
-        .ok_or_else(|| {
-            ApplicationScopeError::Resolution(format!(
-                "registered repository identity is unavailable for '{}'",
-                root.display()
-            ))
-        })?
-        .canonicalize()
-        .map_err(|error| {
-            ApplicationScopeError::Resolution(format!(
-                "registered repository identity for '{}' could not be canonicalized: {error}",
-                root.display()
-            ))
-        })
 }

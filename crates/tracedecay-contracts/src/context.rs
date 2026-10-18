@@ -26,6 +26,9 @@ const RESOLVED_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.application.scope.v1";
 /// request DTOs do not acquire caller-owned execution authority.
 pub const APPLICATION_REQUEST_ID_HEADER: &str = "x-tracedecay-request-id";
 
+/// HTTP header carrying the one-time remote enrollment credential.
+pub const REMOTE_ENROLLMENT_CREDENTIAL_HEADER: &str = "x-tracedecay-enrollment-credential";
+
 application_identifier!(
     RequestId => ("request id", 512),
     CapabilityGrantId => ("capability grant id", 512),
@@ -462,6 +465,9 @@ pub enum RequestAdmission {
     Admitted,
     Cancelled,
     TimedOut,
+    /// The deadline is live but the capability grant has expired. A new
+    /// request can recover from this authority refusal, so it is no timeout.
+    GrantExpired,
 }
 
 /// Transport-neutral request context required by every application use case.
@@ -546,9 +552,10 @@ impl RequestContext {
     pub fn admission_at(&self, observed_at: UtcMicros) -> RequestAdmission {
         if self.cancellation.is_cancelled() {
             RequestAdmission::Cancelled
-        } else if self.deadline.is_elapsed_at(observed_at) || self.grant.is_expired_at(observed_at)
-        {
+        } else if self.deadline.is_elapsed_at(observed_at) {
             RequestAdmission::TimedOut
+        } else if self.grant.is_expired_at(observed_at) {
+            RequestAdmission::GrantExpired
         } else {
             RequestAdmission::Admitted
         }
@@ -569,8 +576,18 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::task::{Context, Poll, Wake, Waker};
 
-    use super::{CancellationSignal, CancellationState, ResolvedScope};
+    use super::{
+        CancellationSignal, CancellationState, REMOTE_ENROLLMENT_CREDENTIAL_HEADER, ResolvedScope,
+    };
     use tracedecay_domain::UtcMicros;
+
+    #[test]
+    fn enrollment_credential_header_bytes_are_wire_stable() {
+        assert_eq!(
+            REMOTE_ENROLLMENT_CREDENTIAL_HEADER,
+            "x-tracedecay-enrollment-credential"
+        );
+    }
 
     fn scope(worktree: &str, reference: Option<&str>) -> ResolvedScope {
         ResolvedScope::new(

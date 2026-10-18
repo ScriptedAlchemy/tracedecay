@@ -137,7 +137,7 @@ pub struct NativeIntegrationTransactionCoordinator<S, T, N, A> {
     topology: Arc<T>,
     native: Arc<N>,
     authorization: Arc<A>,
-    repository_locks: Mutex<BTreeMap<RepositoryId, Arc<Mutex<()>>>>,
+    repository_locks: Mutex<BTreeMap<RepositoryId, Arc<tokio::sync::Mutex<()>>>>,
     cancellations: Mutex<BTreeMap<NativeIntegrationTransactionId, CancellationToken>>,
 }
 
@@ -161,7 +161,7 @@ where
     N: NativeIntegrationMechanics,
     A: NativeIntegrationAuthorizationPort,
 {
-    fn preflight(
+    async fn preflight(
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
@@ -212,13 +212,14 @@ where
                 .preflight(&selection, request, cancellation, &native_cancellation)?;
         self.store
             .save_preview(preview.clone())
+            .await
             .map_err(map_store_error)?;
         Ok(NativeIntegrationPreflightOutcomeV1::Preview(Box::new(
             preview,
         )))
     }
 
-    fn apply(
+    async fn apply(
         &self,
         request: &NativeIntegrationApplyRequestV1,
         external_cancellation: &CancellationSignal,
@@ -228,13 +229,14 @@ where
             let mut locks = self.repository_locks.lock().map_err(lock_error)?;
             locks
                 .entry(repository_id.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
-        let _guard = repository_lock.lock().map_err(lock_error)?;
+        let _guard = repository_lock.lock().await;
         if let Some(receipt) = self
             .store
             .read_receipt(&request.transaction_id)
+            .await
             .map_err(map_store_error)?
         {
             return Ok(receipt);
@@ -287,7 +289,11 @@ where
             status,
             terminal_receipt: None,
         };
-        let begin = self.store.begin_or_replay(record).map_err(map_store_error);
+        let begin = self
+            .store
+            .begin_or_replay(record)
+            .await
+            .map_err(map_store_error);
         let record = match begin {
             Ok(NativeIntegrationBeginResultV1::Started(record)) => *record,
             Ok(NativeIntegrationBeginResultV1::Replay(receipt)) => {
@@ -305,7 +311,9 @@ where
         };
 
         if cancellation.is_cancelled() {
-            let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+            let receipt = self
+                .finish_from_live_precommit_probe(&record, request.observed_at)
+                .await;
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
@@ -315,7 +323,9 @@ where
             NativeIntegrationPhaseV1::CandidateVerified,
             false,
             request.observed_at,
-        ) {
+        )
+        .await
+        {
             Ok(status) => status,
             Err(error) => {
                 tracing::warn!(
@@ -323,7 +333,9 @@ where
                     transaction_id = %record.status.transaction_id,
                     "candidate verification status advance failed; settling from live probe"
                 );
-                let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+                let receipt = self
+                    .finish_from_live_precommit_probe(&record, request.observed_at)
+                    .await;
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
@@ -335,12 +347,16 @@ where
         if self.authorization.authorize_apply(request, true)
             != NativeIntegrationAuthorizationOutcomeV1::Authorized
         {
-            let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+            let receipt = self
+                .finish_from_live_precommit_probe(&record, request.observed_at)
+                .await;
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
         if cancellation.is_cancelled() {
-            let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+            let receipt = self
+                .finish_from_live_precommit_probe(&record, request.observed_at)
+                .await;
             self.clear_cancellation(&request.transaction_id)?;
             return receipt;
         }
@@ -354,7 +370,9 @@ where
                 NativeIntegrationAnalysisRevalidationV1::Stale
                 | NativeIntegrationAnalysisRevalidationV1::Unavailable,
             ) => {
-                let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+                let receipt = self
+                    .finish_from_live_precommit_probe(&record, request.observed_at)
+                    .await;
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
@@ -364,7 +382,9 @@ where
                     transaction_id = %record.status.transaction_id,
                     "semantic revalidation failed after durable begin; settling from live probe"
                 );
-                let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+                let receipt = self
+                    .finish_from_live_precommit_probe(&record, request.observed_at)
+                    .await;
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
@@ -382,15 +402,17 @@ where
                 index_digest,
                 worktree_digest,
             }) => {
-                let receipt = self.write_terminal(
-                    &record,
-                    NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
-                    tip,
-                    tree,
-                    index_digest,
-                    worktree_digest,
-                    request.observed_at,
-                );
+                let receipt = self
+                    .write_terminal(
+                        &record,
+                        NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
+                        tip,
+                        tree,
+                        index_digest,
+                        worktree_digest,
+                        request.observed_at,
+                    )
+                    .await;
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
@@ -399,17 +421,19 @@ where
             // the existing fail-closed inspection path for that ambiguity.
             Ok(NativeIntegrationProbeV1::CommittedState { .. })
             | Ok(NativeIntegrationProbeV1::Unavailable) => {
-                let receipt = self.needs_inspection(&record, request.observed_at);
+                let receipt = self.needs_inspection(&record, request.observed_at).await;
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
             Err(error) => {
-                let receipt = self.needs_inspection_after_error(
-                    &record,
-                    request.observed_at,
-                    "pre-commit probe",
-                    error,
-                );
+                let receipt = self
+                    .needs_inspection_after_error(
+                        &record,
+                        request.observed_at,
+                        "pre-commit probe",
+                        error,
+                    )
+                    .await;
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
@@ -420,7 +444,9 @@ where
             NativeIntegrationPhaseV1::RefCommitStarted,
             false,
             request.observed_at,
-        ) {
+        )
+        .await
+        {
             Ok(status) => status,
             Err(error) => {
                 tracing::warn!(
@@ -428,7 +454,9 @@ where
                     transaction_id = %record.status.transaction_id,
                     "commit-start status advance failed; settling from live probe"
                 );
-                let receipt = self.finish_from_live_precommit_probe(&record, request.observed_at);
+                let receipt = self
+                    .finish_from_live_precommit_probe(&record, request.observed_at)
+                    .await;
                 self.clear_cancellation(&request.transaction_id)?;
                 return receipt;
             }
@@ -439,54 +467,73 @@ where
         };
         let effect = self.native.apply(&record.preview, &cancellation);
         let receipt = match effect {
-            Err(error) => self.needs_inspection_after_error(
-                &record,
-                request.observed_at,
-                "native apply",
-                error,
-            ),
+            Err(error) => {
+                self.needs_inspection_after_error(
+                    &record,
+                    request.observed_at,
+                    "native apply",
+                    error,
+                )
+                .await
+            }
             Ok(NativeApplyEffectV1::Committed {
                 new_tip,
                 final_tree,
                 final_index_digest,
                 final_worktree_digest,
-            }) => self.finish_from_probe(
-                &record,
-                NativeIntegrationProbeV1::CommittedState {
-                    tip: new_tip,
-                    tree: final_tree,
-                    index_digest: final_index_digest,
-                    worktree_digest: final_worktree_digest,
-                },
-                request.observed_at,
-            ),
+            }) => {
+                self.finish_from_probe(
+                    &record,
+                    NativeIntegrationProbeV1::CommittedState {
+                        tip: new_tip,
+                        tree: final_tree,
+                        index_digest: final_index_digest,
+                        worktree_digest: final_worktree_digest,
+                    },
+                    request.observed_at,
+                )
+                .await
+            }
             Ok(NativeApplyEffectV1::FailedNoChange) => {
                 self.finish_from_live_probe(&record, request.observed_at)
+                    .await
             }
             Ok(NativeApplyEffectV1::UnknownAfterCommitPoint { candidate_tip }) => {
                 match (self.native.probe(&record), candidate_tip) {
                     (Ok(NativeIntegrationProbeV1::Diverged { .. }), Some(candidate_tip)) => {
                         match self.native.rollback(&record, &candidate_tip) {
-                            Ok(rolled_back) => self.finish_rolled_back_or_inspect(
-                                &record,
-                                rolled_back,
-                                request.observed_at,
-                            ),
-                            Err(error) => self.needs_inspection_after_error(
-                                &record,
-                                request.observed_at,
-                                "native rollback",
-                                error,
-                            ),
+                            Ok(rolled_back) => {
+                                self.finish_rolled_back_or_inspect(
+                                    &record,
+                                    rolled_back,
+                                    request.observed_at,
+                                )
+                                .await
+                            }
+                            Err(error) => {
+                                self.needs_inspection_after_error(
+                                    &record,
+                                    request.observed_at,
+                                    "native rollback",
+                                    error,
+                                )
+                                .await
+                            }
                         }
                     }
-                    (Ok(probe), _) => self.finish_from_probe(&record, probe, request.observed_at),
-                    (Err(error), _) => self.needs_inspection_after_error(
-                        &record,
-                        request.observed_at,
-                        "post-commit probe",
-                        error,
-                    ),
+                    (Ok(probe), _) => {
+                        self.finish_from_probe(&record, probe, request.observed_at)
+                            .await
+                    }
+                    (Err(error), _) => {
+                        self.needs_inspection_after_error(
+                            &record,
+                            request.observed_at,
+                            "post-commit probe",
+                            error,
+                        )
+                        .await
+                    }
                 }
             }
         };
@@ -494,22 +541,24 @@ where
         receipt
     }
 
-    fn status(
+    async fn status(
         &self,
         request: &NativeIntegrationStatusRequestV1,
     ) -> Result<Option<NativeIntegrationTransactionStatusV1>, NativeIntegrationPortError> {
         self.store
             .read_status(&request.transaction_id)
+            .await
             .map_err(map_store_error)
     }
 
-    fn cancel(
+    async fn cancel(
         &self,
         request: &NativeIntegrationCancelRequestV1,
     ) -> Result<NativeIntegrationCancelDispositionV1, NativeIntegrationPortError> {
         let Some(status) = self
             .store
             .read_status(&request.transaction_id)
+            .await
             .map_err(map_store_error)?
         else {
             return Ok(NativeIntegrationCancelDispositionV1::UnknownTransaction);
@@ -528,6 +577,7 @@ where
         replacement.updated_at = request.requested_at;
         self.store
             .compare_and_swap_status(&request.transaction_id, status.phase_revision, replacement)
+            .await
             .map_err(map_store_error)?;
         // Publish the durable cancellation revision before waking the live
         // apply. Once the token is visible, its terminal settlement can reload
@@ -543,13 +593,14 @@ where
         Ok(NativeIntegrationCancelDispositionV1::CancellationRequested)
     }
 
-    fn recover(
+    async fn recover(
         &self,
         request: &NativeIntegrationRecoveryRequestV1,
     ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError> {
         if let Some(receipt) = self
             .store
             .read_receipt(&request.transaction_id)
+            .await
             .map_err(map_store_error)?
         {
             return Ok(receipt);
@@ -557,10 +608,12 @@ where
         let record = self
             .store
             .read_record(&request.transaction_id)
+            .await
             .map_err(map_store_error)?
             .ok_or(NativeIntegrationPortError::Stale)?;
         let probe = self.native.probe(&record)?;
         self.finish_from_probe(&record, probe, request.observed_at)
+            .await
     }
 }
 
@@ -580,7 +633,7 @@ where
         Ok(())
     }
 
-    fn finish_rolled_back_or_inspect(
+    async fn finish_rolled_back_or_inspect(
         &self,
         record: &NativeIntegrationRecordV1,
         probe: NativeIntegrationProbeV1,
@@ -592,20 +645,23 @@ where
                 tree,
                 index_digest,
                 worktree_digest,
-            } => self.write_terminal(
-                record,
-                NativeIntegrationTerminalOutcomeV1::RolledBack,
-                tip,
-                tree,
-                index_digest,
-                worktree_digest,
-                observed_at,
-            ),
-            _ => self.needs_inspection(record, observed_at),
+            } => {
+                self.write_terminal(
+                    record,
+                    NativeIntegrationTerminalOutcomeV1::RolledBack,
+                    tip,
+                    tree,
+                    index_digest,
+                    worktree_digest,
+                    observed_at,
+                )
+                .await
+            }
+            _ => self.needs_inspection(record, observed_at).await,
         }
     }
 
-    fn finish_from_live_precommit_probe(
+    async fn finish_from_live_precommit_probe(
         &self,
         record: &NativeIntegrationRecordV1,
         observed_at: UtcMicros,
@@ -613,15 +669,17 @@ where
         let current = self
             .store
             .read_record(&record.status.transaction_id)
+            .await
             .map_err(map_store_error)?
             .ok_or(NativeIntegrationPortError::Stale)?;
         if current.preview != record.preview || current.approval != record.approval {
             return Err(NativeIntegrationPortError::TransactionConflict);
         }
         self.finish_current_from_live_precommit_probe(&current, observed_at)
+            .await
     }
 
-    fn finish_current_from_live_precommit_probe(
+    async fn finish_current_from_live_precommit_probe(
         &self,
         record: &NativeIntegrationRecordV1,
         observed_at: UtcMicros,
@@ -640,45 +698,54 @@ where
                     index_digest,
                     worktree_digest,
                 },
-            ) => self.write_terminal(
-                record,
-                NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
-                tip,
-                tree,
-                index_digest,
-                worktree_digest,
-                observed_at,
-            ),
+            ) => {
+                self.write_terminal(
+                    record,
+                    NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
+                    tip,
+                    tree,
+                    index_digest,
+                    worktree_digest,
+                    observed_at,
+                )
+                .await
+            }
             Ok(NativeIntegrationProbeV1::CommittedState { .. })
             | Ok(NativeIntegrationProbeV1::Unavailable) => {
-                self.needs_inspection(record, observed_at)
+                self.needs_inspection(record, observed_at).await
             }
-            Err(error) => self.needs_inspection_after_error(
-                record,
-                observed_at,
-                "pre-commit settlement probe",
-                error,
-            ),
+            Err(error) => {
+                self.needs_inspection_after_error(
+                    record,
+                    observed_at,
+                    "pre-commit settlement probe",
+                    error,
+                )
+                .await
+            }
         }
     }
 
-    fn finish_from_live_probe(
+    async fn finish_from_live_probe(
         &self,
         record: &NativeIntegrationRecordV1,
         observed_at: UtcMicros,
     ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError> {
         match self.native.probe(record) {
-            Ok(probe) => self.finish_from_probe(record, probe, observed_at),
-            Err(error) => self.needs_inspection_after_error(
-                record,
-                observed_at,
-                "terminal settlement probe",
-                error,
-            ),
+            Ok(probe) => self.finish_from_probe(record, probe, observed_at).await,
+            Err(error) => {
+                self.needs_inspection_after_error(
+                    record,
+                    observed_at,
+                    "terminal settlement probe",
+                    error,
+                )
+                .await
+            }
         }
     }
 
-    fn needs_inspection_after_error(
+    async fn needs_inspection_after_error(
         &self,
         record: &NativeIntegrationRecordV1,
         observed_at: UtcMicros,
@@ -691,10 +758,10 @@ where
             operation,
             "native transaction state is uncertain after an operation error"
         );
-        self.needs_inspection(record, observed_at)
+        self.needs_inspection(record, observed_at).await
     }
 
-    fn finish_from_probe(
+    async fn finish_from_probe(
         &self,
         record: &NativeIntegrationRecordV1,
         probe: NativeIntegrationProbeV1,
@@ -706,37 +773,43 @@ where
                 tree,
                 index_digest,
                 worktree_digest,
-            } => self.write_terminal(
-                record,
-                NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
-                tip,
-                tree,
-                index_digest,
-                worktree_digest,
-                observed_at,
-            ),
+            } => {
+                self.write_terminal(
+                    record,
+                    NativeIntegrationTerminalOutcomeV1::AbortedNoChange,
+                    tip,
+                    tree,
+                    index_digest,
+                    worktree_digest,
+                    observed_at,
+                )
+                .await
+            }
             NativeIntegrationProbeV1::CommittedState {
                 tip,
                 tree,
                 index_digest,
                 worktree_digest,
-            } => self.write_terminal(
-                record,
-                NativeIntegrationTerminalOutcomeV1::Committed,
-                tip,
-                tree,
-                index_digest,
-                worktree_digest,
-                observed_at,
-            ),
+            } => {
+                self.write_terminal(
+                    record,
+                    NativeIntegrationTerminalOutcomeV1::Committed,
+                    tip,
+                    tree,
+                    index_digest,
+                    worktree_digest,
+                    observed_at,
+                )
+                .await
+            }
             NativeIntegrationProbeV1::Diverged { .. } | NativeIntegrationProbeV1::Unavailable => {
-                self.needs_inspection(record, observed_at)
+                self.needs_inspection(record, observed_at).await
             }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn write_terminal(
+    async fn write_terminal(
         &self,
         record: &NativeIntegrationRecordV1,
         outcome: NativeIntegrationTerminalOutcomeV1,
@@ -755,7 +828,8 @@ where
                 NativeIntegrationPhaseV1::FinalStateVerification,
                 record.status.cancellation_requested,
                 observed_at,
-            )?
+            )
+            .await?
         } else {
             record.status.clone()
         };
@@ -781,16 +855,18 @@ where
                 expected_phase_revision,
                 receipt,
             )
+            .await
             .map_err(map_store_error)
     }
 
-    fn needs_inspection(
+    async fn needs_inspection(
         &self,
         record: &NativeIntegrationRecordV1,
         observed_at: UtcMicros,
     ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError> {
         self.store
             .quarantine_repository(&record.status.repository_id, &record.status.transaction_id)
+            .await
             .map_err(map_store_error)?;
         self.write_terminal(
             record,
@@ -801,10 +877,11 @@ where
             record.preview.repository_snapshot.worktree_digest.clone(),
             observed_at,
         )
+        .await
     }
 }
 
-fn advance_status<S: NativeIntegrationStore>(
+async fn advance_status<S: NativeIntegrationStore>(
     store: &S,
     current: &NativeIntegrationTransactionStatusV1,
     phase: NativeIntegrationPhaseV1,
@@ -818,6 +895,7 @@ fn advance_status<S: NativeIntegrationStore>(
     replacement.updated_at = observed_at;
     store
         .compare_and_swap_status(&current.transaction_id, current.phase_revision, replacement)
+        .await
         .map_err(map_store_error)
 }
 

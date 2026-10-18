@@ -63,10 +63,7 @@ use tracedecay_code_index::{
     },
 };
 use tracedecay_query::retrieval::{
-    exact::{
-        CentralExactAdmissionAuthorityV1, ExactLane, ExactLaneEvidence, ExactLaneRequest,
-        ExactLaneRetriever,
-    },
+    exact::{CentralExactAdmissionAuthorityV1, ExactLane, ExactLaneEvidence, ExactLaneRequest},
     graph::{GraphLane, production_code_index_freshness},
     lexical::{
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
@@ -76,7 +73,7 @@ use tracedecay_query::retrieval::{
         CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
         CodeLexicalArtifactRestoreWitnessV1, CodeLexicalCloneIndexCensusV1,
         CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence,
-        LexicalLaneRequest, LexicalLaneRetriever, PreparedCodeLexicalArtifactPageV1,
+        LexicalLaneRequest, PreparedCodeLexicalArtifactPageV1,
         code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
     },
     ports::{

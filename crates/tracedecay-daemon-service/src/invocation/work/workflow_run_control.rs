@@ -9,8 +9,8 @@ use tracedecay_application::work::workflow_topology::WorkflowTopologyError;
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemDetailV1, LegalAction, RequestContext, RetryDirective,
     SafeDiagnostic, WorkflowCatalogAdmissionError, WorkflowCoordinationError,
-    WorkflowDefinitionLifecycleState, WorkflowRunServiceError, WorkflowRunStorageError,
-    WorkflowRunStoragePort,
+    WorkflowDefinitionLifecycleState, WorkflowRunReadPort, WorkflowRunServiceError,
+    WorkflowRunStorageError,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkflowRunStateError};
 
@@ -29,7 +29,8 @@ use super::workflow_fan_out::reconcile_workflow_fan_out;
 /// pinned against a different environment is a typed staleness denial, and a
 /// registry that cannot place the definition's entry step denies admission
 /// before any event is journaled.
-pub(super) fn start_workflow_run(
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn start_workflow_run(
     registered: &RegisteredWorkRuntime,
     services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
@@ -42,7 +43,11 @@ pub(super) fn start_workflow_run(
         Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
     >,
 ) -> Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem> {
-    match services.effects().projection(&request.run_id) {
+    let run_id = request.run_id.clone();
+    let existing = services
+        .read(move |services| Ok(services.effects().projection(&run_id)))
+        .await?;
+    match existing {
         Ok(existing) => {
             let admitted = existing
                 .history()
@@ -64,52 +69,53 @@ pub(super) fn start_workflow_run(
                 attempt_processes,
                 project_root,
                 observability_producer,
-            );
+            )
+            .await;
         }
         Err(tracedecay_contracts::WorkflowRunStorageError::NotFound) => {}
         Err(error) => return Err(workflow_run_storage_problem(error)),
     }
-    let definition = services
-        .definitions()
-        .get(&request.definition_id, request.definition_version)
-        .map_err(workflow_coordination_problem)?;
-    if definition.project_id() != &context.scope().project_id {
-        return Err(ApplicationProblem::not_found_or_not_authorized(
-            RetryDirective::Never,
-        ));
-    }
-    let disposition = services
-        .definitions()
-        .disposition(&request.definition_id, request.definition_version)
-        .map_err(workflow_coordination_problem)?;
-    if disposition.state != WorkflowDefinitionLifecycleState::Active {
-        return Err(definition_not_active(
-            request.definition_version,
-            disposition.state,
-        ));
-    }
+    let (definition_id, definition_version) =
+        (request.definition_id.clone(), request.definition_version);
+    let definition = {
+        let (context, definition_id) = (context.clone(), definition_id.clone());
+        services
+            .read(move |services| {
+                active_definition(services, &context, &definition_id, definition_version)
+            })
+            .await?
+    };
     let provider_registration = request.provider.clone();
     let registry = tracedecay_contracts::WorkflowProviderRegistry::new(
         registered.configuration_digest.clone(),
         vec![request.provider],
     )
     .map_err(workflow_placement_problem)?;
-    let topology_cancellation = Arc::new(AtomicBool::new(context.cancellation().is_cancelled()));
-    let workflow_topology = services
-        .topology()
-        .verified_snapshot(
-            &request.definition_id,
-            request.definition_version,
-            topology_cancellation,
-        )
-        .map_err(workflow_topology_problem)?;
-    let ready_steps = workflow_topology
-        .ready_steps(
-            &BTreeSet::new(),
+    let ready_steps = {
+        let (cancelled, step_count) = (
+            context.cancellation().is_cancelled(),
             definition.steps().len(),
-            Arc::new(tracedecay_graph_db::NeverCancelled),
-        )
-        .map_err(workflow_topology_problem)?;
+        );
+        services
+            .read(move |services| {
+                services
+                    .topology()
+                    .verified_snapshot(
+                        &definition_id,
+                        definition_version,
+                        Arc::new(AtomicBool::new(cancelled)),
+                    )
+                    .and_then(|topology| {
+                        topology.ready_steps(
+                            &BTreeSet::new(),
+                            step_count,
+                            Arc::new(tracedecay_graph_db::NeverCancelled),
+                        )
+                    })
+                    .map_err(workflow_topology_problem)
+            })
+            .await?
+    };
     if ready_steps.is_empty() {
         return Err(workflow_reset_required());
     }
@@ -212,8 +218,8 @@ pub(super) fn start_workflow_run(
             ]
         }
     };
-    let projection = tracedecay_contracts::WorkflowRunService::new(services.effects().clone())
-        .admit_with_fan_out(
+    let projection = services
+        .admit_run(
             request.run_id,
             definition,
             admission,
@@ -224,6 +230,7 @@ pub(super) fn start_workflow_run(
                 occurred_at: observed_at,
             },
         )
+        .await
         .map_err(workflow_run_problem)?;
     reconcile_workflow_fan_out(
         registered,
@@ -235,9 +242,35 @@ pub(super) fn start_workflow_run(
         project_root,
         observability_producer,
     )
+    .await
 }
 
-pub(super) fn apply_workflow_run_command(
+fn active_definition(
+    services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
+    context: &RequestContext,
+    definition_id: &tracedecay_domain::WorkflowDefinitionId,
+    definition_version: u64,
+) -> Result<tracedecay_domain::WorkflowDefinition, ApplicationProblem> {
+    let definition = services
+        .definitions()
+        .get(definition_id, definition_version)
+        .map_err(workflow_coordination_problem)?;
+    if definition.project_id() != &context.scope().project_id {
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
+    }
+    let disposition = services
+        .definitions()
+        .disposition(definition_id, definition_version)
+        .map_err(workflow_coordination_problem)?;
+    if disposition.state != WorkflowDefinitionLifecycleState::Active {
+        return Err(definition_not_active(definition_version, disposition.state));
+    }
+    Ok(definition)
+}
+
+pub(super) async fn apply_workflow_run_command(
     services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     run_id: &tracedecay_domain::RunId,
     expected_sequence: u64,
@@ -246,9 +279,9 @@ pub(super) fn apply_workflow_run_command(
     input_digest: &ManifestDigest,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_domain::WorkflowRunProjection, ApplicationProblem> {
-    tracedecay_contracts::WorkflowRunService::new(services.effects().clone())
-        .apply(
-            run_id,
+    let applied = services
+        .apply_run(
+            run_id.clone(),
             expected_sequence,
             command,
             tracedecay_domain::WorkflowRunEventContext {
@@ -257,27 +290,34 @@ pub(super) fn apply_workflow_run_command(
                 occurred_at: observed_at,
             },
         )
-        .map_err(|error| match error {
-            WorkflowRunServiceError::Storage(WorkflowRunStorageError::VersionConflict) => {
-                match services.effects().projection(run_id) {
-                    Ok(current) => ApplicationProblem::from_detail(
-                        ApplicationProblemDetailV1::StalePrecondition {
-                            field: "expected_sequence".to_owned(),
-                            requested: expected_sequence,
-                            current: current.sequence(),
-                        },
-                    ),
-                    Err(error) => workflow_run_storage_problem(error),
+        .await;
+    match applied {
+        Ok(projection) => Ok(projection),
+        Err(WorkflowRunServiceError::Storage(WorkflowRunStorageError::VersionConflict)) => {
+            let run_id = run_id.clone();
+            let current = services
+                .read(move |services| Ok(services.effects().projection(&run_id)))
+                .await?;
+            Err(match current {
+                Ok(current) => {
+                    ApplicationProblem::from_detail(ApplicationProblemDetailV1::StalePrecondition {
+                        field: "expected_sequence".to_owned(),
+                        requested: expected_sequence,
+                        current: current.sequence(),
+                    })
                 }
-            }
-            error => workflow_run_problem(error),
-        })
+                Err(error) => workflow_run_storage_problem(error),
+            })
+        }
+        Err(error) => Err(workflow_run_problem(error)),
+    }
 }
 
 /// Requests cooperative cancellation and, when no step is still running,
 /// immediately reconciles the run to its terminal `Cancelled` state under a
 /// command identity derived from the caller's, so replays settle identically.
-pub(super) fn cancel_workflow_run(
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn cancel_workflow_run(
     registered: &RegisteredWorkRuntime,
     services: &tracedecay_application::work::RegisteredWorkflowApplicationServicesV1,
     context: &RequestContext,
@@ -303,7 +343,8 @@ pub(super) fn cancel_workflow_run(
         request.command_id,
         input_digest,
         observed_at,
-    )?;
+    )
+    .await?;
     if !cancelling.fan_out_plans().is_empty() {
         return reconcile_workflow_fan_out(
             registered,
@@ -314,7 +355,8 @@ pub(super) fn cancel_workflow_run(
             attempt_processes,
             project_root,
             observability_producer,
-        );
+        )
+        .await;
     }
     let any_step_running = cancelling.definition().steps().iter().any(|step| {
         cancelling.step(&step.step_id).is_some_and(|projected| {
@@ -333,6 +375,7 @@ pub(super) fn cancel_workflow_run(
         input_digest,
         observed_at,
     )
+    .await
 }
 
 pub(super) fn workflow_runtime_unavailable() -> ApplicationProblem {

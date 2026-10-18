@@ -185,6 +185,13 @@ pub fn flush_pending(amount: u64) -> Option<u64> {
     FLUSH_PENDING.get().and_then(|flush| flush(amount))
 }
 
+/// Set by test harnesses so no spawned CLI or daemon asks GitHub for the
+/// latest release; the advisory version check then has no answer.
+pub const NO_RELEASE_CHECK_ENV: &str = "TRACEDECAY_NO_RELEASE_CHECK";
+
 pub fn fetch_latest_version() -> Option<Result<String, ReleaseLookupError>> {
+    if std::env::var_os(NO_RELEASE_CHECK_ENV).is_some() {
+        return None;
+    }
     FETCH_LATEST_VERSION.get().map(|fetch| fetch())
 }

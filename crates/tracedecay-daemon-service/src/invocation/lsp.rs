@@ -165,7 +165,7 @@ impl DaemonInvocationService {
         observed_at: UtcMicros,
     ) -> Option<(RequestContext, ManifestDigest)> {
         let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
+        let grant = owner.scope_grant_at(observed_at)?;
         if grant.scope != *scope {
             return None;
         }
@@ -243,7 +243,7 @@ impl DaemonInvocationService {
         let mut storages = vec![active_storage.clone()];
         for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
-            let grant = owner.scope_grant?;
+            let grant = owner.scope_grant_at(observed_at)?;
             if grant.scope != *scope {
                 return None;
             }
@@ -324,7 +324,7 @@ impl DaemonInvocationService {
         T: Serialize,
     {
         let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
+        let grant = owner.scope_grant_at(observed_at)?;
         let scope = grant.scope.clone();
         let context = RequestContext::new(
             grant.issuer.clone(),
@@ -396,8 +396,10 @@ impl DaemonInvocationService {
         Some((scope, ApplicationOutcome::Evidence(packet)))
     }
 
+    /// `deadline` is the daemon shutdown phase deadline, when there is one;
+    /// project observability drains spend it instead of their own budget.
     #[tracing::instrument(name = "daemon.service.lsp.expire_all", level = "trace", skip_all)]
-    pub async fn expire_all(&self) -> ShutdownJoined {
+    pub async fn expire_all(&self, deadline: Option<std::time::Instant>) -> ShutdownJoined {
         let started = std::time::Instant::now();
         let step = |outcome: &str| {
             tracedecay_runtime_core::logging::log_daemon_event(
@@ -418,7 +420,7 @@ impl DaemonInvocationService {
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
         step("lsp_registries_cleared");
-        let project_runtimes = self.project_runtimes.shut_down_all().await;
+        let project_runtimes = self.project_runtimes.shut_down_all(deadline).await;
         step("project_runtimes_shut_down");
         // A project open that lost its registration to this shutdown dropped
         // its observability owner, whose drain still holds the store lease.

@@ -240,18 +240,12 @@ fn admit_dashboard_http_control(
         }
     }
 
-    match access::classify_credential(
-        &admission.access,
-        admission.port,
-        request.method(),
-        request.uri(),
-        &headers,
-    ) {
+    match access::classify_credential(&admission.access, request.method(), request.uri(), &headers)
+    {
         access::DashboardCredential::Admitted => {}
-        access::DashboardCredential::Launch {
-            location,
-            set_cookie,
-        } => return Err(Box::new(dashboard_launch_redirect(&location, set_cookie))),
+        access::DashboardCredential::Launch { location } => {
+            return Err(Box::new(dashboard_launch_redirect(&location)));
+        }
         access::DashboardCredential::Missing => {
             return Err(Box::new(dashboard_request_unauthenticated()));
         }
@@ -317,10 +311,9 @@ fn dashboard_request_unauthenticated() -> Response {
         .into_response()
 }
 
-fn dashboard_launch_redirect(location: &str, set_cookie: header::HeaderValue) -> Response {
+fn dashboard_launch_redirect(location: &str) -> Response {
     let mut response = axum::response::Redirect::to(location).into_response();
     let headers = response.headers_mut();
-    headers.insert(header::SET_COOKIE, set_cookie);
     headers.insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),

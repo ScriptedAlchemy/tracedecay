@@ -1,3 +1,4 @@
+import { dashboardFetch } from '../../data/auth/credential.ts';
 import { z } from 'zod';
 import type { SettingsPayloadV1 } from '../../contracts/generated.ts';
 import { readOnlyScopeRefusal, type ScopeWritability } from '../../data/scope/store.ts';
@@ -331,7 +332,7 @@ async function fetchJson(url: string, init?: RequestInit): Promise<JsonFetchResu
   const authority = `${init?.method ?? 'GET'} ${url}`;
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await dashboardFetch(url, {
       headers: { accept: 'application/json' },
       ...init,
     });

@@ -143,7 +143,6 @@ fn resident_engine_bytes_remeasures_after_a_write() {
     let database = guard.as_ref().unwrap();
     let fresh = u64::try_from(database.memory_usage().total_bytes)
         .unwrap_or(u64::MAX)
-        .max(db.inner.engine_heap_bytes())
         .saturating_add(u64::try_from(db.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX));
     assert!(
         measured > first,
@@ -187,7 +186,6 @@ fn resident_engine_bytes_is_recomputed_after_hibernation_and_reopen() {
     let database = guard.as_ref().unwrap();
     let fresh = u64::try_from(database.memory_usage().total_bytes)
         .unwrap_or(u64::MAX)
-        .max(db.inner.engine_heap_bytes())
         .saturating_add(u64::try_from(db.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX));
     assert_eq!(reopened, fresh);
 }
@@ -644,4 +642,72 @@ fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
             }
         }
     }
+}
+
+fn large_batch(round: usize) -> GraphWriteBatch {
+    let marker = format!("round-{round}");
+    GraphWriteBatch::new(
+        GraphNamespace::new("project").unwrap(),
+        GraphProjectionId::new("code").unwrap(),
+        SourceGeneration::new(&marker).unwrap(),
+        GraphWatermark::new(&marker).unwrap(),
+        vec![GraphMutation::UpsertEntity(
+            GraphEntity::new(
+                GraphEntityId::new("a").unwrap(),
+                BTreeSet::new(),
+                BTreeMap::from([
+                    (
+                        GraphPropertyName::new("name").unwrap(),
+                        GraphProperty::String(marker.clone()),
+                    ),
+                    (
+                        GraphPropertyName::new("payload").unwrap(),
+                        GraphProperty::String("x".repeat(1024 * 1024)),
+                    ),
+                ]),
+            )
+            .unwrap(),
+        )],
+        Arc::new(NeverCancelled),
+    )
+    .unwrap()
+}
+
+/// #4099: Grafeo checkpointed only at open and clean close, so a daemon that
+/// stayed up kept every 64 MiB WAL segment it wrote. Commits now checkpoint
+/// once the uncheckpointed history passes the threshold, which bounds the
+/// sidecar while the store stays open.
+#[test]
+fn commits_checkpoint_the_wal_so_an_open_store_keeps_a_bounded_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = sidecar_wal_path(&dir.path().join("graph.grafeo"));
+    let db = walsync_db(&dir);
+    let rounds = 5 * usize::try_from(super::GRAFEO_WAL_CHECKPOINT_BYTES / (1024 * 1024)).unwrap();
+    let bound = super::GRAFEO_WAL_CHECKPOINT_BYTES + 4 * 1024 * 1024;
+    let mut peak = 0;
+    for round in 0..rounds {
+        db.apply_unverified(large_batch(round)).unwrap();
+        peak = peak.max(crate::recovery::uncheckpointed_wal_bytes(&sidecar));
+    }
+    assert!(
+        peak <= bound,
+        "an open store let {peak} uncheckpointed WAL bytes accumulate past {bound}"
+    );
+    let segment_bytes: u64 = std::fs::read_dir(&sidecar)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.metadata().unwrap().len())
+        .sum();
+    assert!(
+        segment_bytes <= 4 * super::GRAFEO_WAL_CHECKPOINT_BYTES,
+        "the sidecar kept {segment_bytes} bytes after {rounds} MiB of commits"
+    );
+
+    db.close().unwrap();
+    let reopened = walsync_db(&dir);
+    assert_eq!(
+        entity_marker(&reopened),
+        Some(format!("round-{}", rounds - 1))
+    );
+    reopened.close().unwrap();
 }

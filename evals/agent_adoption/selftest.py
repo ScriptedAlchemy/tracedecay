@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,16 @@ HINT_TEXT = ("tracedecay hint: For codebase search, route by what you're matchin
 
 def transcript(lines: list[str]) -> "grade.Transcript":
     return grade.load_transcript_lines(lines, "claude")
+
+
+def answer_outcome(*fragments: str) -> dict:
+    """Minimal structured outcome: every fragment must appear (word-bounded)."""
+    return {"kind": "answer", "answer": {"required": [
+        {"id": f, "pattern": r"\b" + re.escape(f) + r"\b"} for f in fragments]}}
+
+
+def correct(scored: dict) -> float:
+    return scored["correctness"]["score"]
 
 
 # --------------------------------------------------------------------------- #
@@ -333,7 +344,7 @@ def test_specialist_agents():
     )
     check(
         "agents: agent-only scenario scores fully",
-        scored["score"] == 1.0,
+        scored["adoption_composite"] == 1.0,
         str(scored["subscores"]),
     )
     missing = grade.score_scenario(
@@ -344,7 +355,7 @@ def test_specialist_agents():
     )
     check(
         "agents: specialist routing is required",
-        missing["score"] == 0.0,
+        missing["adoption_composite"] == 0.0,
         str(missing["subscores"]),
     )
 
@@ -362,7 +373,7 @@ def test_end_to_end():
             "forbidden_first": ["Grep", "Glob"],
             "forbidden_bash": ["grep", "rg ", "cat "],
         },
-        "ground_truth": ["reserve_stock"],
+        "outcome": answer_outcome("reserve_stock"),
         "max_tool_calls": 6,
     }
     with tempfile.TemporaryDirectory() as work:
@@ -414,8 +425,8 @@ def test_end_to_end():
               by_cond.get("full", {}).get("channel") == grade.CH_STEERING)
         check("e2e: bare channel unprompted",
               by_cond.get("bare", {}).get("channel") == grade.CH_UNPROMPTED)
-        check("e2e: outcome scored",
-              by_cond["full"]["subscores"].get("outcome") == 1.0)
+        check("e2e: correctness scored",
+              by_cond["full"]["correctness"]["status"] == "pass" and "score" not in by_cond["full"])
         agg = sb["aggregate"]["claude"]
         check("e2e: adoption_rate 1.0", agg["adoption_rate"] == 1.0)
         check("e2e: per-condition present", set(agg["conditions"]) == {"full", "bare"})
@@ -430,7 +441,7 @@ def test_end_to_end():
 
 def test_skill_routing():
     scn = {"id": "routing", "category": "routing", "expected_skill": "tracing-functions",
-           "allowed_skills": ["tracing-functions"], "ground_truth": ["place_order"],
+           "allowed_skills": ["tracing-functions"], "outcome": answer_outcome("place_order"),
            "max_tracedecay_calls": 1}
     good = transcript([claude_tool("Skill", {"skill": "tracedecay:tracing-functions"}),
                        claude_tool(TD, {"query": "compute_total"}), claude_result("place_order")])
@@ -440,15 +451,15 @@ def test_skill_routing():
     b = grade.score_scenario(scn, wrong, {}, {})
     check("routing: expected skill observed", not a["details"]["skill_routing"]["missed"])
     check("routing: neighbor is a false trigger", b["details"]["skill_routing"]["unexpected"] == ["exploring-code"])
-    check("routing: outcome independent of wrong skill", b["subscores"]["outcome"] == 1)
+    check("routing: outcome independent of wrong skill", correct(b) == 1)
     empty_answer = grade.score_scenario(scn, transcript([claude_tool("Skill", {"skill": "tracedecay:tracing-functions"})]), {}, {})
-    check("routing: invocation cannot fabricate outcome", empty_answer["subscores"]["outcome"] == 0)
+    check("routing: invocation cannot fabricate outcome", correct(empty_answer) == 0)
     neg = {"id": "negative", "category": "routing", "allowed_skills": [],
-           "ground_truth": ["which behavior"], "max_tracedecay_calls": 0}
+           "outcome": answer_outcome("which behavior"), "max_tracedecay_calls": 0}
     c = grade.score_scenario(neg, transcript([claude_result("Which behavior should change?")]), {}, {})
-    check("routing: clarification needs no calls", c["details"]["skill_routing"]["invoked"] == [] and c["subscores"]["outcome"] == 1)
+    check("routing: clarification needs no calls", c["details"]["skill_routing"]["invoked"] == [] and correct(c) == 1)
     d = grade.score_scenario(neg, good, {}, {})
-    check("routing: unnecessary graph call loses efficiency", d["subscores"]["efficiency"] == 0)
+    check("routing: unnecessary graph call loses efficiency", d["efficiency"]["within_tool_budget"] is False)
     agg = grade.aggregate([a,b,c,d])["claude"]
     check("routing: per-skill missed and correct counts", agg["skill_routing"]["tracing-functions"] == {"tp":1,"fn":1,"fp":1})
     check("routing: no-skill overtrigger counted", agg["no_skill_cases"] == 2 and agg["no_skill_overtrigger"] == 1)
@@ -460,7 +471,7 @@ def test_skill_routing():
               routing["measured"] is False and routing["missed"] is None and
               routing["unmeasured_reason"] == "skills_unavailable_in_condition")
         check(f"routing: {condition} task outcome remains measured",
-              ablated["subscores"]["outcome"] == 1 and ablated["subscores"]["efficiency"] == 1)
+              correct(ablated) == 1 and ablated["efficiency"]["within_tool_budget"] is True)
         mixed = grade.aggregate([a, b, ablated])["claude"]
         check(f"routing: {condition} excluded from mixed miss denominator",
               mixed["skill_routing"]["tracing-functions"] == {"tp": 1, "fn": 1, "fp": 0}
@@ -561,7 +572,7 @@ def test_repeated_query_hints_and_usage():
           codex.cost["input_tokens"] == 1500 and codex.cost["cache_read_input_tokens"] == 800
           and codex.cost["output_tokens"] == 60 and codex.cost["total_cost_usd"] is None, str(codex.cost))
 
-    scn = {"id": "s", "category": "repeated_query", "ground_truth": ["reserve_stock"]}
+    scn = {"id": "s", "category": "repeated_query", "outcome": answer_outcome("reserve_stock")}
     on = grade.score_scenario(scn, tr, {}, {"model": "sonnet", "repeated_query_hints": "on"})
     off = grade.score_scenario(scn, quoted, {}, {"model": "sonnet"})
     cells = grade.aggregate_cost_and_hints([on, off])
@@ -569,7 +580,7 @@ def test_repeated_query_hints_and_usage():
           set(cells) == {"claude/sonnet full hints-on", "claude/sonnet full hints-off"}, str(set(cells)))
     on_cell = cells.get("claude/sonnet full hints-on", {})
     check("cost: cell reports cost, prompt tokens, and interventions",
-          on_cell.get("mean_cost_usd") == 0.0421 and on_cell.get("mean_prompt_tokens") == 15912
+          on_cell.get("mean_cost_usd") == 0.0421 and on_cell.get("usd_per_pass") == 0.0421 and on_cell.get("mean_prompt_tokens") == 15912
           and on_cell.get("hints_total") == 2 and on_cell.get("runs_with_hint") == 1
           and on_cell.get("hint_next_steps") == {"Read": 1, "answer": 1}, str(on_cell))
     off_cell = cells.get("claude/sonnet full hints-off", {})
@@ -663,7 +674,7 @@ LEARNED_SKILL = "pricing-change-review"
 
 def learned_score(expected: bool, invoked: bool, variant: str = "manual", host: str = "claude",
                   outcome_text: str = "compute_grand_total") -> dict:
-    scn = {"id": "learned", "category": "learned_skill", "ground_truth": ["compute_grand_total"],
+    scn = {"id": "learned", "category": "learned_skill", "outcome": answer_outcome("compute_grand_total"),
            "learned_skill": {"workflow": "wf", "expected": expected}}
     lines = [claude_tool("Skill", {"skill": LEARNED_SKILL})] if invoked else []
     tr = grade.load_transcript_lines(lines + [claude_result(outcome_text)], host)
@@ -689,14 +700,14 @@ def test_learned_skill_routing():
     codex = grade.load_transcript_lines([json.dumps({"type": "item.completed", "item": {
         "id": "m", "type": "agent_message", "text": "compute_grand_total"}})], "codex")
     codex_scored = grade.score_scenario(
-        {"id": "learned", "category": "learned_skill", "ground_truth": ["compute_grand_total"],
+        {"id": "learned", "category": "learned_skill", "outcome": answer_outcome("compute_grand_total"),
          "learned_skill": {"workflow": "wf", "expected": True}},
         codex, {}, {"learned_skill_variant": "manual", "learned_skill_id": LEARNED_SKILL})
     check("learned: Codex routing unknown, outcome still measured",
-          outcome(codex_scored) == "unknown" and codex_scored["subscores"]["outcome"] == 1)
+          outcome(codex_scored) == "unknown" and correct(codex_scored) == 1)
     check("learned: outcome independent of invocation",
-          learned_score(True, True, outcome_text="no idea")["subscores"]["outcome"] == 0
-          and learned_score(True, False)["subscores"]["outcome"] == 1)
+          correct(learned_score(True, True, outcome_text="no idea")) == 0
+          and correct(learned_score(True, False)) == 1)
 
     check("learned: variant parsed from basename",
           grade.split_learned_variant("learned_x__claude__opus__v-generated__r2")
@@ -780,7 +791,7 @@ def test_learned_skill_end_to_end():
         rows = {r["variant"]: r for r in sb.get("learned_skill", [])}
         check("learned e2e: manual row counts tp",
               rows.get("manual", {}).get("routing", {}).get("tp") == 1
-              and rows["manual"]["tokens_total"] == 15 and rows["manual"]["outcome_mean"] == 1.0,
+              and rows["manual"]["tokens_total"] == 15 and rows["manual"]["correctness_mean"] == 1.0,
               str(rows.get("manual")))
         check("learned e2e: none row routing unknown",
               rows.get("none", {}).get("routing", {}).get("unknown") == 1)
@@ -819,7 +830,194 @@ def test_carry_claude_profile():
               not carry_claude_profile.carry(Path(td, "absent.json"), Path(dest2)))
 
 
+# --------------------------------------------------------------------------- #
+# 5. Correctness is separate from routing/adoption (#4216)
+# --------------------------------------------------------------------------- #
+def load_scenario(sid: str) -> dict:
+    with open(os.path.join(HERE, "scenarios", sid + ".json")) as f:
+        return json.load(f)
+
+
+def call(name: str, inp: dict, call_id: str, ok: bool = True) -> list[str]:
+    """One Claude tool_use plus the host's result event for it."""
+    return [
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": call_id, "name": name, "input": inp}]}}),
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": call_id, "content": "x", "is_error": not ok}]}}),
+    ]
+
+
+TEST_MAP = "mcp__plugin_tracedecay_graph__tracedecay_test_map"
+
+
+def test_outcome_vs_adoption():
+    # The three controlled probe rows from #4216, graded on the committed
+    # affected-tests scenario. The blended score used to rate them
+    # 0.3889 / 0.7222 / 1.0 with outcome 1.0 / 0.0 / 1.0.
+    scn = load_scenario("affected_tests_reserve_stock")
+    native = grade.score_scenario(scn, transcript(
+        call("Bash", {"command": "rg pricing_test"}, "a") + [claude_result("Run pricing_test.")]), {}, {})
+    failed = grade.score_scenario(scn, transcript(
+        call(TEST_MAP, {}, "b", ok=False) + [claude_result("I have no idea.")]), {}, {})
+    opposite = grade.score_scenario(scn, transcript(
+        call(TEST_MAP, {}, "c") + [claude_result("Do not run pricing_test. It is irrelevant.")]), {}, {})
+
+    check("outcome: correct native-tool completion is a successful task",
+          native["correctness"]["status"] == "pass" and correct(native) == 1.0)
+    check("outcome: native completion still has no adoption credit",
+          native["adoption_composite"] == 0.0 and native["details"]["forbidden_first_flag"])
+    check("outcome: failed TraceDecay call is an attempt, not a success",
+          failed["tool_success"]["tracedecay"] == {"attempted": 1, "succeeded": 0, "failed": 1,
+                                                    "unconfirmed": 0, "success_rate": 0.0}
+          and failed["channel"] != grade.CH_NONE)
+    check("outcome: routing credit cannot rescue a wrong answer",
+          failed["correctness"]["status"] == "fail" and failed["adoption_composite"] == 1.0)
+    check("outcome: the opposite answer cannot be a successful task",
+          opposite["correctness"]["status"] == "fail" and correct(opposite) == 0.0
+          and opposite["correctness"]["forbidden_hit"], str(opposite["correctness"]))
+    check("outcome: no blended score field is published",
+          not any("score" in r for r in (native, failed, opposite)))
+    for good in ("Run pricing_test; it covers compute_total.",
+                 "You should not skip pricing_test, and it is the only test."):
+        check(f"outcome: legitimate wording passes ({good[:24]}...)",
+              correct(grade.score_scenario(scn, transcript([claude_result(good)]), {}, {})) == 1.0)
+
+    # Scenario-declared opposite conclusions on the other negation-prone scenarios.
+    cases = [
+        ("loop_absent_stock_release", "There is no function that releases reserved stock; "
+         "reserve_stock only ever decrements on_hand.", True),
+        ("loop_absent_stock_release", "restock_order puts the stock back. reserve_stock lowers on_hand.", False),
+        ("loop_absent_stock_release", "reserve_stock lowers on_hand.", False),
+        ("scope_branch_pricing_notes", "It changed discount.rs and NOTES.md and was merged.", True),
+        ("scope_branch_pricing_notes", "It changed discount.rs and NOTES.md but is not merged.", False),
+        ("analysis_dead_code_hunt", "compute_grand_total is never called.", True),
+        ("analysis_dead_code_hunt", "No dead code. Only compute_grand_total looks suspicious.", False),
+        ("feedback_currency", "Totals are USD cents; multi-currency is not supported.", True),
+        ("feedback_currency", "Totals are USD and multi-currency is supported.", False),
+        ("routing_nonindexed_doc", "The warehouse tracks stock by SKU.", True),
+        ("routing_nonindexed_doc", "Was: The warehouse track stock by SKU. Now: The warehouse tracks stock by SKU.", False),
+        ("diagnostics_build_error", "place_order passes a String to reserve_stock.", True),
+        ("diagnostics_build_error", "place_order and reserve_stock compile fine.", False),
+    ]
+    for sid, text, want in cases:
+        got = correct(grade.score_scenario(load_scenario(sid), transcript([claude_result(text)]), {}, {})) == 1.0
+        check(f"outcome: {sid} {'accepts' if want else 'rejects'} {text[:34]!r}", got == want)
+
+    # Mutation scenarios verify the resulting state, not what the agent says.
+    edit = load_scenario("edit_replace_discount_cap_value")
+    fixed = "pub fn apply_discount(total: u64, percent: u8) -> u64 {\n    let capped = percent.min(30) as u64;\n    total - (total * capped / 100)\n}\n"
+    stale = fixed.replace("30", "25")
+    claim = transcript([claude_result("I changed the cap to 30 percent.")])
+    check("effect: claiming the change without making it fails",
+          grade.score_scenario(edit, claim, {}, {}, {"src/discount.rs": stale})["correctness"]["status"] == "fail")
+    check("effect: the resulting source passes whatever the answer says",
+          grade.score_scenario(edit, transcript([claude_result("done")]), {}, {},
+                               {"src/discount.rs": fixed})["correctness"]["status"] == "pass")
+    unverified = grade.score_scenario(edit, claim, {}, {})
+    check("effect: a missing snapshot is unverified, never a pass",
+          unverified["correctness"]["status"] == "unverified" and unverified["correctness"]["score"] is None
+          and grade.correctness_summary([unverified])["pass_rate"] is None)
+    move = load_scenario("edit_move_compute_grand_total_out")
+    pricing = "pub fn compute_total() {}\n"
+    lib = "pub mod audit;\npub mod discount;\npub mod inventory;\npub mod orders;\npub mod pricing;\n"
+    moved = {"src/pricing.rs": pricing, "src/lib.rs": lib + "pub mod grand_total;\n",
+             "src/grand_total.rs": "pub fn compute_grand_total() {}\n"}
+    check("effect: a move needs the symbol gone, defined elsewhere, and a new module",
+          grade.score_scenario(move, claim, {}, {}, moved)["correctness"]["status"] == "pass"
+          and grade.score_scenario(move, claim, {}, {}, {**moved, "src/pricing.rs": pricing + moved["src/grand_total.rs"]}
+                                   )["correctness"]["status"] == "fail"
+          and grade.score_scenario(move, claim, {}, {}, {**moved, "src/lib.rs": lib})["correctness"]["status"] == "fail")
+    insert = load_scenario("edit_insert_average_unit_price")
+    before = ("pub fn compute_total(items: &[LineItem]) -> u64 {\n    let mut t = 0;\n    for i in items { t += 1; }\n    t\n}\n\n")
+    after = "/// Duplicate.\npub fn compute_grand_total(items: &[LineItem]) -> u64 {\n    0\n}\n"
+    average = "pub fn average_unit_price(items: &[LineItem]) -> u64 {\n    0\n}\n\n"
+    check("effect: an inserted function must follow compute_total",
+          grade.score_scenario(insert, claim, {}, {}, {"src/pricing.rs": before + average + after}
+                               )["correctness"]["status"] == "pass"
+          and grade.score_scenario(insert, claim, {}, {}, {"src/pricing.rs": before + after + average}
+                                   )["correctness"]["status"] == "fail")
+    record = load_scenario("mem_record_new_decision")
+    fact = "mcp__plugin_tracedecay_graph__tracedecay_fact_store_add"
+    stored = grade.score_scenario(record, transcript(call(fact, {"content": "SKU strings are free-form"}, "f")
+                                                     + [claude_result("Noted.")]), {}, {})
+    errored = grade.score_scenario(record, transcript(call(fact, {"content": "SKU strings are free-form"}, "g", ok=False)
+                                                      + [claude_result("Saved it, done.")]), {}, {})
+    check("effect: a recorded decision needs a successful store call",
+          stored["correctness"]["status"] == "pass" and errored["correctness"]["status"] == "fail")
+
+    with tempfile.TemporaryDirectory() as work:
+        sdir, rdir = os.path.join(work, "scenarios"), os.path.join(work, "run")
+        os.makedirs(sdir)
+        os.makedirs(rdir)
+        with open(os.path.join(sdir, edit["id"] + ".json"), "w") as f:
+            json.dump(edit, f)
+        for rep, snapshot in (("r1", {"src/discount.rs": fixed}), ("r2", None)):
+            base = f"{edit['id']}__claude__opus__{rep}"
+            with open(os.path.join(rdir, base + ".stdout.jsonl"), "w") as f:
+                f.write(claude_result("I changed the cap to 30 percent.") + "\n")
+            if snapshot:
+                with open(os.path.join(rdir, base + ".effects.json"), "w") as f:
+                    json.dump(snapshot, f)
+        rc = subprocess.run([sys.executable, os.path.join(HERE, "grade.py"), "--run-dir", rdir, "--scenarios", sdir],
+                            capture_output=True, text=True)
+        sb = json.load(open(os.path.join(rdir, "scoreboard.json")))
+        status = sorted(r["correctness"]["status"] for r in sb["results"])
+        check("effect e2e: snapshot files reach the grader per run",
+              rc.returncode == 0 and status == ["pass", "unverified"], rc.stderr[-300:] + str(status))
+
+    # Failed calls never earn feedback or tool-success credit.
+    fb = {"id": "fb", "category": "feedback_behavior", "grade_feedback": True}
+    helpful = {"fact_id": "f1", "action": "helpful"}
+    fb_tool = "mcp__plugin_tracedecay_graph__tracedecay_fact_feedback"
+    check("feedback: a failed feedback call is not feedback",
+          grade.score_scenario(fb, transcript(call(fb_tool, helpful, "h", ok=False)), {}, {})["subscores"]["feedback"] == 0.0
+          and grade.score_scenario(fb, transcript(call(fb_tool, helpful, "i")), {}, {})["subscores"]["feedback"] == 1.0)
+
+    # Codex reports success per item.
+    codex = grade.load_transcript_lines([
+        json.dumps({"type": "item.started", "item": {"id": "x1", "type": "command_execution", "command": "rg a"}}),
+        json.dumps({"type": "item.completed", "item": {"id": "x1", "type": "command_execution",
+                                                       "command": "rg a", "exit_code": 1}}),
+        json.dumps({"type": "item.completed", "item": {"id": "x2", "type": "mcp_tool_call", "server": "tracedecay",
+                                                       "tool": "tracedecay_search", "arguments": {}}}),
+    ], "codex")
+    check("tool success: Codex per-item results", [t.ok for t in codex.tools] == [False, True], str([t.ok for t in codex.tools]))
+    check("tool success: no reported result stays unconfirmed",
+          grade.tool_success(transcript([claude_tool("Read", {})]))["unconfirmed"] == 1)
+
+    # Reports expose each measure independently and never call the composite effectiveness.
+    results = [native, failed, opposite]
+    sb = {"meta": {}, "aggregate": grade.aggregate(results), "results": results,
+          "cost_and_hints": grade.aggregate_cost_and_hints(results)}
+    agg = sb["aggregate"]["claude"]
+    check("report: aggregate keeps the measures apart",
+          agg["correctness"]["passed"] == 1 and agg["correctness"]["failed"] == 2
+          and agg["adoption_composite_mean"] == round((0.0 + 1.0 + 1.0) / 3, 4)
+          and agg["tool_success"]["tracedecay_failed"] == 1 and "mean_score" not in agg)
+    report = grade.render_report(sb)
+    check("report: correctness, routing, tool success, and efficiency are separate sections",
+          all(h in report for h in ("## Task correctness", "## Routing and adoption (not effectiveness)",
+                                    "## Tool success and efficiency", "$/pass")))
+
+    # Scenario schema.
+    scenarios = grade.load_scenarios(os.path.join(HERE, "scenarios"))
+    check("schema: every committed scenario declares a valid outcome",
+          grade.lint_outcomes(scenarios) == [], str(grade.lint_outcomes(scenarios)[:3]))
+    check("schema: bare ground_truth is rejected",
+          any("retired" in p for p in grade.lint_outcomes({"a": {"id": "a", "ground_truth": ["x"],
+                                                                 "outcome": answer_outcome("x")}})))
+    check("schema: bad regex is rejected",
+          any("bad regex" in p for p in grade.lint_outcomes({"a": {"outcome": {"kind": "answer", "answer": {
+              "required": [{"id": "r", "pattern": "("}]}}}})))
+    check("schema: ungraded must say why",
+          bool(grade.lint_outcomes({"a": {"outcome": {"kind": "ungraded"}}})))
+    kinds = {s["outcome"]["kind"] for s in scenarios.values()}
+    check("schema: answer, effect, and ungraded outcomes are all in use", kinds == {"answer", "effect", "ungraded"})
+
+
 def main() -> int:
+    test_outcome_vs_adoption()
     test_carry_claude_profile()
     test_transcript_base_repetitions()
     test_repeated_query_hints_and_usage()

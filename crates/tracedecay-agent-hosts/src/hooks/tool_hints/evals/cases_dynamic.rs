@@ -79,6 +79,46 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
             &["tracedecay_grep", "tracedecay_search", "tracedecay_context"],
         ),
         input_eval(
+            "grep-tool-impact-pattern-is-search",
+            ToolHintInput {
+                tool_name: Some("Grep".to_string()),
+                prompt: Some("impact".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::Search),
+            &["tracedecay_grep"],
+        ),
+        input_eval(
+            "grep-tool-depends-on-pattern-is-search",
+            ToolHintInput {
+                tool_name: Some("Grep".to_string()),
+                prompt: Some("depends on".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::Search),
+            &["tracedecay_grep"],
+        ),
+        input_eval(
+            "grep-tool-redundant-pattern-is-search",
+            ToolHintInput {
+                tool_name: Some("Grep".to_string()),
+                prompt: Some("redundant".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::Search),
+            &["tracedecay_grep"],
+        ),
+        input_eval(
+            "shell-search-impact-pattern-is-search",
+            ToolHintInput {
+                tool_name: Some("Shell".to_string()),
+                command: Some("rg -n impact src/hooks".to_string()),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::Search),
+            &["tracedecay_grep"],
+        ),
+        input_eval(
             "shell-sed-source-read",
             ToolHintInput {
                 tool_name: Some("Bash".to_string()),

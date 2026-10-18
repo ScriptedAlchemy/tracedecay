@@ -9,6 +9,7 @@ use super::mutation::{
     rollback_redacted_changes, validate_apply_request, validate_plan_evidence,
 };
 use super::read::{read_change_plan_from_executor, read_revision_from_executor};
+use super::transact_config;
 use super::write::insert_change_plan;
 use super::{
     ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ChangePlanId,
@@ -49,19 +50,19 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 operation: ConfigurationProtectedOperationV1::Change(Box::new(operation)),
             };
             record.validate().map_err(ConfigurationError::validation)?;
-            let transaction = self
-                .db
-                .begin_write_transaction()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome = match read_change_plan_from_executor(&transaction, &record.plan.plan_id)
+            transact_config(
+                self.db,
+                |_| ConfigurationError::Unavailable,
+                async move |transaction| match read_change_plan_from_executor(
+                    &transaction,
+                    &record.plan.plan_id,
+                )
                 .await
                 .map_err(map_store_error)?
-            {
-                Some(existing) if existing == record => Ok(()),
-                Some(_) => Err(ConfigurationError::IdempotencyConflict),
-                None => {
-                    async {
+                {
+                    Some(existing) if existing == record => Ok(()),
+                    Some(_) => Err(ConfigurationError::IdempotencyConflict),
+                    None => {
                         insert_change_plan(&transaction, &record)
                             .await
                             .map_err(map_store_error)?;
@@ -69,16 +70,9 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                             .await
                             .map_err(map_store_error)
                     }
-                    .await
-                }
-            };
-            match outcome {
-                Ok(()) => transaction
-                    .commit()
-                    .await
-                    .map_err(|_| ConfigurationError::Unavailable),
-                Err(error) => Err(error),
-            }
+                },
+            )
+            .await
         })
     }
 
@@ -147,26 +141,21 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
         let mutation = mutation.clone();
         let expected_revision = expected_revision.clone();
         Box::pin(async move {
-            let transaction = self
-                .db
-                .begin_write_transaction()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome = commit_direct_in_transaction(
-                &transaction,
-                &authority,
-                &mutation,
-                &expected_revision,
-            )
-            .await;
-            match outcome {
-                Ok(outcome) => transaction
-                    .commit()
+            transact_config(
+                self.db,
+                |_| ConfigurationError::Unavailable,
+                async move |transaction| {
+                    commit_direct_in_transaction(
+                        &transaction,
+                        &authority,
+                        &mutation,
+                        &expected_revision,
+                    )
                     .await
-                    .map(|()| outcome.receipt)
-                    .map_err(|_| ConfigurationError::Unavailable),
-                Err(error) => Err(error),
-            }
+                    .map(|outcome| outcome.receipt)
+                },
+            )
+            .await
         })
     }
 
@@ -196,108 +185,100 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
             {
                 return Err(ConfigurationError::PlanStale);
             }
-            let transaction = self
-                .db
-                .begin_write_transaction()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome = async {
-                if let Some(receipt) = replay_control_receipt(
-                    &transaction,
-                    &authority.receipt.actor_id,
-                    &request.idempotency_key,
-                    &plan.base_revision_id,
-                    &request.operation_digest,
-                    Some(&plan.plan_id),
-                )
-                .await?
-                {
-                    return Ok(receipt);
-                }
-                let current = current_state_from_transaction(&transaction).await?;
-                if current.revision_id != plan.base_revision_id {
-                    return Err(ConfigurationError::PlanStale);
-                }
-                let record = read_change_plan_from_executor(&transaction, &plan.plan_id)
+            transact_config(
+                self.db,
+                |_| ConfigurationError::Unavailable,
+                async move |transaction| {
+                    if let Some(receipt) = replay_control_receipt(
+                        &transaction,
+                        &authority.receipt.actor_id,
+                        &request.idempotency_key,
+                        &plan.base_revision_id,
+                        &request.operation_digest,
+                        Some(&plan.plan_id),
+                    )
+                    .await?
+                    {
+                        return Ok(receipt);
+                    }
+                    let current = current_state_from_transaction(&transaction).await?;
+                    if current.revision_id != plan.base_revision_id {
+                        return Err(ConfigurationError::PlanStale);
+                    }
+                    let record = read_change_plan_from_executor(&transaction, &plan.plan_id)
+                        .await
+                        .map_err(map_store_error)?
+                        .ok_or(ConfigurationError::PlanStale)?;
+                    if record.plan != plan {
+                        return Err(ConfigurationError::PlanStale);
+                    }
+                    let ConfigurationProtectedOperationV1::Change(change) = &record.operation
+                    else {
+                        return Err(ConfigurationError::PlanStale);
+                    };
+                    if record
+                        .operation
+                        .operation_digest()
+                        .map_err(ConfigurationError::validation)?
+                        != request.operation_digest
+                    {
+                        return Err(ConfigurationError::PlanStale);
+                    }
+                    let next_revision_id = result_revision_id(
+                        &plan.base_revision_id,
+                        &request.idempotency_key,
+                        &request.operation_digest,
+                    )?;
+                    let snapshot =
+                        protected_change_snapshot_v1(&current.snapshot, change, &next_revision_id)?;
+                    let sealed_target =
+                        StoredConfigurationProtectedOperationV1::from(&record.operation);
+                    let (commit, sealed_target_reference) = build_configuration_commit(
+                        &transaction,
+                        ConfigurationCommitDraft {
+                            expected_base_revision_id: &plan.base_revision_id,
+                            next_revision_id,
+                            snapshot,
+                            actor_id: &authority.receipt.actor_id,
+                            operation_kind: "protected_apply",
+                            operation_digest: request.operation_digest.clone(),
+                            idempotency_key: request.idempotency_key.clone(),
+                            authorization_policy_epoch: authority.receipt.policy_epoch,
+                            authorization_policy_digest: authority.receipt.policy_digest.clone(),
+                            authority_revalidated_at: authority.receipt.issued_at,
+                            change_plan: Some(plan.clone()),
+                            event_kind: ConfigurationAuditEventKindV1::Applied,
+                            created_at: authority.receipt.issued_at,
+                            effective_deadline_at: authority.receipt.expires_at,
+                            target: &sealed_target,
+                        },
+                    )
+                    .await?;
+                    let receipt = commit_configuration_transaction(
+                        &transaction,
+                        &commit,
+                        false,
+                        Some(&sealed_target_reference),
+                    )
                     .await
-                    .map_err(map_store_error)?
-                    .ok_or(ConfigurationError::PlanStale)?;
-                if record.plan != plan {
-                    return Err(ConfigurationError::PlanStale);
-                }
-                let ConfigurationProtectedOperationV1::Change(change) = &record.operation else {
-                    return Err(ConfigurationError::PlanStale);
-                };
-                if record
-                    .operation
-                    .operation_digest()
-                    .map_err(ConfigurationError::validation)?
-                    != request.operation_digest
-                {
-                    return Err(ConfigurationError::PlanStale);
-                }
-                let next_revision_id = result_revision_id(
-                    &plan.base_revision_id,
-                    &request.idempotency_key,
-                    &request.operation_digest,
-                )?;
-                let snapshot =
-                    protected_change_snapshot_v1(&current.snapshot, change, &next_revision_id)?;
-                let sealed_target =
-                    StoredConfigurationProtectedOperationV1::from(&record.operation);
-                let (commit, sealed_target_reference) = build_configuration_commit(
-                    &transaction,
-                    ConfigurationCommitDraft {
-                        expected_base_revision_id: &plan.base_revision_id,
-                        next_revision_id,
-                        snapshot,
-                        actor_id: &authority.receipt.actor_id,
-                        operation_kind: "protected_apply",
-                        operation_digest: request.operation_digest.clone(),
-                        idempotency_key: request.idempotency_key.clone(),
-                        authorization_policy_epoch: authority.receipt.policy_epoch,
-                        authorization_policy_digest: authority.receipt.policy_digest.clone(),
-                        authority_revalidated_at: authority.receipt.issued_at,
-                        change_plan: Some(plan.clone()),
-                        event_kind: ConfigurationAuditEventKindV1::Applied,
-                        created_at: authority.receipt.issued_at,
-                        effective_deadline_at: authority.receipt.expires_at,
-                        target: &sealed_target,
-                    },
-                )
-                .await?;
-                let receipt = commit_configuration_transaction(
-                    &transaction,
-                    &commit,
-                    false,
-                    Some(&sealed_target_reference),
-                )
-                .await
-                .map_err(map_store_error)?;
-                Ok(ConfigurationMutationReceipt {
-                    receipt_id: receipt.receipt_id,
-                    base_revision_id: receipt.base_revision_id,
-                    result_revision_id: receipt.result_revision_id,
-                    snapshot_id: commit.next_revision.snapshot.snapshot_id,
-                    operation_digest: receipt.operation_digest,
-                    settlement_authority: ConfigurationSettlementAuthorityV1 {
-                        policy_epoch: receipt.authorization_policy_epoch,
-                        policy_digest: receipt.authorization_policy_digest,
-                        revalidated_at: receipt.authority_revalidated_at,
-                    },
-                    created_at: receipt.created_at,
-                    effective_deadline_at: receipt.effective_deadline_at,
-                })
-            }
-            .await;
-            match outcome {
-                Ok(receipt) => transaction
-                    .commit()
-                    .await
-                    .map(|()| receipt)
-                    .map_err(|_| ConfigurationError::Unavailable),
-                Err(error) => Err(error),
-            }
+                    .map_err(map_store_error)?;
+                    Ok(ConfigurationMutationReceipt {
+                        receipt_id: receipt.receipt_id,
+                        base_revision_id: receipt.base_revision_id,
+                        result_revision_id: receipt.result_revision_id,
+                        snapshot_id: commit.next_revision.snapshot.snapshot_id,
+                        operation_digest: receipt.operation_digest,
+                        settlement_authority: ConfigurationSettlementAuthorityV1 {
+                            policy_epoch: receipt.authorization_policy_epoch,
+                            policy_digest: receipt.authorization_policy_digest,
+                            revalidated_at: receipt.authority_revalidated_at,
+                        },
+                        created_at: receipt.created_at,
+                        effective_deadline_at: receipt.effective_deadline_at,
+                    })
+                },
+            )
+            .await
         })
     }
 
@@ -318,91 +299,82 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 .target_revision_id
                 .validate()
                 .map_err(ConfigurationError::validation)?;
-            let transaction = self
-                .db
-                .begin_write_transaction()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome = async {
-                let current = current_state_from_transaction(&transaction).await?;
-                if current.revision_id != authority.receipt.expected_configuration_revision {
-                    return Err(ConfigurationError::RevisionConflict);
-                }
-                let target =
-                    read_revision_from_executor(&transaction, &rollback.target_revision_id)
+            transact_config(
+                self.db,
+                |_| ConfigurationError::Unavailable,
+                async move |transaction| {
+                    let current = current_state_from_transaction(&transaction).await?;
+                    if current.revision_id != authority.receipt.expected_configuration_revision {
+                        return Err(ConfigurationError::RevisionConflict);
+                    }
+                    let target =
+                        read_revision_from_executor(&transaction, &rollback.target_revision_id)
+                            .await
+                            .map_err(map_store_error)?
+                            .ok_or(ConfigurationError::PlanStale)?;
+                    let operation = ConfigurationProtectedOperationV1::Rollback {
+                        target_revision_id: rollback.target_revision_id.clone(),
+                        mode: rollback.mode,
+                    };
+                    let operation_digest = operation
+                        .operation_digest()
+                        .map_err(ConfigurationError::validation)?;
+                    let plan_id = derived_identifier(
+                        "configuration.plan.rollback.v1",
+                        &canonical_sha256(&(
+                            "tracedecay.configuration.rollback-plan.v1",
+                            &authority.receipt.actor_id,
+                            &current.revision_id,
+                            &operation_digest,
+                            &authority.receipt.scope_digest,
+                            authority.receipt.policy_epoch,
+                            &authority.receipt.policy_digest,
+                            now,
+                        ))
+                        .map_err(ConfigurationError::validation)?,
+                        "configuration rollback plan id",
+                    )?;
+                    let changes = rollback_redacted_changes(&current.snapshot, &target.snapshot)?;
+                    if changes.is_empty() {
+                        return Err(ConfigurationError::PlanStale);
+                    }
+                    let plan = ProtectedChangePlan {
+                        plan_id,
+                        actor_id: authority.receipt.actor_id.clone(),
+                        base_revision_id: current.revision_id,
+                        operation_digest,
+                        resolved_scope_digest: authority.receipt.scope_digest.clone(),
+                        membership_digest: None,
+                        authorization_policy_digest: authority.receipt.policy_digest.clone(),
+                        policy_epoch: authority.receipt.policy_epoch,
+                        expires_at: UtcMicros(now.0.saturating_add(300_000_000)),
+                        created_at: now,
+                        redacted_changes: changes,
+                    };
+                    let record = ConfigurationProtectedPlanRecordV1 {
+                        plan: plan.clone(),
+                        operation,
+                    };
+                    record.validate().map_err(ConfigurationError::validation)?;
+                    match read_change_plan_from_executor(&transaction, &plan.plan_id)
                         .await
                         .map_err(map_store_error)?
-                        .ok_or(ConfigurationError::PlanStale)?;
-                let operation = ConfigurationProtectedOperationV1::Rollback {
-                    target_revision_id: rollback.target_revision_id.clone(),
-                    mode: rollback.mode,
-                };
-                let operation_digest = operation
-                    .operation_digest()
-                    .map_err(ConfigurationError::validation)?;
-                let plan_id = derived_identifier(
-                    "configuration.plan.rollback.v1",
-                    &canonical_sha256(&(
-                        "tracedecay.configuration.rollback-plan.v1",
-                        &authority.receipt.actor_id,
-                        &current.revision_id,
-                        &operation_digest,
-                        &authority.receipt.scope_digest,
-                        authority.receipt.policy_epoch,
-                        &authority.receipt.policy_digest,
-                        now,
-                    ))
-                    .map_err(ConfigurationError::validation)?,
-                    "configuration rollback plan id",
-                )?;
-                let changes = rollback_redacted_changes(&current.snapshot, &target.snapshot)?;
-                if changes.is_empty() {
-                    return Err(ConfigurationError::PlanStale);
-                }
-                let plan = ProtectedChangePlan {
-                    plan_id,
-                    actor_id: authority.receipt.actor_id.clone(),
-                    base_revision_id: current.revision_id,
-                    operation_digest,
-                    resolved_scope_digest: authority.receipt.scope_digest.clone(),
-                    membership_digest: None,
-                    authorization_policy_digest: authority.receipt.policy_digest.clone(),
-                    policy_epoch: authority.receipt.policy_epoch,
-                    expires_at: UtcMicros(now.0.saturating_add(300_000_000)),
-                    created_at: now,
-                    redacted_changes: changes,
-                };
-                let record = ConfigurationProtectedPlanRecordV1 {
-                    plan: plan.clone(),
-                    operation,
-                };
-                record.validate().map_err(ConfigurationError::validation)?;
-                match read_change_plan_from_executor(&transaction, &plan.plan_id)
-                    .await
-                    .map_err(map_store_error)?
-                {
-                    Some(existing) if existing == record => Ok(plan),
-                    Some(_) => Err(ConfigurationError::IdempotencyConflict),
-                    None => {
-                        insert_change_plan(&transaction, &record)
-                            .await
-                            .map_err(map_store_error)?;
-                        insert_dry_run_audit_event(&transaction, &record)
-                            .await
-                            .map_err(map_store_error)?;
-                        Ok(plan)
+                    {
+                        Some(existing) if existing == record => Ok(plan),
+                        Some(_) => Err(ConfigurationError::IdempotencyConflict),
+                        None => {
+                            insert_change_plan(&transaction, &record)
+                                .await
+                                .map_err(map_store_error)?;
+                            insert_dry_run_audit_event(&transaction, &record)
+                                .await
+                                .map_err(map_store_error)?;
+                            Ok(plan)
+                        }
                     }
-                }
-            }
-            .await;
-            match outcome {
-                Ok(plan) => transaction
-                    .commit()
-                    .await
-                    .map(|()| plan)
-                    .map_err(|_| ConfigurationError::Unavailable),
-                Err(error) => Err(error),
-            }
+                },
+            )
+            .await
         })
     }
 
@@ -432,117 +404,108 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
             {
                 return Err(ConfigurationError::PlanStale);
             }
-            let transaction = self
-                .db
-                .begin_write_transaction()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome = async {
-                if let Some(receipt) = replay_control_receipt(
-                    &transaction,
-                    &authority.receipt.actor_id,
-                    &request.idempotency_key,
-                    &plan.base_revision_id,
-                    &request.operation_digest,
-                    Some(&plan.plan_id),
-                )
-                .await?
-                {
-                    return Ok(receipt);
-                }
-                let current = current_state_from_transaction(&transaction).await?;
-                if current.revision_id != plan.base_revision_id {
-                    return Err(ConfigurationError::PlanStale);
-                }
-                let record = read_change_plan_from_executor(&transaction, &plan.plan_id)
+            transact_config(
+                self.db,
+                |_| ConfigurationError::Unavailable,
+                async move |transaction| {
+                    if let Some(receipt) = replay_control_receipt(
+                        &transaction,
+                        &authority.receipt.actor_id,
+                        &request.idempotency_key,
+                        &plan.base_revision_id,
+                        &request.operation_digest,
+                        Some(&plan.plan_id),
+                    )
+                    .await?
+                    {
+                        return Ok(receipt);
+                    }
+                    let current = current_state_from_transaction(&transaction).await?;
+                    if current.revision_id != plan.base_revision_id {
+                        return Err(ConfigurationError::PlanStale);
+                    }
+                    let record = read_change_plan_from_executor(&transaction, &plan.plan_id)
+                        .await
+                        .map_err(map_store_error)?
+                        .ok_or(ConfigurationError::PlanStale)?;
+                    if record.plan != plan {
+                        return Err(ConfigurationError::PlanStale);
+                    }
+                    let ConfigurationProtectedOperationV1::Rollback {
+                        target_revision_id,
+                        mode,
+                    } = &record.operation
+                    else {
+                        return Err(ConfigurationError::PlanStale);
+                    };
+                    if *mode == RollbackModeV1::Partial {
+                        return Err(ConfigurationError::Unavailable);
+                    }
+                    if record
+                        .operation
+                        .operation_digest()
+                        .map_err(ConfigurationError::validation)?
+                        != request.operation_digest
+                    {
+                        return Err(ConfigurationError::PlanStale);
+                    }
+                    let target = read_revision_from_executor(&transaction, target_revision_id)
+                        .await
+                        .map_err(map_store_error)?
+                        .ok_or(ConfigurationError::PlanStale)?;
+                    let next_revision_id = result_revision_id(
+                        &plan.base_revision_id,
+                        &request.idempotency_key,
+                        &request.operation_digest,
+                    )?;
+                    let sealed_target =
+                        StoredConfigurationProtectedOperationV1::from(&record.operation);
+                    let (commit, sealed_target_reference) = build_configuration_commit(
+                        &transaction,
+                        ConfigurationCommitDraft {
+                            expected_base_revision_id: &plan.base_revision_id,
+                            next_revision_id,
+                            snapshot: target.snapshot,
+                            actor_id: &authority.receipt.actor_id,
+                            operation_kind: "rollback_apply",
+                            operation_digest: request.operation_digest.clone(),
+                            idempotency_key: request.idempotency_key.clone(),
+                            authorization_policy_epoch: authority.receipt.policy_epoch,
+                            authorization_policy_digest: authority.receipt.policy_digest.clone(),
+                            authority_revalidated_at: authority.receipt.issued_at,
+                            change_plan: Some(plan.clone()),
+                            event_kind: ConfigurationAuditEventKindV1::RollbackApplied,
+                            created_at: authority.receipt.issued_at,
+                            effective_deadline_at: authority.receipt.expires_at,
+                            target: &sealed_target,
+                        },
+                    )
+                    .await?;
+                    let receipt = commit_configuration_transaction(
+                        &transaction,
+                        &commit,
+                        false,
+                        Some(&sealed_target_reference),
+                    )
                     .await
-                    .map_err(map_store_error)?
-                    .ok_or(ConfigurationError::PlanStale)?;
-                if record.plan != plan {
-                    return Err(ConfigurationError::PlanStale);
-                }
-                let ConfigurationProtectedOperationV1::Rollback {
-                    target_revision_id,
-                    mode,
-                } = &record.operation
-                else {
-                    return Err(ConfigurationError::PlanStale);
-                };
-                if *mode == RollbackModeV1::Partial {
-                    return Err(ConfigurationError::Unavailable);
-                }
-                if record
-                    .operation
-                    .operation_digest()
-                    .map_err(ConfigurationError::validation)?
-                    != request.operation_digest
-                {
-                    return Err(ConfigurationError::PlanStale);
-                }
-                let target = read_revision_from_executor(&transaction, target_revision_id)
-                    .await
-                    .map_err(map_store_error)?
-                    .ok_or(ConfigurationError::PlanStale)?;
-                let next_revision_id = result_revision_id(
-                    &plan.base_revision_id,
-                    &request.idempotency_key,
-                    &request.operation_digest,
-                )?;
-                let sealed_target =
-                    StoredConfigurationProtectedOperationV1::from(&record.operation);
-                let (commit, sealed_target_reference) = build_configuration_commit(
-                    &transaction,
-                    ConfigurationCommitDraft {
-                        expected_base_revision_id: &plan.base_revision_id,
-                        next_revision_id,
-                        snapshot: target.snapshot,
-                        actor_id: &authority.receipt.actor_id,
-                        operation_kind: "rollback_apply",
-                        operation_digest: request.operation_digest.clone(),
-                        idempotency_key: request.idempotency_key.clone(),
-                        authorization_policy_epoch: authority.receipt.policy_epoch,
-                        authorization_policy_digest: authority.receipt.policy_digest.clone(),
-                        authority_revalidated_at: authority.receipt.issued_at,
-                        change_plan: Some(plan.clone()),
-                        event_kind: ConfigurationAuditEventKindV1::RollbackApplied,
-                        created_at: authority.receipt.issued_at,
-                        effective_deadline_at: authority.receipt.expires_at,
-                        target: &sealed_target,
-                    },
-                )
-                .await?;
-                let receipt = commit_configuration_transaction(
-                    &transaction,
-                    &commit,
-                    false,
-                    Some(&sealed_target_reference),
-                )
-                .await
-                .map_err(map_store_error)?;
-                Ok(ConfigurationMutationReceipt {
-                    receipt_id: receipt.receipt_id,
-                    base_revision_id: receipt.base_revision_id,
-                    result_revision_id: receipt.result_revision_id,
-                    snapshot_id: commit.next_revision.snapshot.snapshot_id,
-                    operation_digest: receipt.operation_digest,
-                    settlement_authority: ConfigurationSettlementAuthorityV1 {
-                        policy_epoch: receipt.authorization_policy_epoch,
-                        policy_digest: receipt.authorization_policy_digest,
-                        revalidated_at: receipt.authority_revalidated_at,
-                    },
-                    created_at: receipt.created_at,
-                    effective_deadline_at: receipt.effective_deadline_at,
-                })
-            }
-            .await;
-            match outcome {
-                Ok(receipt) => transaction
-                    .commit()
-                    .await
-                    .map(|()| receipt)
-                    .map_err(|_| ConfigurationError::Unavailable),
-                Err(error) => Err(error),
-            }
+                    .map_err(map_store_error)?;
+                    Ok(ConfigurationMutationReceipt {
+                        receipt_id: receipt.receipt_id,
+                        base_revision_id: receipt.base_revision_id,
+                        result_revision_id: receipt.result_revision_id,
+                        snapshot_id: commit.next_revision.snapshot.snapshot_id,
+                        operation_digest: receipt.operation_digest,
+                        settlement_authority: ConfigurationSettlementAuthorityV1 {
+                            policy_epoch: receipt.authorization_policy_epoch,
+                            policy_digest: receipt.authorization_policy_digest,
+                            revalidated_at: receipt.authority_revalidated_at,
+                        },
+                        created_at: receipt.created_at,
+                        effective_deadline_at: receipt.effective_deadline_at,
+                    })
+                },
+            )
+            .await
         })
     }
 

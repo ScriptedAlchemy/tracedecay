@@ -30,9 +30,9 @@
 mod artifact_bench;
 
 use artifact_bench::{
-    ActiveControl, AdmittedFile, ApplyingProjectionSink, SealedDrainBounds, decoded_generation,
-    default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
-    replicate, seal_partitioned,
+    ActiveControl, AdmittedFile, SealedDrainBounds, decoded_generation, default_corpus_root,
+    drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile, replicate,
+    seal_partitioned,
 };
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -61,13 +61,12 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
-    CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
+    LexicalLane, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::{
     RetrievalExecutionControl, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
@@ -248,9 +247,11 @@ impl Options {
                 other => return Err(format!("unrecognized argument {other:?}")),
             }
         }
-        let corpus_root = corpus_root
-            .or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from))
-            .unwrap_or_else(default_corpus_root);
+        let corpus_root =
+            match corpus_root.or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from)) {
+                Some(root) => root,
+                None => default_corpus_root()?,
+            };
         let replicas = match replicas {
             Some(replicas) => replicas,
             None => match std::env::var(REPLICAS_ENV) {
@@ -334,7 +335,7 @@ fn run(options: &Options) -> Result<String, String> {
         max_snapshot_age_micros: None,
     };
     let store = MemorySealedPublicationStoreV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
         .map_err(|error| format!("open production owner: {error}"))?;
 
     let request = build_request(&repository, &sanitizer_revision, &files);
@@ -516,14 +517,17 @@ fn request_prototype(
     })
 }
 
-struct RunClassArguments<'a, E, L> {
+struct RunClassArguments<'a> {
     class: &'a str,
     query: &'a str,
     options: &'a Options,
     prototype: &'a RequestPrototypeV1,
     authority: &'a CentralExactAdmissionAuthorityV1,
-    exact_lane: &'a E,
-    lexical_lane: &'a L,
+    exact_lane: &'a ExactLane<
+        CentralExactAdmissionAuthorityV1,
+        CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
+    >,
+    lexical_lane: &'a LexicalLane<CodeLexicalArtifactReaderV1>,
     generation: &'a CodeGenerationId,
 }
 
@@ -534,11 +538,7 @@ struct IterationMicros {
     total: u64,
 }
 
-fn run_class<E, L>(arguments: RunClassArguments<'_, E, L>) -> Result<serde_json::Value, String>
-where
-    E: ExactLaneRetriever,
-    L: LexicalLaneRetriever,
-{
+fn run_class(arguments: RunClassArguments<'_>) -> Result<serde_json::Value, String> {
     let RunClassArguments {
         class,
         query,

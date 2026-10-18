@@ -28,18 +28,21 @@
 //!    event without the graph authority that verified and digested it.
 
 use tracedecay_contracts::{
-    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkGraphSelectionCoverageV1,
-    WorkProductSelectionScopeV1,
+    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkEvidenceReadPortErrorV1,
+    WorkEvidenceRootReadErrorV1, WorkGraphReadPortErrorV1, WorkGraphSelectionCoverageV1,
+    WorkProductApplicationErrorV1, WorkProductAttemptAdmissionErrorV1, WorkProductEventPortErrorV1,
+    WorkProductSelectionScopeV1, WorkStorageFailureV1,
 };
 use tracedecay_domain::{
     ManifestDigest, UtcMicros, WorkGraphVersionV1, WorkProductEventPayloadV1,
     WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1, canonical_sha256,
 };
 
-use crate::exact_sql::ExactSqlValue;
+use crate::exact_sql::{ExactSqlError, ExactSqlReaderRefusalV1, ExactSqlValue};
 use crate::work::{RegisteredWorkQuery, exact_sql_integer, exact_sql_text, registered_work_query};
 
 mod attempt_admission;
+pub(crate) use attempt_admission::{admit_retry, admit_synthesis};
 mod authorization;
 mod events;
 mod evidence;
@@ -78,6 +81,137 @@ pub(crate) struct WorkProductPublishedVersionV1 {
     pub(crate) valid_at: UtcMicros,
     pub(crate) observed_at: UtcMicros,
     pub(crate) recovered_graph_digest: String,
+}
+
+/// Why a Work product storage read or write failed.
+///
+/// The exact SQL layer already separates busy, result-limit, expiry, authority,
+/// and SQLite failures, and a row that does not decode is the one cause it
+/// cannot see. This keeps both so each port can answer with the category the
+/// caller needs instead of one unit `Unavailable`.
+#[derive(Debug)]
+pub(crate) enum StoreFault {
+    /// Persisted bytes did not decode into the shape the store wrote. The
+    /// label names the loader and never carries row content.
+    Corrupt(&'static str),
+    Sql(ExactSqlError),
+}
+
+impl std::fmt::Display for StoreFault {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Corrupt(what) => write!(formatter, "stored {what} did not decode"),
+            Self::Sql(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl From<ExactSqlError> for StoreFault {
+    fn from(error: ExactSqlError) -> Self {
+        Self::Sql(error)
+    }
+}
+
+/// The answer a port gives for a [`StoreFault`], in the port's own vocabulary.
+///
+/// Only the expected-revision or uniqueness conflict is a `VersionConflict`,
+/// and that is decided where the statement runs, never here: nothing in this
+/// trait can produce a conflict, so a storage fault cannot be mistaken for
+/// stale input.
+pub(crate) trait FromStoreFault: Sized {
+    fn storage(failure: WorkStorageFailureV1) -> Self;
+    fn denied() -> Self;
+    fn timed_out() -> Self;
+    fn unavailable() -> Self;
+
+    /// Classifies `fault`, and records its retained cause in tracing. The
+    /// public answer carries the category only, so SQL parameters, paths, and
+    /// foreign authority detail stay in the log.
+    fn from_fault(fault: impl Into<StoreFault>) -> Self {
+        let fault = fault.into();
+        tracing::warn!(
+            target: "tracedecay.work_product.storage",
+            cause = %fault,
+            "Work product storage failed"
+        );
+        match fault {
+            StoreFault::Corrupt(_) => Self::storage(WorkStorageFailureV1::StoredDataInvalid),
+            StoreFault::Sql(
+                ExactSqlError::Busy
+                | ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Saturated),
+            ) => Self::storage(WorkStorageFailureV1::Busy),
+            StoreFault::Sql(ExactSqlError::QueryLimitExceeded) => {
+                Self::storage(WorkStorageFailureV1::ResultLimitExceeded)
+            }
+            StoreFault::Sql(ExactSqlError::TransactionExpired) => Self::timed_out(),
+            StoreFault::Sql(
+                ExactSqlError::AuthorityDenied(_) | ExactSqlError::AuthorityMismatch,
+            ) => Self::denied(),
+            StoreFault::Sql(_) => Self::unavailable(),
+        }
+    }
+}
+
+/// Classifies a failed insert into the journal or the published versions.
+///
+/// Only a primary-key or uniqueness violation is the expected-revision
+/// conflict: another writer already holds the sequence, version, or command
+/// this insert claimed. Every other failure, busy storage, a lost writer, an
+/// I/O error, is the storage fault it is and never reads as stale input.
+pub(crate) fn insert_fault<E: FromStoreFault>(error: ExactSqlError, conflict: E) -> E {
+    const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
+    const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
+    match error {
+        ExactSqlError::Sqlite {
+            extended_code: Some(SQLITE_CONSTRAINT_PRIMARYKEY | SQLITE_CONSTRAINT_UNIQUE),
+            ..
+        } => conflict,
+        error => E::from_fault(error),
+    }
+}
+
+/// The ports that share the `Storage` / `NotFoundOrNotAuthorized` / `TimedOut`
+/// / `Unavailable` vocabulary.
+macro_rules! store_fault_port {
+    ($($port:ident),+) => {$(
+        impl FromStoreFault for $port {
+            fn storage(failure: WorkStorageFailureV1) -> Self {
+                Self::Storage(failure)
+            }
+            fn denied() -> Self {
+                Self::NotFoundOrNotAuthorized
+            }
+            fn timed_out() -> Self {
+                Self::TimedOut
+            }
+            fn unavailable() -> Self {
+                Self::Unavailable
+            }
+        }
+    )+};
+}
+store_fault_port!(
+    WorkProductEventPortErrorV1,
+    WorkGraphReadPortErrorV1,
+    WorkEvidenceReadPortErrorV1,
+    WorkEvidenceRootReadErrorV1,
+    WorkProductAttemptAdmissionErrorV1
+);
+
+/// The history read answers in the application error directly.
+impl FromStoreFault for WorkProductApplicationErrorV1 {
+    fn storage(failure: WorkStorageFailureV1) -> Self {
+        Self::Storage(failure)
+    }
+    fn denied() -> Self {
+        Self::NotFoundOrNotAuthorized
+    }
+    fn timed_out() -> Self {
+        Self::TimedOut
+    }
+    fn unavailable() -> Self {
+        Self::EventAuthorityUnavailable
+    }
 }
 
 pub(crate) fn owner_params(scope: &AuthorizedWorkProductScopeV1) -> Vec<ExactSqlValue> {
@@ -169,13 +303,14 @@ pub(crate) struct CoveredJournalV1 {
 }
 
 /// Load the covered slice of the owner's journal and the versions readable from
-/// it. `None` is an undecodable store, which every caller turns into a typed
-/// unavailability rather than into an empty graph.
+/// it. A [`StoreFault`] is a store that could not be read or decoded, which
+/// every caller turns into its typed failure rather than into an empty graph.
 pub(crate) fn load_covered_journal(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
-) -> Option<CoveredJournalV1> {
-    let (journal, coverage) = covered_prefix(scope.selection(), load_journal(source, scope)?)?;
+) -> Result<CoveredJournalV1, StoreFault> {
+    let (journal, coverage) = covered_prefix(scope.selection(), load_journal(source, scope)?)
+        .ok_or(StoreFault::Corrupt("journal coverage"))?;
     let published = load_published_versions(source, scope)?
         .into_iter()
         // A version folded from an event outside the selection is not readable
@@ -186,7 +321,7 @@ pub(crate) fn load_covered_journal(
                 .is_none_or(|excluded| version.event_sequence < excluded)
         })
         .collect();
-    Some(CoveredJournalV1 {
+    Ok(CoveredJournalV1 {
         journal,
         published,
         coverage,
@@ -195,65 +330,69 @@ pub(crate) fn load_covered_journal(
 
 /// Load the owner's whole journal in canonical sequence order.
 ///
-/// `None` means the stored rows could not be decoded at all, which every caller
-/// turns into a typed unavailability rather than into an empty journal.
+/// A [`StoreFault`] means the rows could not be read or decoded, which every
+/// caller turns into a typed failure rather than into an empty journal.
 pub(crate) fn load_journal(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
-) -> Option<Vec<WorkProductJournalEntryV1>> {
+) -> Result<Vec<WorkProductJournalEntryV1>, StoreFault> {
     let rows = registered_work_query(
         source,
         "SELECT sequence, event_payload FROM work_product_events_v1
          WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
          ORDER BY sequence",
         owner_params(scope),
-    )
-    .ok()?;
+    )?;
     rows.rows
         .into_iter()
         .map(|row| {
+            let corrupt = || StoreFault::Corrupt("journal row");
             let sequence = exact_sql_integer(&row.values, 0)
                 .and_then(|value| u64::try_from(value).ok())
-                .and_then(|value| WorkProductEventSequenceV1::new(value).ok())?;
+                .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
+                .ok_or_else(corrupt)?;
             let event: WorkProductEventV1 =
-                serde_json::from_str(exact_sql_text(&row.values, 1)?).ok()?;
-            Some(WorkProductJournalEntryV1 { sequence, event })
+                serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
+                    .map_err(|_| corrupt())?;
+            Ok(WorkProductJournalEntryV1 { sequence, event })
         })
         .collect()
 }
 
 /// The owner's journal tail: the sequence and result version a new append must
-/// follow. `Some(None)` is an owner with no journal at all.
+/// follow. `Ok(None)` is an owner with no journal at all.
 #[allow(clippy::type_complexity)]
 pub(crate) fn load_journal_tail(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
-) -> Option<Option<(WorkProductEventSequenceV1, WorkGraphVersionV1)>> {
+) -> Result<Option<(WorkProductEventSequenceV1, WorkGraphVersionV1)>, StoreFault> {
     let rows = registered_work_query(
         source,
         "SELECT sequence, result_graph_version FROM work_product_events_v1
          WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
          ORDER BY sequence DESC LIMIT 1",
         owner_params(scope),
-    )
-    .ok()?;
+    )?;
     let Some(row) = rows.rows.first() else {
-        return Some(None);
+        return Ok(None);
     };
+    let corrupt = || StoreFault::Corrupt("journal tail");
     let sequence = exact_sql_integer(&row.values, 0)
         .and_then(|value| u64::try_from(value).ok())
-        .and_then(|value| WorkProductEventSequenceV1::new(value).ok())?;
+        .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
+        .ok_or_else(corrupt)?;
     let version = exact_sql_integer(&row.values, 1)
         .and_then(|value| u64::try_from(value).ok())
-        .and_then(|value| WorkGraphVersionV1::new(value).ok())?;
-    Some(Some((sequence, version)))
+        .and_then(|value| WorkGraphVersionV1::new(value).ok())
+        .ok_or_else(corrupt)?;
+    Ok(Some((sequence, version)))
 }
 
 /// Load every verified graph version this owner has published, oldest first.
 pub(crate) fn load_published_versions(
     source: &impl RegisteredWorkQuery,
     scope: &AuthorizedWorkProductScopeV1,
-) -> Option<Vec<WorkProductPublishedVersionV1>> {
+) -> Result<Vec<WorkProductPublishedVersionV1>, StoreFault> {
     let rows = registered_work_query(
         source,
         "SELECT graph_version, event_sequence, valid_at, observed_at, recovered_graph_digest
@@ -261,21 +400,25 @@ pub(crate) fn load_published_versions(
          WHERE owner_brain_id = ?1 AND owner_profile_id = ?2
          ORDER BY graph_version",
         owner_params(scope),
-    )
-    .ok()?;
+    )?;
     rows.rows
         .into_iter()
         .map(|row| {
-            Some(WorkProductPublishedVersionV1 {
+            let corrupt = || StoreFault::Corrupt("published version row");
+            Ok(WorkProductPublishedVersionV1 {
                 graph_version: exact_sql_integer(&row.values, 0)
                     .and_then(|value| u64::try_from(value).ok())
-                    .and_then(|value| WorkGraphVersionV1::new(value).ok())?,
+                    .and_then(|value| WorkGraphVersionV1::new(value).ok())
+                    .ok_or_else(corrupt)?,
                 event_sequence: exact_sql_integer(&row.values, 1)
                     .and_then(|value| u64::try_from(value).ok())
-                    .and_then(|value| WorkProductEventSequenceV1::new(value).ok())?,
-                valid_at: UtcMicros(exact_sql_integer(&row.values, 2)?),
-                observed_at: UtcMicros(exact_sql_integer(&row.values, 3)?),
-                recovered_graph_digest: exact_sql_text(&row.values, 4)?.to_owned(),
+                    .and_then(|value| WorkProductEventSequenceV1::new(value).ok())
+                    .ok_or_else(corrupt)?,
+                valid_at: UtcMicros(exact_sql_integer(&row.values, 2).ok_or_else(corrupt)?),
+                observed_at: UtcMicros(exact_sql_integer(&row.values, 3).ok_or_else(corrupt)?),
+                recovered_graph_digest: exact_sql_text(&row.values, 4)
+                    .ok_or_else(corrupt)?
+                    .to_owned(),
             })
         })
         .collect()
@@ -365,4 +508,85 @@ pub(crate) fn verified_version(
         ManifestDigest::new(published.recovered_graph_digest.clone()).ok()?,
     )
     .ok()
+}
+
+#[cfg(test)]
+mod store_fault_tests {
+    use super::*;
+
+    type Port = WorkProductEventPortErrorV1;
+
+    fn sqlite(extended_code: i32) -> ExactSqlError {
+        ExactSqlError::Sqlite {
+            operation: "execute",
+            code: Some(extended_code & 0xff),
+            extended_code: Some(extended_code),
+            message: "injected".to_owned(),
+        }
+    }
+
+    #[test]
+    fn only_a_primary_key_or_unique_violation_is_a_version_conflict() {
+        for conflict in [1555, 2067] {
+            assert_eq!(
+                insert_fault(sqlite(conflict), Port::VersionConflict),
+                Port::VersionConflict
+            );
+        }
+        // CHECK, trigger abort, I/O error, busy, and a lost writer all fail
+        // the insert without the revision having moved.
+        for other in [275, 1811, 778, 5] {
+            assert_eq!(
+                insert_fault(sqlite(other), Port::VersionConflict),
+                Port::Unavailable,
+                "SQLite code {other} must not read as a stale revision"
+            );
+        }
+        assert_eq!(
+            insert_fault(ExactSqlError::Busy, Port::VersionConflict),
+            Port::Storage(WorkStorageFailureV1::Busy)
+        );
+        assert_eq!(
+            insert_fault(ExactSqlError::WriterUnavailable, Port::VersionConflict),
+            Port::Unavailable
+        );
+    }
+
+    #[test]
+    fn each_exact_sql_category_keeps_its_own_answer() {
+        let classify = |fault: StoreFault| Port::from_fault(fault);
+        assert_eq!(
+            classify(ExactSqlError::Busy.into()),
+            Port::Storage(WorkStorageFailureV1::Busy)
+        );
+        assert_eq!(
+            classify(ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Saturated).into()),
+            Port::Storage(WorkStorageFailureV1::Busy)
+        );
+        assert_eq!(
+            classify(ExactSqlError::QueryLimitExceeded.into()),
+            Port::Storage(WorkStorageFailureV1::ResultLimitExceeded)
+        );
+        assert_eq!(
+            classify(StoreFault::Corrupt("journal row")),
+            Port::Storage(WorkStorageFailureV1::StoredDataInvalid)
+        );
+        assert_eq!(
+            classify(ExactSqlError::TransactionExpired.into()),
+            Port::TimedOut
+        );
+        assert_eq!(
+            classify(ExactSqlError::AuthorityDenied("secret".to_owned()).into()),
+            Port::NotFoundOrNotAuthorized
+        );
+        assert_eq!(
+            classify(ExactSqlError::WriterUnavailable.into()),
+            Port::Unavailable
+        );
+        // Draining admits nothing further, so it is not capacity to wait out.
+        assert_eq!(
+            classify(ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Draining).into()),
+            Port::Unavailable
+        );
+    }
 }

@@ -648,7 +648,7 @@ impl fmt::Display for WorkflowEffectAuthorityErrorV1 {
 
 impl std::error::Error for WorkflowEffectAuthorityErrorV1 {}
 
-pub trait WorkflowEffectAuthorityPortV1: Send + Sync {
+pub trait WorkflowEffectAuthorityPortV1 {
     /// Whether any effect is still before-effect or in-flight. An authority
     /// read failure must remain unavailable to cleanup callers.
     fn has_pending_effects(

@@ -244,7 +244,6 @@ pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublished
 // text artifact), and `reconcile` (the per-worktree scheduler). Re-export
 // every item the siblings, the tests, and the crate reach through this
 // module so no path outside the seam files changes.
-use publication_store::DaemonProjectionSinkV1;
 #[cfg(test)]
 pub use publication_store::{CodeIndexBytePoolStatsV1, HeldActiveDecodeV1};
 #[cfg(test)]

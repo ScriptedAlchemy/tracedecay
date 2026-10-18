@@ -569,7 +569,7 @@ fn install_prompt_rules(agents_md: &Path) -> Result<()> {
     let block = super::prompt_rules::standard_prompt_rules(
         PROMPT_RULE_MARKER,
         &PromptRulesOptions {
-            extra_paragraphs: &[],
+            extra_paragraphs: super::prompt_rules::SKILL_MANDATE_PARAGRAPHS,
         },
     );
     super::prompt_rules::reconcile_prompt_rules(agents_md, PROMPT_RULE_MARKER, &block)
@@ -660,6 +660,27 @@ mod tests {
             super::super::safe_write_text_file(&dir.join(relative), &rendered)?;
         }
         Ok(dir.to_path_buf())
+    }
+
+    /// Kimi ships the bundled skills but no SessionStart hook, so its AGENTS.md
+    /// rules carry the skill mandate, once, across a refresh.
+    #[test]
+    fn project_rules_carry_the_skill_mandate_once() {
+        let project = tempfile::tempdir().unwrap();
+        let agents_md = project.path().join("AGENTS.md");
+        std::fs::write(&agents_md, "operator notes\n").unwrap();
+        install_prompt_rules(&agents_md).unwrap();
+        install_prompt_rules(&agents_md).unwrap();
+        let rules = std::fs::read_to_string(&agents_md).unwrap();
+        assert!(rules.starts_with("operator notes\n"), "{rules}");
+        assert_eq!(
+            rules.matches("load `routing-tracedecay`").count(),
+            1,
+            "{rules}"
+        );
+        uninstall_prompt_rules(&agents_md).unwrap();
+        let remaining = std::fs::read_to_string(&agents_md).unwrap_or_default();
+        assert!(!remaining.contains("routing-tracedecay"), "{remaining}");
     }
 
     #[test]

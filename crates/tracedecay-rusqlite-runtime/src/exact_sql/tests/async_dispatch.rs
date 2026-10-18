@@ -543,3 +543,362 @@ fn a_reader_wait_on_the_native_blocking_pool_is_not_counted() {
     assert_eq!(rows.rows.len(), 1);
     assert_eq!(native_thread_reader_waits() - before, 0);
 }
+
+/// Collects the `call_site` of every storage-wait log record, process-wide,
+/// because the records are emitted from native worker threads.
+struct WaitLogCapture {
+    call_sites: Mutex<Vec<(tracing::Level, String)>>,
+}
+
+impl WaitLogCapture {
+    fn install() -> &'static Self {
+        static CAPTURE: std::sync::OnceLock<&'static WaitLogCapture> = std::sync::OnceLock::new();
+        CAPTURE.get_or_init(|| {
+            let capture: &'static WaitLogCapture = Box::leak(Box::new(WaitLogCapture {
+                call_sites: Mutex::new(Vec::new()),
+            }));
+            tracing::dispatcher::set_global_default(tracing::Dispatch::new(CaptureHandle(capture)))
+                .expect("no other test installs a global tracing subscriber");
+            capture
+        })
+    }
+
+    fn records_for(&self, call_site: &str) -> Vec<tracing::Level> {
+        self.call_sites
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, site)| site == call_site)
+            .map(|(level, _)| *level)
+            .collect()
+    }
+}
+
+struct CaptureHandle(&'static WaitLogCapture);
+
+struct CallSiteVisitor(Option<String>);
+
+impl tracing::field::Visit for CallSiteVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "call_site" {
+            self.0 = Some(format!("{value:?}"));
+        }
+    }
+}
+
+impl tracing::Subscriber for CaptureHandle {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut visitor = CallSiteVisitor(None);
+        event.record(&mut visitor);
+        if let Some(site) = visitor.0 {
+            self.0
+                .call_sites
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), site));
+        }
+    }
+}
+
+#[test]
+fn repeated_reader_waits_from_one_site_are_counted_but_logged_once() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let capture = WaitLogCapture::install();
+    let fixture = fixture('a', 'a');
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let before = native_thread_reader_waits();
+    let sites_before = native_thread_storage_wait_sites();
+    const READS: u64 = 5;
+    let task = crate::native_runtime::NativeTask::spawn(async move {
+        let mut rows = 0;
+        for _ in 0..READS {
+            rows += handle
+                .query(statement("SELECT 1", vec![]), Duration::from_secs(5))
+                .unwrap()
+                .rows
+                .len();
+        }
+        rows
+    })
+    .unwrap();
+    let outcome = crate::native_runtime::block_on(task.wait()).unwrap();
+    assert_eq!(
+        outcome,
+        crate::native_runtime::NativeTaskOutcome::Completed(READS as usize)
+    );
+    assert_eq!(native_thread_reader_waits() - before, READS);
+    let new_sites: Vec<_> = native_thread_storage_wait_sites()
+        .into_iter()
+        .filter(|site| !sites_before.contains(site))
+        .collect();
+    assert_eq!(new_sites.len(), 1, "one call site made every read");
+    assert_eq!(new_sites[0].hits, READS);
+    assert_eq!(
+        capture.records_for(&new_sites[0].call_site),
+        vec![tracing::Level::WARN],
+        "the first hit logs at WARN and later hits log nothing"
+    );
+}
+
+fn job_count(handle: &ExactSqlHandle) -> i64 {
+    match crate::native_runtime::block_on(handle.query_async(
+        statement("SELECT COUNT(*) FROM job_rows", vec![]),
+        Duration::from_secs(5),
+    ))
+    .unwrap()
+    .unwrap()
+    .rows[0]
+        .values[0]
+    {
+        ExactSqlValue::Integer(count) => count,
+        ref other => panic!("count is an integer, got {other:?}"),
+    }
+}
+
+fn job_fixture() -> (Fixture, ExactSqlHandle) {
+    let fixture = fixture('a', 'a');
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    crate::native_runtime::block_on(
+        handle.execute_batch_async("CREATE TABLE job_rows (value INTEGER NOT NULL)".to_owned()),
+    )
+    .unwrap()
+    .unwrap();
+    (fixture, handle)
+}
+
+#[test]
+fn a_write_job_and_an_awaited_read_on_a_native_worker_park_no_native_thread() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_fixture, handle) = job_fixture();
+    let writer_waits = native_thread_writer_waits();
+    let reader_waits = native_thread_reader_waits();
+    let worker_handle = handle.clone();
+    let task = crate::native_runtime::NativeTask::spawn(async move {
+        let committed = worker_handle
+            .transact(|transaction| {
+                transaction.execute(statement(
+                    "INSERT INTO job_rows (value) VALUES (?1)",
+                    vec![ExactSqlValue::Integer(7)],
+                ))?;
+                transaction
+                    .query(statement("SELECT COUNT(*) FROM job_rows", vec![]))
+                    .map(|rows| rows.rows.len())
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error: ExactSqlError| error.to_string())?;
+        let read = worker_handle
+            .query_async(
+                statement("SELECT value FROM job_rows", vec![]),
+                Duration::from_secs(5),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((committed, read.rows.len()))
+    })
+    .unwrap();
+    let outcome = crate::native_runtime::block_on(task.wait()).unwrap();
+    assert_eq!(
+        outcome,
+        crate::native_runtime::NativeTaskOutcome::Completed(Ok((1, 1)))
+    );
+    assert_eq!(
+        native_thread_writer_waits() - writer_waits,
+        0,
+        "the job ran on the writer thread without parking the worker"
+    );
+    assert_eq!(
+        native_thread_reader_waits() - reader_waits,
+        0,
+        "the awaited read ran on the blocking pool"
+    );
+}
+
+#[test]
+fn a_write_job_commits_on_ok_and_rolls_back_on_err() {
+    let (_fixture, handle) = job_fixture();
+    let insert = |value| {
+        statement(
+            "INSERT INTO job_rows (value) VALUES (?1)",
+            vec![ExactSqlValue::Integer(value)],
+        )
+    };
+
+    let refused = crate::native_runtime::block_on(handle.transact(move |transaction| {
+        transaction
+            .execute(insert(1))
+            .map_err(|error| error.to_string())?;
+        Err::<(), _>("refused after its write".to_owned())
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(refused, Err("refused after its write".to_owned()));
+    assert_eq!(job_count(&handle), 0, "a refused job leaves no row");
+
+    let committed = crate::native_runtime::block_on(handle.transact(move |transaction| {
+        transaction
+            .execute(insert(2))
+            .map(|result| result.changed_rows)
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(committed, Ok(1));
+    assert_eq!(job_count(&handle), 1, "an accepted job commits its row");
+}
+
+fn insert_job_row(value: i64) -> ExactSqlStatement {
+    statement(
+        "INSERT INTO job_rows (value) VALUES (?1)",
+        vec![ExactSqlValue::Integer(value)],
+    )
+}
+
+#[test]
+fn a_job_body_that_awaits_a_foreign_future_is_refused_and_rolled_back() {
+    let (_fixture, handle) = job_fixture();
+
+    let refused = crate::native_runtime::block_on(handle.transact_async(
+        JobPolicy::Bounded,
+        async |transaction| {
+            transaction
+                .execute(insert_job_row(1))
+                .map_err(|error| error.to_string())?;
+            crate::storage_pool::sleep(Duration::from_millis(1)).await;
+            Ok::<_, String>(())
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(refused, Err(ExactSqlError::JobAwaitedForeignFuture));
+    assert_eq!(job_count(&handle), 0, "the refused job's row rolled back");
+}
+
+#[test]
+fn an_async_job_body_over_several_statements_commits_and_returns_its_value() {
+    let (_fixture, handle) = job_fixture();
+    async fn insert(
+        transaction: &ExactSqlJobTransaction<'_>,
+        value: i64,
+    ) -> Result<usize, ExactSqlError> {
+        transaction
+            .execute(insert_job_row(value))
+            .map(|result| result.changed_rows)
+    }
+
+    let total = crate::native_runtime::block_on(handle.transact_async(
+        JobPolicy::Bounded,
+        async |transaction| {
+            insert(transaction, 1).await?;
+            insert(transaction, 2).await?;
+            transaction.execute_batch("INSERT INTO job_rows (value) VALUES (3);".to_owned())?;
+            let sum = transaction.query(statement("SELECT SUM(value) FROM job_rows", vec![]))?;
+            Ok::<_, ExactSqlError>(sum.rows[0].values[0].clone())
+        },
+    ))
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(total, Ok(ExactSqlValue::Integer(6)));
+    assert_eq!(
+        job_count(&handle),
+        3,
+        "every statement of the body committed"
+    );
+}
+
+#[test]
+fn a_long_lease_job_renews_its_lease_after_each_statement() {
+    let fixture = fixture('a', 'a');
+    let clock = FakeClock::frozen();
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
+        .unwrap()
+        .with_write_authority(Arc::new(FakeClockAuthority {
+            clock: Arc::clone(&clock),
+            advance: Some((
+                ExactSqlWriteIntent::Query,
+                EXACT_SQL_TRANSACTION_LIMIT * 2 / 3,
+            )),
+        }))
+        .unwrap();
+    let three_reads = |policy| {
+        crate::native_runtime::block_on(handle.transact_with_policy(policy, |transaction| {
+            (0..3).try_for_each(|_| transaction.query(statement("SELECT 1", vec![])).map(|_| ()))
+        }))
+        .unwrap()
+        .unwrap()
+    };
+
+    assert_eq!(three_reads(JobPolicy::AuthorizedLongLease), Ok(()));
+    assert!(
+        three_reads(JobPolicy::Bounded).is_err(),
+        "a bounded job outlives its one lease"
+    );
+}
+
+#[test]
+fn abandoned_commit_retains_completion_until_writer_settlement() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Resource(Arc<AtomicUsize>);
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.0.fetch_add(10, Ordering::AcqRel);
+        }
+    }
+    for commit_succeeds in [true, false] {
+        current_thread().block_on(async {
+            let fixture = fixture('a', 'a');
+            let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+            base.execute_batch("CREATE TABLE owned_commit (value INTEGER UNIQUE)".to_owned())
+                .unwrap();
+            let (handle, accepted, release) = gated_handle(&fixture, ExactSqlWriteIntent::Commit);
+            let transaction = handle.begin_immediate_async().await.unwrap();
+            transaction
+                .execute_async(statement("INSERT INTO owned_commit VALUES (1)", vec![]))
+                .await
+                .unwrap();
+            let state = Arc::new(AtomicUsize::new(0));
+            let resource = Resource(Arc::clone(&state));
+            let mut pending = Box::pin(transaction.commit_async_with_on_commit(move || {
+                resource.0.fetch_add(1, Ordering::AcqRel);
+                drop(resource);
+            }));
+            assert!(poll_once(pending.as_mut()).await.is_pending());
+            accepted.await.unwrap();
+            drop(pending);
+            assert_eq!(state.load(Ordering::Acquire), 0);
+            if commit_succeeds {
+                release.send(()).unwrap();
+            } else {
+                drop(release);
+            }
+            base.execute_async(statement("INSERT INTO owned_commit VALUES (2)", vec![]))
+                .await
+                .unwrap();
+            assert_eq!(
+                state.load(Ordering::Acquire),
+                if commit_succeeds { 11 } else { 10 }
+            );
+            let rows = base
+                .query(
+                    statement("SELECT value FROM owned_commit ORDER BY value", vec![]),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+            assert_eq!(rows.rows.len(), if commit_succeeds { 2 } else { 1 });
+        });
+    }
+}

@@ -33,9 +33,17 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "25"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states 25",
+          "pattern": "\\b25\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
   "seeded_fact": "discount_fact_id",
   "grade_feedback": true,

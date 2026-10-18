@@ -58,7 +58,7 @@ pub(super) fn entry(project_id: [u8; 16], generation: u64) -> ContextScoutDurabl
                 category: ContextScoutCategoryV1::Retrieval,
                 relevance_score: 10,
                 suggestion_text: "Use the saved diagnostic anchor.".to_owned(),
-                evidence: super::evidence::fixture_context_scout_evidence(),
+                evidence: super::evidence::fixture_context_scout_evidence().into(),
                 expires_at: UtcMicros(1_000),
             },
         },
@@ -97,6 +97,39 @@ pub(super) fn mutation_binding(
         operation,
         idempotency_key,
         input_digest: mutation.input_digest().unwrap(),
+    }
+}
+
+async fn deliver_by_lease(
+    store: &ProjectContextScoutDurableStoreV1,
+    work: ContextScoutWorkV1,
+    envelope_id: [u8; 16],
+    lease: ContextScoutLeaseV1,
+    configuration_revision: [u8; 32],
+    receipt: &ContextScoutDeliveryReceiptV1,
+    key: &str,
+) -> ContextScoutDurableStoreOutcomeV1 {
+    let mutation = ContextScoutPublicMutationV1::Delivery {
+        work,
+        envelope_id,
+        lease,
+        configuration_revision,
+        receipt: receipt.clone(),
+    };
+    let binding = mutation_binding(&mutation, key);
+    match store.commit_public_mutation(binding, mutation).await {
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(settlement) => {
+            match settlement.result {
+                ContextScoutMutationResultV1::Delivery { outcome, .. } => outcome,
+                other => panic!("delivery settled as {other:?}"),
+            }
+        }
+        ContextScoutMutationSettlementOutcomeV1::Unavailable => {
+            ContextScoutDurableStoreOutcomeV1::Unavailable
+        }
+        ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict => {
+            panic!("delivery key {key} is bound to another input")
+        }
     }
 }
 
@@ -421,15 +454,16 @@ async fn delivery_by_lease_refuses_foreign_and_stale_claim_authority() {
     };
 
     assert_eq!(
-        store
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                lease(53, 20),
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &store,
+            pending.work,
+            pending.envelope.envelope_id,
+            lease(53, 20),
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-1",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Superseded
     );
     assert!(matches!(
@@ -444,27 +478,29 @@ async fn delivery_by_lease_refuses_foreign_and_stale_claim_authority() {
         ContextScoutDurableClaimOutcomeV1::Claimed(_)
     ));
     assert_eq!(
-        store
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                stale_lease,
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &store,
+            pending.work,
+            pending.envelope.envelope_id,
+            stale_lease,
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-2",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Superseded
     );
     assert_eq!(
-        store
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                current_lease,
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &store,
+            pending.work,
+            pending.envelope.envelope_id,
+            current_lease,
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-3",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Stored
     );
 }
@@ -495,15 +531,16 @@ async fn delivery_by_lease_persists_exact_receipt_and_idempotent_authority() {
         outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
     assert_eq!(
-        store
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                delivery_lease,
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &store,
+            pending.work,
+            pending.envelope.envelope_id,
+            delivery_lease,
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-4",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Stored
     );
     drop(store);
@@ -511,27 +548,29 @@ async fn delivery_by_lease_persists_exact_receipt_and_idempotent_authority() {
     let restarted =
         ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
     assert_eq!(
-        restarted
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                delivery_lease,
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &restarted,
+            pending.work,
+            pending.envelope.envelope_id,
+            delivery_lease,
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-5",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Duplicate
     );
     assert_eq!(
-        restarted
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                lease(63, 40),
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &restarted,
+            pending.work,
+            pending.envelope.envelope_id,
+            lease(63, 40),
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-6",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Superseded
     );
     let mut foreign_address = pending.work.address;
@@ -683,6 +722,65 @@ async fn older_work_generation_cannot_replace_newer_durable_entry() {
 }
 
 #[tokio::test]
+async fn a_claimed_or_delivered_suggestion_is_never_replaced_by_its_rejudged_copy() {
+    let (_temporary, database) = database().await;
+    let project_id = [70; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
+    let first = entry(project_id, 1);
+    assert_eq!(
+        store.enqueue(first.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let ContextScoutDurableClaimOutcomeV1::Claimed(claim) = store
+        .claim(address(project_id), UtcMicros(10), lease(71, 40))
+        .await
+    else {
+        panic!("the first suggestion claims");
+    };
+    let mut rejudged = entry(project_id, 2);
+    rejudged.envelope.envelope_id = [72; 16];
+    assert_eq!(
+        store.enqueue(rejudged.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Duplicate,
+        "a suggestion mid-delivery keeps its claim"
+    );
+    let receipt = ContextScoutDeliveryReceiptV1 {
+        receipt_id: [73; 16],
+        envelope_id: first.envelope.envelope_id,
+        delivered_at: UtcMicros(20),
+        outcome: ContextScoutDeliveryOutcomeV1::Displayed,
+    };
+    assert_eq!(
+        store.record_delivery(&claim, &receipt).await,
+        ContextScoutDurableStoreOutcomeV1::Stored,
+        "the claimed suggestion is still the one delivered"
+    );
+    let mut rejudged_work = first.clone();
+    rejudged_work.envelope.envelope_id = [77; 16];
+    assert_eq!(
+        store.enqueue(rejudged_work).await,
+        ContextScoutDurableStoreOutcomeV1::Duplicate,
+        "the delivered work judged again under a restarted generation is a duplicate"
+    );
+    rejudged.work.generation = 3;
+    rejudged.envelope.envelope_id = [74; 16];
+    assert_eq!(
+        store.enqueue(rejudged.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Duplicate,
+        "a delivered suggestion is not queued again"
+    );
+    rejudged.work.generation = 4;
+    rejudged.envelope.envelope_id = [75; 16];
+    rejudged.envelope.candidate.dedupe_key = [76; 32];
+    assert_eq!(
+        store.enqueue(rejudged).await,
+        ContextScoutDurableStoreOutcomeV1::Stored,
+        "another suggestion at the address still enqueues"
+    );
+}
+
+#[tokio::test]
 async fn exact_project_scope_and_durable_generation_are_enforced() {
     let (_temporary, database) = database().await;
     let project_id = [8; 16];
@@ -695,18 +793,23 @@ async fn exact_project_scope_and_durable_generation_are_enforced() {
     );
 
     let mut dirty = entry(project_id, 1);
-    dirty.envelope.candidate.evidence.content =
-        tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
-            session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
-            owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
-            agent_id: None,
-            document_version: 1,
-            overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
-                "sha256:{}",
-                "f".repeat(64)
-            ))
-            .unwrap(),
-        };
+    dirty
+        .envelope
+        .candidate
+        .evidence
+        .as_code_mut()
+        .unwrap()
+        .content = tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
+        session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
+        owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
+        agent_id: None,
+        document_version: 1,
+        overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
+            "sha256:{}",
+            "f".repeat(64)
+        ))
+        .unwrap(),
+    };
     assert_eq!(
         store.enqueue(dirty).await,
         ContextScoutDurableStoreOutcomeV1::Unavailable
@@ -916,6 +1019,62 @@ async fn legacy_delivery_provenance_resets_without_replaying_receipts() {
             deliveries: Vec::new(),
             omitted: 0,
         })
+    );
+}
+
+#[tokio::test]
+async fn untagged_candidate_evidence_resets_instead_of_failing_decode() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database.clone(), project_id)
+            .expect("owned project store");
+    let queued = entry(project_id, 1);
+    assert_eq!(
+        store.enqueue(queued.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let current = database
+        .get_metadata("agents.context-scout.durable.v1")
+        .await
+        .expect("current metadata read")
+        .expect("current document");
+    let mut legacy = serde_json::from_str::<serde_json::Value>(&current).expect("current json");
+    let evidence = legacy
+        .pointer_mut("/entries/0/entry/envelope/candidate/evidence")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("tagged evidence");
+    assert_eq!(
+        evidence.remove("kind"),
+        Some(serde_json::Value::String("code".to_owned()))
+    );
+    let legacy_json = legacy.to_string();
+    assert!(
+        serde_json::from_value::<ContextScoutDurableQueueEntryV1>(
+            legacy["entries"][0]["entry"].clone()
+        )
+        .is_err(),
+        "the pre-union shape must not decode into the current entry"
+    );
+    database
+        .set_metadata("agents.context-scout.durable.v1", &legacy_json)
+        .await
+        .expect("legacy Context Scout state");
+
+    assert_eq!(
+        store.startup(UtcMicros(31), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Reset
+    );
+    assert_eq!(
+        store.startup(UtcMicros(32), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Ready {
+            entries: Vec::new(),
+            truncated: false,
+        }
+    );
+    assert_eq!(
+        store.enqueue(entry(project_id, 2)).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
     );
 }
 

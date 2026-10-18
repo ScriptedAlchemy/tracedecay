@@ -14,9 +14,7 @@ use tracedecay_graph_db::NeverCancelled;
 
 use crate::{
     cross_file_import_calls::{fixture_files, fixture_tree_request, publish_fixture_tree},
-    production_orchestration::{
-        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config,
-    },
+    production_orchestration::{ActiveControl, SharedPublicationStore, config},
     support::{PartitionedSealV1, cold_generation},
     typescript_module_resolution::reader,
 };
@@ -84,8 +82,7 @@ fn increment(
     Arc<CodeIndexPublishedGenerationV1>,
 ) {
     let owner = |store: &SharedPublicationStore| {
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner")
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner")
     };
     let paths = |files: &[(String, String)]| files.iter().map(|(path, _)| path.clone()).collect();
     let mut files = fixture_files(Path::new(FIXTURE_ROOT));

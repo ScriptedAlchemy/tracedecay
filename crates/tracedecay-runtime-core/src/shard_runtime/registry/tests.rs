@@ -276,7 +276,11 @@ async fn shutdown_close_cancels_and_joins_an_in_flight_open() {
         .unwrap()
         .spawn({
             let registry = registry.clone();
-            move |_| async move { registry.close_idle_for_shutdown().await }
+            move |_| async move {
+                registry
+                    .close_idle_for_shutdown(std::time::Instant::now())
+                    .await
+            }
         })
         .unwrap();
     asupersync::time::timeout(
@@ -653,7 +657,13 @@ async fn cancelling_an_open_waiter_preserves_owned_publication_and_shutdown_drai
     };
     let binding = published.binding().clone();
     drop((published, request, pin));
-    assert_eq!(registry.close_idle_for_shutdown().await.unwrap(), 2);
+    assert_eq!(
+        registry
+            .close_idle_for_shutdown(std::time::Instant::now())
+            .await
+            .unwrap(),
+        2
+    );
     assert!(matches!(
         registry.lookup(&binding),
         StoreRuntimeLookup::Missing { .. }

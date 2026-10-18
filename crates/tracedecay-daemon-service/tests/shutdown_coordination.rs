@@ -47,7 +47,7 @@ async fn timed_out_waiter_does_not_cancel_the_owned_shutdown() {
             .await
     });
 
-    release.notify_waiters();
+    release.notify_one();
     assert_eq!(second.await.expect("second waiter"), ShutdownStatus::Clean);
     assert_eq!(
         attempts.load(Ordering::Acquire),
@@ -108,7 +108,10 @@ async fn cancelled_waiter_does_not_cancel_the_owned_shutdown() {
             )
             .await
     });
-    release.notify_waiters();
+    // The owned work runs on the native runtime, so it may not have reached
+    // `release.notified()` yet. `notify_one` stores a permit for it;
+    // `notify_waiters` would be lost and the retry would wait out its deadline.
+    release.notify_one();
 
     assert_eq!(retry.await.expect("retry waiter"), ShutdownStatus::Clean);
     assert_eq!(attempts.load(Ordering::Acquire), 1);

@@ -410,10 +410,9 @@ async fn build_template(dest: &Path) -> io::Result<()> {
 
     purge_configuration(&sessions_db_path)?;
     purge_global_registry(&global_db_path).await?;
-    let built_fingerprint = tracedecay_runtime_core::db::migrations::schema_fingerprint_rusqlite(
-        &Connection::open(&graph_db_path).map_err(io_other)?,
-    )
-    .map_err(io_other)?;
+    let built_fingerprint =
+        tracedecay_runtime_core::db::migrations::schema_fingerprint(&graph_db_path)
+            .map_err(io_other)?;
     let expected_fingerprint =
         tracedecay_runtime_core::db::migrations::expected_final_schema_fingerprint()
             .map_err(io_other)?;

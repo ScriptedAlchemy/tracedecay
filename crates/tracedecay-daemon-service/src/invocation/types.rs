@@ -17,6 +17,16 @@ pub enum HookOrchestrationTriggerV1 {
     SavedEdit,
     Stop,
     Explicit,
+    /// The session intent pass. It owns its own per-session work address and
+    /// permits, so it supersedes only older intent work for the session and
+    /// never cancels, joins, or starves the feedback producer.
+    IntentBoundary,
+}
+
+impl HookOrchestrationTriggerV1 {
+    const fn is_intent(self) -> bool {
+        matches!(self, Self::IntentBoundary)
+    }
 }
 
 #[derive(Clone)]
@@ -46,9 +56,16 @@ impl HookOrchestrationRequestV1 {
         } else {
             match &hook.envelope().event {
                 HookEventV2::SavedEdit { .. } => HookOrchestrationTriggerV1::SavedEdit,
+                // A stop boundary owes the feedback producer; its intent pass
+                // is the companion request `intent_companion` derives.
                 HookEventV2::SessionBoundary {
                     boundary: HookBoundaryV1::End | HookBoundaryV1::TurnComplete,
                 } => HookOrchestrationTriggerV1::Stop,
+                HookEventV2::PromptBoundary
+                | HookEventV2::ToolLifecycle {
+                    phase: HookLifecyclePhaseV1::Completed | HookLifecyclePhaseV1::Failed,
+                    ..
+                } => HookOrchestrationTriggerV1::IntentBoundary,
                 _ => return None,
             }
         };
@@ -60,6 +77,20 @@ impl HookOrchestrationRequestV1 {
             explicit_request_id: None,
             completion: None,
         })
+    }
+
+    /// The best-effort intent pass a native stop boundary also owes. It owes
+    /// no durable producer work, so it carries no completion.
+    pub fn intent_companion(&self) -> Option<Self> {
+        (self.trigger == HookOrchestrationTriggerV1::Stop && self.explicit_request_id.is_none())
+            .then(|| Self {
+                hook: self.hook.clone(),
+                lifecycle: self.lifecycle.clone(),
+                hook_configuration_revision: self.hook_configuration_revision,
+                trigger: HookOrchestrationTriggerV1::IntentBoundary,
+                explicit_request_id: None,
+                completion: None,
+            })
     }
 }
 
@@ -88,12 +119,14 @@ type HookOrchestrationWorkV1 = dyn Fn(
     ) -> HookOrchestrationFutureV1
     + Send
     + Sync;
-/// Native admissions share one cycle for the same project, worktree, and
-/// hook event. An explicit request also carries its public effect
+/// Native admissions share one cycle for the same project, worktree, hook
+/// event, and lane. An explicit request also carries its public effect
 /// identity, so its retries join each other without joining native delivery.
-type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16], Option<ManifestDigest>);
-/// Stable per-session work address. A newer boundary at the same address
-/// supersedes the running one instead of queueing behind it.
+/// The lane flag keeps a stop boundary's intent pass from joining the
+/// feedback cycle of the same event.
+type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16], Option<ManifestDigest>, bool);
+/// Stable per-session work address of one lane. A newer boundary at the same
+/// address supersedes the running one instead of queueing behind it.
 type HookOrchestrationAddressV1 = String;
 type HookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -156,6 +189,9 @@ pub const MAX_COALESCED_HOOK_COMPLETIONS: usize = 32;
 /// permit and coalescing bounds is backpressured instead of queued.
 pub struct BoundedHookOrchestratorV1 {
     permits: Arc<Semaphore>,
+    /// The intent lane's own bound: a slow decision engine can hold these, never
+    /// the feedback producer's.
+    intent_permits: Arc<Semaphore>,
     work: Arc<HookOrchestrationWorkV1>,
     in_flight: Arc<StdMutex<HookOrchestrationInFlightV1>>,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
@@ -182,6 +218,7 @@ impl BoundedHookOrchestratorV1 {
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
+                intent_permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
                 in_flight: Arc::new(StdMutex::new(HookOrchestrationInFlightV1::default())),
                 cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
@@ -190,9 +227,16 @@ impl BoundedHookOrchestratorV1 {
         })
     }
 
-    fn stable_address(envelope: &HookEventEnvelopeV2) -> Option<HookOrchestrationAddressV1> {
+    fn stable_address(
+        envelope: &HookEventEnvelopeV2,
+        intent: bool,
+    ) -> Option<HookOrchestrationAddressV1> {
         canonical_sha256(&(
-            "tracedecay.advisory-hook-address.v1",
+            if intent {
+                "tracedecay.intent-hook-address.v1"
+            } else {
+                "tracedecay.advisory-hook-address.v1"
+            },
             envelope.project_id,
             envelope.repository_id,
             envelope.worktree_id,
@@ -207,6 +251,7 @@ impl BoundedHookOrchestratorV1 {
         address: &HookOrchestrationAddressV1,
         operation: &Arc<HookOrchestrationInFlightEntryV1>,
         emit_terminal: bool,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let completions = {
             let mut in_flight = in_flight
@@ -233,12 +278,26 @@ impl BoundedHookOrchestratorV1 {
             {
                 in_flight.events.remove(&operation.event);
             }
+            // Admission checks the in-flight maps and takes a permit under
+            // this lock, so the cycle leaves both in one step: no admission
+            // sees it gone yet still holding its permit, or sees its permit
+            // free while it still looks in flight. Its terminals, the host's
+            // cue to send the session's next boundary, follow.
+            drop(permit);
             completions
         };
         if emit_terminal {
             for completion in completions {
                 completion();
             }
+        }
+    }
+
+    const fn lane_permits(&self, intent: bool) -> &Arc<Semaphore> {
+        if intent {
+            &self.intent_permits
+        } else {
+            &self.permits
         }
     }
 
@@ -257,7 +316,7 @@ impl BoundedHookOrchestratorV1 {
         envelope: &HookEventEnvelopeV2,
         lifecycle: ContextScoutLifecycleAddressV1,
     ) {
-        let parked = Self::stable_address(envelope)
+        let parked = Self::stable_address(envelope, false)
             .and_then(|address| self.in_flight.lock().ok()?.parked.get(&address).cloned());
         if let Some(mut request) = parked {
             request.lifecycle = Some(lifecycle);
@@ -274,13 +333,15 @@ impl BoundedHookOrchestratorV1 {
         HookOrchestrationAdmissionV1,
     > {
         let envelope = request.hook.envelope();
+        let intent = request.trigger.is_intent();
         let event = (
             envelope.project_id,
             envelope.worktree_id,
             envelope.event_id,
             request.explicit_request_id.clone(),
+            intent,
         );
-        let Some(address) = Self::stable_address(envelope) else {
+        let Some(address) = Self::stable_address(envelope, intent) else {
             return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         let Ok(mut task_owner) = self.task_owner.lock() else {
@@ -345,7 +406,7 @@ impl BoundedHookOrchestratorV1 {
                 incumbent.cancellation.cancel();
                 None
             } else {
-                let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                let Ok(permit) = Arc::clone(self.lane_permits(intent)).try_acquire_owned() else {
                     return Err(HookOrchestrationAdmissionV1::Backpressured);
                 };
                 Some(permit)
@@ -368,7 +429,7 @@ impl BoundedHookOrchestratorV1 {
         let work = Arc::clone(&self.work);
         let in_flight = Arc::clone(&self.in_flight);
         let cancellation = self.cancellation.clone();
-        let permits = Arc::clone(&self.permits);
+        let permits = Arc::clone(self.lane_permits(intent));
         let operation_cancellation = operation.cancellation.clone();
         let spawned_in_flight = Arc::clone(&in_flight);
         let spawned_address = address.clone();
@@ -388,14 +449,14 @@ impl BoundedHookOrchestratorV1 {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, None);
                 return;
             };
             if cancellation.is_cancelled() || work_cancellation.is_cancelled() {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, Some(permit));
                 return;
             }
             let resumable = request.clone();
@@ -455,8 +516,13 @@ impl BoundedHookOrchestratorV1 {
                         .load(std::sync::atomic::Ordering::Acquire)
                 }
             };
-            Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
-            drop(permit);
+            Self::settle_operation(
+                &in_flight,
+                &address,
+                &operation,
+                emit_terminal,
+                Some(permit),
+            );
         });
         let Ok(task) = task else {
             Self::settle_operation(
@@ -464,6 +530,7 @@ impl BoundedHookOrchestratorV1 {
                 &spawned_address,
                 &spawned_operation,
                 false,
+                None,
             );
             return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
@@ -614,8 +681,21 @@ pub fn admit_registered_hook_orchestration(
     let Some(runtime) = registered_hook_orchestrator(request.hook.envelope()) else {
         return HookOrchestrationAdmissionV1::Unavailable;
     };
+    if request.trigger.is_intent()
+        && let Some(lifecycle) = request.lifecycle.clone()
+    {
+        runtime.resume_parked(request.hook.envelope(), lifecycle);
+    }
+    let intent_companion = request.intent_companion();
     request.completion = completion;
-    runtime.admit(request)
+    let admission = runtime.admit(request);
+    // The stop boundary's own admission is what the hook reports; its intent
+    // pass is best-effort and admitted after it so it can never take the
+    // permit the owed feedback work needs.
+    if let Some(intent_companion) = intent_companion {
+        let _ = runtime.admit(intent_companion);
+    }
+    admission
 }
 
 fn registered_hook_orchestrator(
@@ -863,6 +943,11 @@ pub struct RegisteredWorkRuntime {
 }
 
 impl RegisteredWorkRuntime {
+    /// The registered grant, bounded to one request observed at `observed_at`.
+    pub(crate) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
+        mounted_grant_at(&self.grant, observed_at)
+    }
+
     /// Cancel every retained background recovery owner without awaiting.
     ///
     /// Hoisted out of [`Self::shut_down_background_recovery`] so daemon
@@ -898,6 +983,13 @@ pub struct RegisteredRetainedRuntime {
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
     pub(super) ports: Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+}
+
+impl RegisteredRetainedRuntime {
+    /// The registered grant, bounded to one request observed at `observed_at`.
+    pub(super) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
+        mounted_grant_at(&self.grant, observed_at)
+    }
 }
 
 pub struct RegisteredFeedbackRuntime {
@@ -1322,6 +1414,13 @@ pub struct AuthorizedDaemonLspWorkspace {
 }
 
 impl DaemonLspInvocationOwner {
+    /// The scope grant, bounded to one request observed at `observed_at`.
+    pub(super) fn scope_grant_at(&self, observed_at: UtcMicros) -> Option<CapabilityGrantSnapshot> {
+        self.scope_grant
+            .as_ref()
+            .map(|grant| mounted_grant_at(grant, observed_at))
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn for_test_project(
         factory: Arc<DaemonLspSessionFactory>,
@@ -1421,31 +1520,32 @@ pub(super) struct SharedGitTransactionPort {
 }
 
 impl GitIndexTransactionPort for SharedGitTransactionPort {
-    fn preview(
+    async fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
     ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
-        self.service.preview(request)
+        self.service.preview(request).await
     }
 
-    fn apply(
+    async fn apply(
         &self,
         request: &GitIndexApplyRequestV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.cancellation.as_ref().map_or_else(
-            || self.service.apply(request),
-            |emitter| {
+        match &self.cancellation {
+            None => self.service.apply(request).await,
+            Some(emitter) => {
                 self.service
                     .apply_cancellable(request, || emitter.cancellation_requested_at())
-            },
-        )
+                    .await
+            }
+        }
     }
 
-    fn recover(
+    async fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError> {
-        self.service.recover(request)
+        self.service.recover(request).await
     }
 }
 

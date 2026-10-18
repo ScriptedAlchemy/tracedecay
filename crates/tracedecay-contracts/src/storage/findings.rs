@@ -43,7 +43,28 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
         DoctorStorageFindingKindV1::RetentionBacklog => "retention_backlog",
         DoctorStorageFindingKindV1::TableGrowth => "table_growth",
         DoctorStorageFindingKindV1::PendingSchemaMigration => "pending_schema_migration",
+        DoctorStorageFindingKindV1::WalCheckpointPinned => "wal_checkpoint_pinned",
     }
+}
+
+/// Report a store whose WAL checkpoint outlived its fence: `holders` names
+/// what still holds a read slot (a reader of this daemon or another process)
+/// and the WAL size. The log grows until the holder lets go, so the finding
+/// is `Degraded` with complete coverage: the writer observed it directly.
+pub fn wal_checkpoint_pinned_finding(
+    store: &StoreKeyV1,
+    holders: &str,
+) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
+    let kind = DoctorStorageFindingKindV1::WalCheckpointPinned;
+    let finding = problem_finding(
+        kind,
+        store,
+        DoctorEvidenceStateV1::Degraded,
+        DoctorCoverageCompletenessV1::Complete,
+        holders,
+        "the WAL checkpoint fence expired with its read slot still held",
+    )?;
+    DoctorStorageFindingV1::new(kind, finding)
 }
 
 /// Report a store whose historical schema migrations have not completed.
@@ -246,12 +267,12 @@ pub fn table_growth_finding(
             "denied".to_string(),
             "table payload growth measurement was denied",
         ),
-        TableGrowthDoctorEvidenceV1::Unknown { store } => (
+        TableGrowthDoctorEvidenceV1::Unknown { store, reason } => (
             store,
             DoctorEvidenceStateV1::Unknown,
             DoctorCoverageCompletenessV1::Unknown,
-            "unknown".to_string(),
-            "table payload growth measurement is unavailable",
+            format!("unknown.{}", reason.as_str()),
+            reason.statement(),
         ),
     };
     let finding = DoctorFindingV1::new(
@@ -562,7 +583,9 @@ mod tests {
     use super::*;
     use crate::storage::debris::{IncidentDebrisArtifactV1, IncidentDebrisScanV1};
     use crate::storage::identity::{RelativeArtifactPathV1, StorageByteSizeV1, TableNameV1};
-    use crate::storage::telemetry::{StoreSizeSampleV1, TableGrowthDoctorEvidenceV1};
+    use crate::storage::telemetry::{
+        StoreSizeSampleV1, TableGrowthDoctorEvidenceV1, TableGrowthUnavailableReasonV1,
+    };
     use tracedecay_domain::UtcMicros;
 
     fn store() -> StoreKeyV1 {
@@ -626,11 +649,18 @@ mod tests {
         assert_eq!(baseline.finding().state(), DoctorEvidenceStateV1::Partial);
         assert!(only_evidence(&baseline).contains("baseline-pending"));
 
-        let unknown =
-            table_growth_finding(&TableGrowthDoctorEvidenceV1::Unknown { store: store() })
-                .expect("unknown finding");
+        let unknown = table_growth_finding(&TableGrowthDoctorEvidenceV1::Unknown {
+            store: store(),
+            reason: TableGrowthUnavailableReasonV1::StorageCorrupt,
+        })
+        .expect("unknown finding");
         assert_eq!(unknown.finding().state(), DoctorEvidenceStateV1::Unknown);
         assert!(!only_evidence(&unknown).contains("0b"));
+        assert!(only_evidence(&unknown).ends_with("unknown.storage_corrupt"));
+        assert_eq!(
+            unknown.finding().coverage().statement(),
+            "table payload growth is unmeasured: the store reported corruption"
+        );
     }
 
     #[test]

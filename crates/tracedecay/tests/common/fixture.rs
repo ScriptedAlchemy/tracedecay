@@ -815,22 +815,83 @@ fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
             format!("{} already holds a git repository", dest.display()),
         ));
     }
-    copy_tree_contents(src, dest)
+    copy_fixture_tree(src, dest)
 }
 
-fn copy_tree_contents(src: &Path, dest: &Path) -> io::Result<()> {
+/// Copies fixture inputs into writable scratch, retaining executable bits.
+pub fn copy_fixture_tree(src: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();
         let to = dest.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_tree_contents(&from, &to)?;
+            copy_fixture_tree(&from, &to)?;
         } else {
             fs::copy(&from, &to)?;
+            let mut permissions = fs::metadata(&to)?.permissions();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                permissions.set_mode(permissions.mode() | 0o200);
+            }
+            #[cfg(not(unix))]
+            permissions.set_readonly(false);
+            fs::set_permissions(&to, permissions)?;
         }
     }
     Ok(())
+}
+
+#[test]
+fn readonly_fixture_copies_can_be_overlaid_and_edited() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("source");
+    fs::create_dir_all(source.join("nested")).unwrap();
+    let input = source.join("nested/input.rs");
+    fs::write(&input, "original").unwrap();
+    let mut permissions = fs::metadata(&input).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&input, permissions).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = source.join("executable");
+        fs::write(&executable, "executable").unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    let destination = scratch.path().join("destination");
+    copy_fixture_tree(&source, &destination).unwrap();
+    copy_fixture_tree(&source, &destination).unwrap();
+    fs::write(destination.join("nested/input.rs"), "edited").unwrap();
+    assert_eq!(fs::read_to_string(&input).unwrap(), "original");
+    assert!(fs::metadata(&input).unwrap().permissions().readonly());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(destination.join("executable"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0o111,
+        );
+        assert_eq!(
+            fs::metadata(&input).unwrap().permissions().mode() & 0o111,
+            fs::metadata(destination.join("nested/input.rs"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+        );
+    }
+    #[cfg(windows)]
+    {
+        let mut permissions = fs::metadata(&input).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&input, permissions).unwrap();
+    }
 }
 
 /// The one report the TypeScript fixture's compiler prints, byte-for-byte the

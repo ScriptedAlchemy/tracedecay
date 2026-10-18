@@ -227,6 +227,7 @@ impl HostAdmissionFacade<'_> {
                     tracing::warn!(
                         error = %error.durable_detail(),
                         observation = observation_id.as_str(),
+                        database = %database.db_path().display(),
                         "projection store operation failed during host drain"
                     );
                     return Err(projection_error_outcome(&error));
@@ -317,7 +318,7 @@ impl HostAdmissionFacade<'_> {
                         + '_,
                 >,
             > = Box::pin(database.converge_session_git_evidence(
-                &SystemGit,
+                std::sync::Arc::new(SystemGit),
                 self.authorities.project_root.as_deref(),
             ));
             let convergence = git_evidence.await;

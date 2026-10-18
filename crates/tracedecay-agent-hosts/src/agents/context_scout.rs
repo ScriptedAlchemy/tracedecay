@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_contracts::context_scout::{
-    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
-    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
-    ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutAddressV1, ContextScoutCandidateEvidenceV1, ContextScoutCandidateV1,
+    ContextScoutCategoryV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
+    ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
     ContextScoutEvidenceAvailabilityV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
     ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
     ContextScoutModelReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
@@ -31,8 +31,11 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 use tracedecay_tokenizer::o200k_base;
 
 pub mod address_registry;
+pub mod decision_engine;
+pub mod intent_pass;
 pub mod model;
 pub mod owner;
+pub mod session_window;
 
 const MAX_SCOUT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_SCOUT_CANDIDATES: usize = 32;
@@ -47,7 +50,10 @@ mod store;
 #[cfg(test)]
 mod store_tests;
 
-pub use evidence::ContextScoutEvidenceEnvelopeExt;
+pub use evidence::{
+    ContextScoutCandidateEvidenceExt, ContextScoutEvidenceEnvelopeExt,
+    ContextScoutSessionClaimInputV1, ContextScoutSessionEvidenceExt,
+};
 pub use store::ProjectContextScoutDurableStoreV1;
 
 pub(crate) trait ContextScoutAddressExt {
@@ -78,11 +84,18 @@ pub(crate) trait ContextScoutCandidateExt {
 
 impl ContextScoutCandidateExt for ContextScoutCandidateV1 {
     fn validate(&self, limits: ContextScoutLimitsV1) -> Result<(), ContextScoutErrorV1> {
+        // Code evidence cites at least one anchor; session evidence cites
+        // none, its window digest is the citation.
+        let anchors_in_bounds = match &self.evidence {
+            ContextScoutCandidateEvidenceV1::Code(_) => {
+                (1..=limits.max_evidence).contains(&self.evidence.anchor_count())
+            }
+            ContextScoutCandidateEvidenceV1::Session(_) => self.evidence.anchor_count() == 0,
+        };
         if self.dedupe_key == [0; 32]
             || !safe_suggestion_text(&self.suggestion_text)
             || self.suggestion_text.len() > limits.max_text_bytes
-            || self.evidence.anchor_count() == 0
-            || self.evidence.anchor_count() > limits.max_evidence
+            || !anchors_in_bounds
             || self.expires_at.0 <= 0
         {
             return Err(ContextScoutErrorV1::InvalidCandidate);
@@ -148,6 +161,8 @@ pub enum ContextScoutTriggerV1 {
     SavedEdit,
     StopBoundary,
     ExplicitRequest,
+    /// A session intent pass at a prompt, completed-tool, or stop boundary.
+    IntentBoundary,
 }
 
 /// Content-free daemon receptivity state. The selector owns delivery timing;
@@ -183,7 +198,9 @@ pub const fn select_context_scout_delivery_window(
     }
     match input.trigger {
         ContextScoutTriggerV1::SavedEdit => ContextScoutDeliveryWindowV1::NextBoundary,
-        ContextScoutTriggerV1::StopBoundary => ContextScoutDeliveryWindowV1::Immediate,
+        ContextScoutTriggerV1::StopBoundary | ContextScoutTriggerV1::IntentBoundary => {
+            ContextScoutDeliveryWindowV1::Immediate
+        }
         ContextScoutTriggerV1::ExplicitRequest => ContextScoutDeliveryWindowV1::OnRequest,
     }
 }
@@ -203,6 +220,8 @@ pub enum ContextScoutSuppressionV1 {
     EvidencePartial,
     EvidenceStale,
     EvidenceUnavailable,
+    /// A suggestion for the same session is already pending delivery.
+    PendingSibling,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,7 +292,7 @@ pub enum ContextScoutMutationOperationV1 {
 }
 
 impl ContextScoutMutationOperationV1 {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Cancel => "context_scout_cancel",
             Self::Claim => "context_scout_claim",
@@ -391,7 +410,7 @@ pub fn select_deterministic_context_scout(
             saw_unavailable = true;
             continue;
         }
-        match candidate.evidence.availability {
+        match candidate.evidence.availability() {
             ContextScoutEvidenceAvailabilityV1::Complete => {}
             ContextScoutEvidenceAvailabilityV1::Partial
                 if input.delivery_window == ContextScoutDeliveryWindowV1::OnRequest => {}
@@ -1224,6 +1243,9 @@ fn validate_durable_envelope(
         || envelope.configuration_revision == [0; 32]
         || envelope.delivery_window == ContextScoutDeliveryWindowV1::Suppressed
         || !envelope.candidate.durable()
+        // The public projection pins a content generation, so session
+        // evidence must carry the generation it was judged against.
+        || envelope.candidate.evidence.code_generation_id().is_none()
     {
         return Err(ContextScoutErrorV1::DirtyOverlayDurabilityViolation);
     }
@@ -1260,7 +1282,22 @@ impl ContextScoutDurableQueueEntryExt for ContextScoutDurableQueueEntryV1 {
                 | ContextScoutModelOutcomeV1::InvalidOutput,
                 None,
             ) => {}
+            // The intent pass records its engine outcome in the session
+            // evidence's decision receipt, never in a Codex model receipt.
+            (ContextScoutRouteV1::DecisionEngine, outcome, None)
+                if self
+                    .envelope
+                    .candidate
+                    .evidence
+                    .as_session()
+                    .is_some_and(|evidence| evidence.decision.outcome == outcome) => {}
             _ => return Err(ContextScoutErrorV1::InvalidCandidate),
+        }
+        // Session evidence is produced only by the intent pass.
+        if self.envelope.candidate.evidence.as_session().is_some()
+            != (self.route == ContextScoutRouteV1::DecisionEngine)
+        {
+            return Err(ContextScoutErrorV1::InvalidCandidate);
         }
         validate_durable_envelope(&self.envelope)?;
         if self.work.address != self.envelope.address
@@ -1343,6 +1380,18 @@ pub struct ContextScoutControlV1 {
     pub mode: ContextScoutRuntimeModeV1,
     pub model_path: Option<ContextScoutModelBackendV1>,
     pub limits: ContextScoutLimitsV1,
+    /// Pinned session intent pass, absent when none is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<ContextScoutIntentControlV1>,
+}
+
+/// Behavior pin of the configured intent pass: whether it runs and the digest
+/// of its whole settings block (engine, window, questions, lifecycle bounds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutIntentControlV1 {
+    pub enabled: bool,
+    pub settings_digest: [u8; 32],
 }
 
 impl ContextScoutControlV1 {
@@ -1354,6 +1403,9 @@ impl ContextScoutControlV1 {
                     | (ContextScoutRuntimeModeV1::ConfiguredModel, None)
             )
             || self.model_path == Some(ContextScoutModelBackendV1::Disabled)
+            || self
+                .intent
+                .is_some_and(|intent| intent.settings_digest == [0; 32])
         {
             return Err(ContextScoutErrorV1::InvalidLimits);
         }
@@ -1551,21 +1603,35 @@ where
         mode: ContextScoutRuntimeModeV1,
         model_execution: ContextScoutModelExecutionV1,
     ) -> Result<ContextScoutRuntimeOutcomeV1, ContextScoutErrorV1> {
-        let selection = match mode {
-            ContextScoutRuntimeModeV1::Deterministic => ContextScoutSelectionV1 {
-                route: ContextScoutRouteV1::Deterministic,
+        let selection = if let Some(model_outcome) = intent_pass_model_outcome(input)? {
+            // Intent-pass candidates were judged by the decision engine when
+            // they were built; selection among them is deterministic, and the
+            // route records the engine outcome their receipts carry.
+            ContextScoutSelectionV1 {
+                route: ContextScoutRouteV1::DecisionEngine,
                 decision: select_deterministic_context_scout(input, limits)?,
-                model_outcome: ContextScoutModelOutcomeV1::NotRequested,
+                model_outcome,
                 model_receipt: None,
-            },
-            ContextScoutRuntimeModeV1::ConfiguredModel => {
-                select_model_assisted_context_scout(input, limits, &self.model, model_execution)
-                    .await?
+            }
+        } else {
+            match mode {
+                ContextScoutRuntimeModeV1::Deterministic => ContextScoutSelectionV1 {
+                    route: ContextScoutRouteV1::Deterministic,
+                    decision: select_deterministic_context_scout(input, limits)?,
+                    model_outcome: ContextScoutModelOutcomeV1::NotRequested,
+                    model_receipt: None,
+                },
+                ContextScoutRuntimeModeV1::ConfiguredModel => {
+                    select_model_assisted_context_scout(input, limits, &self.model, model_execution)
+                        .await?
+                }
             }
         };
         self.last_route = Some(selection.route);
-        self.last_model_outcome = Some(selection.model_outcome);
-        self.last_model_receipt.clone_from(&selection.model_receipt);
+        if selection.route != ContextScoutRouteV1::DecisionEngine {
+            self.last_model_outcome = Some(selection.model_outcome);
+            self.last_model_receipt.clone_from(&selection.model_receipt);
+        }
         if selection.model_outcome == ContextScoutModelOutcomeV1::Cancelled {
             self.last_suppression = Some(ContextScoutSuppressionV1::Cancelled);
             return Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
@@ -1660,6 +1726,27 @@ where
     }
 }
 
+/// The engine outcome of an intent-pass selection, `None` for code-evidence
+/// selections. One intent pass offers session evidence only, all of it from
+/// one engine exchange; mixing evidence kinds is a malformed input.
+fn intent_pass_model_outcome(
+    input: &ContextScoutSelectionInputV1,
+) -> Result<Option<ContextScoutModelOutcomeV1>, ContextScoutErrorV1> {
+    let mut outcomes = input.candidates.iter().map(|candidate| {
+        candidate
+            .evidence
+            .as_session()
+            .map(|evidence| evidence.decision.outcome)
+    });
+    let Some(first) = outcomes.next() else {
+        return Ok(None);
+    };
+    if outcomes.any(|outcome| outcome != first) {
+        return Err(ContextScoutErrorV1::InvalidCandidate);
+    }
+    Ok(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1667,7 +1754,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
     use tempfile::TempDir;
-    use tracedecay_contracts::context_scout::ContextScoutEvidenceEnvelopeV1;
+    use tracedecay_contracts::context_scout::ContextScoutCandidateEvidenceV1;
 
     fn address() -> ContextScoutAddressV1 {
         ContextScoutAddressV1 {
@@ -1737,8 +1824,8 @@ mod tests {
         );
     }
 
-    fn evidence() -> ContextScoutEvidenceEnvelopeV1 {
-        super::evidence::fixture_context_scout_evidence()
+    fn evidence() -> ContextScoutCandidateEvidenceV1 {
+        super::evidence::fixture_context_scout_evidence().into()
     }
 
     fn candidate(key: u8, score: u16) -> ContextScoutCandidateV1 {
@@ -1940,7 +2027,7 @@ mod tests {
     #[test]
     fn dirty_overlay_never_crosses_durable_checkpoint_or_receipt_boundary() {
         let mut overlay = candidate(1, 10);
-        overlay.evidence.content =
+        overlay.evidence.as_code_mut().unwrap().content =
             tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
                 session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
                 owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
@@ -2313,11 +2400,11 @@ mod tests {
 
     #[cfg(feature = "token-counting")]
     fn stale_candidate(key: u8, score: u16) -> ContextScoutCandidateV1 {
-        let fresh = evidence();
+        let fresh = super::evidence::fixture_context_scout_evidence();
         let mut sources = fresh.sources.clone();
         sources[0].contribution_state = tracedecay_contracts::RetrieverContributionState::Stale;
         sources[0].temporal.freshness = tracedecay_contracts::FreshnessState::Stale;
-        let evidence = ContextScoutEvidenceEnvelopeV1::claim(
+        let evidence = tracedecay_contracts::context_scout::ContextScoutEvidenceEnvelopeV1::claim(
             fresh.scope,
             fresh.authorized_scope,
             fresh.content,
@@ -2333,7 +2420,7 @@ mod tests {
             ContextScoutEvidenceAvailabilityV1::Stale
         );
         ContextScoutCandidateV1 {
-            evidence,
+            evidence: evidence.into(),
             ..candidate(key, score)
         }
     }
@@ -2731,6 +2818,7 @@ mod tests {
                 mode: ContextScoutRuntimeModeV1::ConfiguredModel,
                 model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
                 limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
             })
             .unwrap();
         assert_eq!(
@@ -2851,6 +2939,7 @@ mod tests {
             mode: ContextScoutRuntimeModeV1::ConfiguredModel,
             model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
             limits,
+            intent: None,
         };
         let widened_execution = ContextScoutModelExecutionV1 {
             deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
@@ -2901,6 +2990,7 @@ mod tests {
                 mode: ContextScoutRuntimeModeV1::ConfiguredModel,
                 model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
                 limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
             })
             .unwrap();
         assert_eq!(
@@ -2980,6 +3070,7 @@ mod tests {
                 mode: ContextScoutRuntimeModeV1::Deterministic,
                 model_path: None,
                 limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
             })
             .unwrap();
         assert_eq!(
@@ -3006,7 +3097,7 @@ mod tests {
             },
         );
         let mut dirty = candidate(2, 10);
-        dirty.evidence.content =
+        dirty.evidence.as_code_mut().unwrap().content =
             tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
                 session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
                 owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),

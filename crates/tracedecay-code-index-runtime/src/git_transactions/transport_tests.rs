@@ -12,18 +12,20 @@ const EFFECTS: [GitIndexTransactionOperationV1; 2] = [
     GitIndexTransactionOperationV1::UnstageHunks,
 ];
 
-#[test]
-fn preview_apply_owner_mounts_all_git_effects_and_replays() {
+#[tokio::test]
+async fn preview_apply_owner_mounts_all_git_effects_and_replays() {
     for operation in EFFECTS {
         let harness = test_port_from_preview(
             operation,
             [NativeMode::Completed(GitIndexReceiptOutcomeV1::Committed)],
             [],
-        );
+        )
+        .await;
         assert_eq!(harness.preview.operation, operation);
         let first = harness
             .port
             .apply(&harness.request)
+            .await
             .expect("effect reaches the preview owner");
         assert_eq!(first.receipt.operation, operation);
         assert_eq!(first.receipt.outcome, GitIndexReceiptOutcomeV1::Committed);
@@ -31,44 +33,48 @@ fn preview_apply_owner_mounts_all_git_effects_and_replays() {
         let replay = harness
             .port
             .apply(&harness.request)
+            .await
             .expect("same input replays the durable receipt");
         assert_eq!(replay.receipt, first.receipt);
         assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
     }
 }
 
-#[test]
-fn preview_apply_owner_rejects_a_conflicting_preview_cas() {
+#[tokio::test]
+async fn preview_apply_owner_rejects_a_conflicting_preview_cas() {
     for operation in EFFECTS {
         let harness = test_port_from_preview(
             operation,
             [NativeMode::Completed(GitIndexReceiptOutcomeV1::Committed)],
             [],
-        );
+        )
+        .await;
         harness
             .port
             .apply(&harness.request)
+            .await
             .expect("seed durable receipt for the CAS check");
         let mut conflicting = harness.request.clone();
         conflicting.preview_digest = digest('f');
         assert_eq!(
-            harness.port.apply(&conflicting),
+            harness.port.apply(&conflicting).await,
             Err(GitIndexTransactionPortError::IdempotencyConflict)
         );
         assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
     }
 }
 
-#[test]
-fn preview_apply_owner_honors_cancellation_before_native_entry() {
+#[tokio::test]
+async fn preview_apply_owner_honors_cancellation_before_native_entry() {
     for operation in EFFECTS {
-        let harness = test_port_from_preview(operation, [], []);
+        let harness = test_port_from_preview(operation, [], []).await;
         let checks = AtomicUsize::new(0);
         let result = harness
             .port
             .apply_cancellable(&harness.request, || {
                 (checks.fetch_add(1, Ordering::SeqCst) + 1 >= 5).then_some(UtcMicros(25))
             })
+            .await
             .expect("cancellation is a durable no-change result");
         assert_eq!(
             result.receipt.outcome,
@@ -82,17 +88,19 @@ fn preview_apply_owner_honors_cancellation_before_native_entry() {
     }
 }
 
-#[test]
-fn preview_apply_owner_recovers_an_ambiguous_boundary_without_replay() {
+#[tokio::test]
+async fn preview_apply_owner_recovers_an_ambiguous_boundary_without_replay() {
     for operation in EFFECTS {
         let harness = test_port_from_preview(
             operation,
             [NativeMode::CommitBoundaryUnknown],
             [RecoveryMode::AbortedNoChange],
-        );
+        )
+        .await;
         let result = harness
             .port
             .apply(&harness.request)
+            .await
             .expect("recovery result");
         assert_eq!(
             result.receipt.outcome,

@@ -3,6 +3,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, atomic::Ordering};
+use std::time::Instant;
 
 use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 
@@ -108,7 +109,7 @@ impl ProjectRuntimeRegistryV1 {
         // retirement of roots already torn down.
         let mut lost_work = shut_down_advisory(&runtimes).await;
         lost_work.extend(shut_down_feedback(&runtimes).await);
-        lost_work.extend(shut_down_observability(&mut runtimes).await);
+        lost_work.extend(shut_down_observability(&mut runtimes, None).await);
         drop(shut_down_runtimes(runtimes));
         if !lost_work.is_empty() {
             tracing::warn!(
@@ -184,13 +185,14 @@ impl ProjectRuntimeRegistryV1 {
     /// Shut every project runtime down and leave the registry empty.
     ///
     /// Routers become unavailable before feedback owners drop and Work
-    /// providers are joined.
+    /// providers are joined. The drain is single-flight, so the first
+    /// caller's `deadline` bounds the producer drains for every caller.
     #[tracing::instrument(
         name = "daemon.service.project_runtime.shutdown",
         level = "trace",
         skip_all
     )]
-    pub(crate) async fn shut_down_all(&self) -> ProjectRuntimesStop {
+    pub(crate) async fn shut_down_all(&self, deadline: Option<Instant>) -> ProjectRuntimesStop {
         self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();
         let mut shutdown_task = self.shutdown_task.lock().await;
@@ -210,7 +212,7 @@ impl ProjectRuntimeRegistryV1 {
                     &[("outcome", "project_runtimes_drained".to_string())],
                 );
                 let stop = match drained {
-                    Ok(Ok(runtimes)) => registry.finish_drained_runtimes(runtimes).await,
+                    Ok(Ok(runtimes)) => registry.finish_drained_runtimes(runtimes, deadline).await,
                     _ => {
                         registry.shutdown_started.store(false, Ordering::Release);
                         ProjectRuntimesStop::DidNotStop
@@ -319,6 +321,7 @@ impl ProjectRuntimeRegistryV1 {
     async fn finish_drained_runtimes(
         &self,
         mut runtimes: BTreeMap<PathBuf, ProjectRuntime>,
+        deadline: Option<Instant>,
     ) -> ProjectRuntimesStop {
         let started = std::time::Instant::now();
         let step = |outcome: &str| {
@@ -335,7 +338,7 @@ impl ProjectRuntimeRegistryV1 {
         step("advisory_shut_down");
         lost_work.extend(shut_down_feedback(&runtimes).await);
         step("feedback_shut_down");
-        lost_work.extend(shut_down_observability(&mut runtimes).await);
+        lost_work.extend(shut_down_observability(&mut runtimes, deadline).await);
         step("observability_shut_down");
         release_drained_runtimes(shut_down_runtimes(runtimes));
         step("runtimes_release_detached");
@@ -394,8 +397,13 @@ impl Drop for ProjectRuntimeRootQuiescenceV1 {
 /// Stop Work recovery producers, then close and flush each project producer
 /// before its registered database and dependent runtime owners are dropped. A
 /// failed flush is terminal: the producer has entered shutdown and is removed
-/// rather than being republished as a live component on a retry.
-async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>) -> Vec<String> {
+/// rather than being republished as a live component on a retry. A daemon
+/// shutdown passes its phase `deadline`; without one each producer drain
+/// keeps its own budget.
+async fn shut_down_observability(
+    runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>,
+    deadline: Option<Instant>,
+) -> Vec<String> {
     let mut lost_work = Vec::new();
     for (project_root, runtime) in runtimes.iter_mut() {
         if let Some(work) = runtime.work.as_ref() {
@@ -409,7 +417,7 @@ async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime
                 dyn Future<Output = Result<(), tracedecay_contracts::ApplicationContractError>>
                     + Send,
             >,
-        > = Box::pin(observability.shutdown());
+        > = Box::pin(observability.shutdown_until(deadline));
         if let Err(error) = shutdown.await {
             lost_work.push(format!(
                 "{}: observability: {error}",

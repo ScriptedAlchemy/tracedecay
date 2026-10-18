@@ -874,6 +874,8 @@ async fn send_daemon_request_with_liveness_poll(
     )
     .await?;
     let (reader, mut writer) = stream.into_split();
+    let mut reader =
+        tracedecay_framing::BoundedLineReader::new(asupersync::io::BufReader::new(reader));
 
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
@@ -884,10 +886,11 @@ async fn send_daemon_request_with_liveness_poll(
         writer.flush().await?;
         Ok(())
     };
-    DaemonClientDeadline::run_optional(client_deadline, "write", &request_label, write).await?;
+    let written =
+        DaemonClientDeadline::run_optional(client_deadline, "write", &request_label, write);
+    tracedecay_daemon_protocol::refusal_behind_failed_write(written.await, &mut reader, handshake)
+        .await?;
 
-    let mut reader =
-        tracedecay_framing::BoundedLineReader::new(asupersync::io::BufReader::new(reader));
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
     let mut cancellation_open = true;
@@ -908,6 +911,13 @@ async fn send_daemon_request_with_liveness_poll(
         };
         if response_line.trim().is_empty() {
             continue;
+        }
+        if let Some(refusal) =
+            tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&response_line)
+        {
+            return Err(tracedecay_daemon_protocol::handshake_refusal_error(
+                &refusal, handshake,
+            ));
         }
         let is_matching_response =
             DaemonClientDeadline::run_optional(client_deadline, "decode", &request_label, async {

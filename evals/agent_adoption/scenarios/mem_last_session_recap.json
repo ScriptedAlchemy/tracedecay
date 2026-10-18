@@ -35,7 +35,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "deferred scenario: no verifiable ground truth until its fixture gap is closed"
+  },
   "max_tool_calls": 5,
   "requires_fixture": "seeded-sessions",
   "notes": "DEFERRED: same gap as scenarios/session_recovery.json -- needs a real prior host session recorded and ingested against the fixture project path."

@@ -18,43 +18,6 @@ use tracedecay_runtime_core::git_discovery::{
 
 pub use crate::{StoredCursor, TranscriptIngestStats};
 
-/// Shareable handle to a read-only rusqlite connection over a foreign
-/// (non-TraceDecay-owned) `SQLite` store.
-///
-/// The mutex makes the handle `Sync`, so async ingest futures may hold it
-/// across await points and stay `Send`; every SQL call runs on a blocking
-/// thread via [`SqliteReadConn::with`], keeping the async executor unblocked.
-#[derive(Clone)]
-pub struct SqliteReadConn {
-    inner: Arc<std::sync::Mutex<rusqlite::Connection>>,
-}
-
-impl SqliteReadConn {
-    pub fn new(conn: rusqlite::Connection) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(conn)),
-        }
-    }
-
-    /// Runs `body` against the connection on a blocking thread. Returns `None`
-    /// only if the blocking task itself fails (cancellation/panic), which
-    /// callers degrade to the same outcome as any SQL error.
-    #[tracing::instrument(name = "sessions.shared.sqlite_with", level = "trace", skip_all)]
-    pub async fn with<T, F>(&self, body: F) -> Option<T>
-    where
-        T: Send + 'static,
-        F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
-    {
-        let inner = Arc::clone(&self.inner);
-        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
-            body(&guard)
-        })
-        .await
-        .ok()
-    }
-}
-
 /// Generic per-transcript backlog threshold for warning that automatic
 /// session transcript catch-up may not drain recall transcripts quickly enough.
 pub const SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES: u64 = 2 * 1024 * 1024;

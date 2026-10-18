@@ -1,0 +1,89 @@
+{
+ "request": {
+  "state": "Earlier in the conversation:\nUser: the celery worker keeps OOMing on the nightly export\nAssistant: Memory climbs in export_rows; it materializes the whole queryset.\nTool call: Bash: rg -n 'iterator\\(' app/exports\n\nUser's latest message: didn't we already hit this a couple weeks back and settle on chunking with a server-side cursor? dig up what we decided",
+  "questions": {
+   "session_recall": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask to look up, recover or reuse something from an earlier conversation, a previous session, or another agent's transcript?"
+   },
+   "memory_store": {
+    "type": "noul",
+    "instructions": "Does the user's latest message state or confirm a lasting preference, convention or fact that the assistant should remember and apply in future sessions?"
+   },
+   "call_graph": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask which functions call some code, what some code calls, or how execution flows through the code?"
+   },
+   "impact": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask what would break, or which code and tests would be affected, if something is changed?"
+   },
+   "refactor_edit": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask for the same mechanical edit to be applied in many places, such as a rename, moving code, or repeating a change across files?"
+   },
+   "review_changes": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask to review a diff, staged changes, recent commits or a pull request?"
+   },
+   "type_orientation": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask which types implement an interface, about a class hierarchy, where objects are constructed, where a field is read or written, or about duplicated logic?"
+   },
+   "project_context": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask about code in another repository or a sibling project?"
+   },
+   "unexpected_changes": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask about commits or file edits that neither the user nor the assistant made?"
+   }
+  }
+ },
+ "response": {
+  "model": "kev-latest",
+  "answers": {
+   "session_recall": {
+    "type": "noul",
+    "noul": 0.8278
+   },
+   "memory_store": {
+    "type": "noul",
+    "noul": 0.8622
+   },
+   "call_graph": {
+    "type": "noul",
+    "noul": 0.1866
+   },
+   "impact": {
+    "type": "noul",
+    "noul": 0.1831
+   },
+   "refactor_edit": {
+    "type": "noul",
+    "noul": 0.1124
+   },
+   "review_changes": {
+    "type": "noul",
+    "noul": 0.1622
+   },
+   "type_orientation": {
+    "type": "noul",
+    "noul": 0.1636
+   },
+   "project_context": {
+    "type": "noul",
+    "noul": 0.1701
+   },
+   "unexpected_changes": {
+    "type": "noul",
+    "noul": 0.3778
+   }
+  },
+  "usage": {
+   "input_tokens": 394,
+   "output_tokens": 207
+  },
+  "latency_ms": 5862.0
+ }
+}
