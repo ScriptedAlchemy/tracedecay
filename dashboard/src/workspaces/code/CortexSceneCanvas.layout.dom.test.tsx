@@ -90,11 +90,11 @@ describe('layout requests from the canvas', () => {
     await waitFor(() =>
       expect(screen.getByRole('group', { name: /test field/ }).getAttribute('data-layout')).toBe('ready'),
     );
+    await waitFor(() => expect(painter.draw).toHaveBeenCalled());
     requests[0]!.resolve({ tag: 'first' });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     const drawn = vi.mocked(painter.draw).mock.calls.map((call) => call[0].tag);
-    expect(drawn.length).toBeGreaterThan(0);
     expect(new Set(drawn)).toEqual(new Set(['second']));
   });
 
