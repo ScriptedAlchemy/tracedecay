@@ -1,0 +1,95 @@
+name: Scheduler control verification
+
+on:
+  push:
+    branches: [fix/4208-scheduler-control-publication]
+    paths:
+      - .github/workflows/scheduler-control-verification.yml
+      - scripts/ci/apply-scheduler-control-publication.py
+      - crates/tracedecay-automation-runtime/src/automation/scheduler_control_tests.rs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduler-control-verification
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'ScriptedAlchemy/tracedecay' && github.actor == 'ScriptedAlchemy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Apply the source-revision-checked change
+        run: python3 scripts/ci/apply-scheduler-control-publication.py
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: ci-linux-test-v2
+          test-tools: 'true'
+      - name: Format the changed files with the pinned toolchain
+        run: >-
+          rustfmt --edition 2024 --config-path rustfmt.toml
+          --config skip_children=true
+          crates/tracedecay-automation-runtime/src/automation/scheduler.rs
+          crates/tracedecay-automation-runtime/src/automation/scheduler_control_tests.rs
+      - name: Verify formatting and the complete automation unit suite
+        run: |
+          bazel build --config=ci //crates/tracedecay-automation-runtime:rustfmt_check_2024
+          bazel test --config=ci //crates/tracedecay-automation-runtime:unit_test --test_output=errors
+          git diff --check
+      - name: Record only the verified source edits
+        run: |
+          mkdir -p "$RUNNER_TEMP/scheduler-publication"
+          git diff --binary -- \
+            crates/tracedecay-automation-runtime/src/automation/scheduler.rs \
+            crates/tracedecay-automation-runtime/src/automation/scheduler_control_tests.rs \
+            > "$RUNNER_TEMP/scheduler-publication/verified.patch"
+          test -s "$RUNNER_TEMP/scheduler-publication/verified.patch"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: verified-scheduler-publication
+          path: ${{ runner.temp }}/scheduler-publication/verified.patch
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    if: github.repository == 'ScriptedAlchemy/tracedecay' && github.actor == 'ScriptedAlchemy'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: verified-scheduler-publication
+          path: ${{ runner.temp }}/scheduler-publication
+      - name: Publish the tested edits only if the branch has not moved
+        env:
+          EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          branch=fix/4208-scheduler-control-publication
+          actual=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+          test "$actual" = "$EXPECTED_HEAD"
+          git apply --check "$RUNNER_TEMP/scheduler-publication/verified.patch"
+          git apply "$RUNNER_TEMP/scheduler-publication/verified.patch"
+          git diff --check
+          git add -- \
+            crates/tracedecay-automation-runtime/src/automation/scheduler.rs \
+            crates/tracedecay-automation-runtime/src/automation/scheduler_control_tests.rs
+          git rm -- \
+            scripts/ci/apply-scheduler-control-publication.py \
+            .github/workflows/scheduler-control-verification.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(automation): publish scheduler control atomically' -m 'Fixes #4208'
+          git push origin "HEAD:refs/heads/$branch"
