@@ -42,7 +42,11 @@ pub fn inspect_graph_store_schema(path: &Path) -> Result<GraphStoreSchemaAdmissi
     })?;
     if !has_header {
         return Err(TraceDecayError::Config {
-            message: format!("{} is not a SQLite database", path.display()),
+            message: format!(
+                "{} is not a SQLite database; the scoped reset covers only stores refused \
+                 for an incompatible schema version",
+                path.display()
+            ),
         });
     }
     let connection =
