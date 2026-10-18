@@ -1,5 +1,6 @@
 load("@npm//:defs.bzl", "npm_link_all_packages")
 load("@npm//dashboard:@rsbuild/core/package_json.bzl", rsbuild_bin = "bin")
+load("@npm//dashboard:vitest/package_json.bzl", vitest_bin = "bin")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -18,6 +19,17 @@ filegroup(
         ],
         allow_empty = True,
     ),
+)
+
+vitest_bin.vitest_test(
+    name = "unit_test",
+    data = [":dashboard_sources", ":node_modules"] + glob([
+        "codegen/**",
+        "e2e/**",
+        "stories/**",
+    ]),
+    args = ["run"],
+    chdir = package_name(),
 )
 
 rsbuild_bin.rsbuild(

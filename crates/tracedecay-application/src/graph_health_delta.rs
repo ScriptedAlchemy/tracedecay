@@ -18,8 +18,8 @@ use tracedecay_domain::{
     ObservabilityTerminalResultV1, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_graph_query::GraphQueryError;
 
 use crate::observability::RegisteredObservabilityPortV1;
 
@@ -48,7 +48,7 @@ pub enum HealthDeltaError {
     #[error("the before point predates recorded health definitions")]
     DefinitionUnrecorded,
     #[error(transparent)]
-    Graph(TraceDecayError),
+    Graph(GraphQueryError),
     #[error("health-delta storage failed: {0}")]
     Storage(String),
 }
@@ -455,8 +455,9 @@ pub async fn compute_verified_health_delta(
     } else {
         let snapshot: Pin<
             Box<
-                dyn Future<Output = tracedecay_domain::errors::Result<VerifiedHealthSnapshotV1>>
-                    + Send
+                dyn Future<
+                        Output = tracedecay_graph_query::GraphQueryResult<VerifiedHealthSnapshotV1>,
+                    > + Send
                     + '_,
             >,
         > = Box::pin(compute_verified_health_snapshot(
