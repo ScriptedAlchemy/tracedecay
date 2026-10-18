@@ -108,3 +108,6 @@ in-process; `run_http.py` drives any `/v1/systemone`-style server
 (`kev_serve.py`, `intern_serve.py` wrap the two 4B models;
 `mmap_loader.py` memory-maps their weights). `score.py` rescores
 `results/` into `summary.json`; `compare.py` prints the head-to-head.
+`results/` and `summary.json` are run outputs (about 59k lines for the
+runs behind the tables above) and are not committed; rerun the scripts
+against the model servers to regenerate them.

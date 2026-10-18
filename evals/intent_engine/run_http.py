@@ -30,6 +30,7 @@ def main():
     if a.subset:
         keep = set(json.load(open(a.subset))["ids"]); ds = [c for c in ds if c["id"] in keep]
     qs = noul_questions()
+    os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     for cfg in a.configs:
         name = "%s_%s" % (a.tag, cfg); path = os.path.join(HERE, "results", name + ".json")
         done = {}
