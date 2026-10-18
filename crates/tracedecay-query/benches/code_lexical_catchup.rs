@@ -18,17 +18,12 @@ use tracedecay_code_index::production::{
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-};
 use tracedecay_domain::{
     ChunkerRevision, ComponentRevision, FileOccurrenceId, FreshnessCompatibilityV1, ManifestDigest,
-    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryDirtyStateV1,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1,
-    SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
+    RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SensitivityLevelV1,
+    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
 };
 use tracedecay_query::retrieval::lexical::{
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalCloneRouteV1,
@@ -47,51 +42,6 @@ impl CodeIndexExecutionControlV1 for ActiveControl {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
-    }
-}
-
-struct ProjectionSink;
-
-impl CodeChunkProjectionSink for ProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .collect::<Vec<_>>();
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
 }
 
@@ -250,12 +200,9 @@ fn build_fixture() -> Fixture {
         max_snapshot_age_micros: None,
     };
     let control = ActiveControl;
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config,
-        MemorySealedPublicationStoreV1::default(),
-        ProjectionSink,
-    )
-    .expect("build deterministic production fixture owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config, MemorySealedPublicationStoreV1::default())
+            .expect("build deterministic production fixture owner");
     let generation = owner
         .build_and_publish(request, &control)
         .expect("build deterministic sealed generation");

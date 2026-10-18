@@ -6,8 +6,7 @@ use std::path::Path;
 use tracedecay_domain::{EdgeAuthorityV1, LanguageId, SanitizationReceiptId, SensitivityLevelV1};
 
 use super::worker_tests::{
-    WorkerProjectionSink, WorkerPublicationStore, worker_config, worker_id,
-    worker_request_with_source,
+    WorkerPublicationStore, worker_config, worker_id, worker_request_with_source,
 };
 use super::*;
 
@@ -63,7 +62,7 @@ pub(super) fn language_for(path: &str) -> &'static str {
 /// watched refresh captures only changed files. A cold successor carries
 /// unchanged files from the sealed parent instead of recapturing them.
 pub(super) fn publish<P: CodeIndexAtomicPublicationPort>(
-    owner: &mut CodeIndexProductionOwnerV1<P, WorkerProjectionSink>,
+    owner: &mut CodeIndexProductionOwnerV1<P>,
     files: &[(String, String)],
     fresh: Option<usize>,
     over_parent: bool,
@@ -192,8 +191,7 @@ fn assert_seals_like_cold(
 ) {
     let store = WorkerPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
     let parent = publish(&mut owner, base_tree, base_fresh, false, 1_100_000);
     let parent_answers = restored_answers(&store, &parent);
     super::helpers::take_seal_reference_resolutions();
@@ -203,12 +201,8 @@ fn assert_seals_like_cold(
 
     let cold_store = WorkerPublicationStore::default();
     let cold = publish(
-        &mut CodeIndexProductionOwnerV1::new(
-            worker_config(),
-            cold_store.clone(),
-            WorkerProjectionSink,
-        )
-        .expect("cold production owner"),
+        &mut CodeIndexProductionOwnerV1::new(worker_config(), cold_store.clone())
+            .expect("cold production owner"),
         edited_tree,
         Some(index),
         false,
@@ -260,8 +254,8 @@ fn assert_seals_like_cold(
 fn differential_counts(language: &str) -> DifferentialCounts {
     let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
     let store = WorkerPublicationStore::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
-        .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), store).expect("production owner");
     let base = publish(&mut owner, &tree, None, false, 1_000_000);
     let base = base.decoded().expect("a cold seal holds its generation");
     let mut counts = DifferentialCounts::default();
@@ -381,9 +375,8 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
     for language in ["rust", "typescript", "python", "go", "java", "ruby"] {
         let tree = fixture_files(&Path::new(FIXTURE_ROOT).join(language));
         let store = WorkerPublicationStore::default();
-        let mut owner =
-            CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-                .expect("production owner");
+        let mut owner = CodeIndexProductionOwnerV1::new(worker_config(), store.clone())
+            .expect("production owner");
         let parent = publish(&mut owner, &tree, None, false, 1_000_000);
         let parent = parent.decoded().expect("a cold seal holds its generation");
         assert!(
@@ -408,9 +401,8 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
         assert_eq!(restored.edge_abstentions, parent.edge_abstentions);
         drop(owner);
 
-        let mut restarted =
-            CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-                .expect("restarted production owner");
+        let mut restarted = CodeIndexProductionOwnerV1::new(worker_config(), store.clone())
+            .expect("restarted production owner");
         let index = tree
             .iter()
             .position(|(path, _)| {

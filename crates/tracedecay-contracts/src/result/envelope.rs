@@ -98,7 +98,19 @@ pub enum ApplicationOutcome<T> {
 impl<T> ApplicationOutcome<T> {
     /// The same outcome and receipts carrying `map(payload)`.
     pub fn map_payload<U>(self, map: impl FnOnce(T) -> U) -> ApplicationOutcome<U> {
-        match self {
+        match self.try_map_payload(|payload| Ok::<_, std::convert::Infallible>(map(payload))) {
+            Ok(outcome) => outcome,
+            Err(error) => match error {},
+        }
+    }
+
+    /// Fallibly transform only the payload, preserving every receipt and
+    /// control field even when the outcome carries no payload.
+    pub fn try_map_payload<U, E>(
+        self,
+        map: impl FnOnce(T) -> Result<U, E>,
+    ) -> Result<ApplicationOutcome<U>, E> {
+        Ok(match self {
             Self::Evidence(packet) => ApplicationOutcome::Evidence(crate::EvidencePacket {
                 temporal: packet.temporal,
                 authority: packet.authority,
@@ -109,7 +121,7 @@ impl<T> ApplicationOutcome<T> {
                 contributions: packet.contributions,
                 page: packet.page,
                 execution: packet.execution,
-                payload: packet.payload.map(map),
+                payload: packet.payload.map(map).transpose()?,
             }),
             Self::Preview(preview) => ApplicationOutcome::Preview(crate::PreviewResult {
                 preview_id: preview.preview_id,
@@ -118,7 +130,7 @@ impl<T> ApplicationOutcome<T> {
                 authority: preview.authority,
                 expected_state: preview.expected_state,
                 execution: preview.execution,
-                payload: preview.payload.map(map),
+                payload: preview.payload.map(map).transpose()?,
             }),
             Self::Effect(effect) => ApplicationOutcome::Effect(crate::EffectResult {
                 effect_id: effect.effect_id,
@@ -129,10 +141,10 @@ impl<T> ApplicationOutcome<T> {
                 execution: effect.execution,
                 reconciliation: effect.reconciliation,
                 receipt: effect.receipt,
-                payload: effect.payload.map(map),
+                payload: effect.payload.map(map).transpose()?,
             }),
-            Self::Result(result) => ApplicationOutcome::Result(map(result)),
-        }
+            Self::Result(result) => ApplicationOutcome::Result(map(result)?),
+        })
     }
 
     pub fn payload(&self) -> Option<&T> {

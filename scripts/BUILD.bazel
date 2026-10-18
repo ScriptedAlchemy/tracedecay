@@ -69,6 +69,8 @@ exports_files(
         "bazel/rust_test.bzl",
         "test-rust-cache-lineage.py",
         "test-check-packaged-lsp-bridge.py",
+        "test-check-sdk-publish-workflow.py",
+        "check-sdk-publish-workflow.py",
         "test-build-mcpb.py",
         "test-package-release-archive.py",
         "test-plan-release-recovery.py",

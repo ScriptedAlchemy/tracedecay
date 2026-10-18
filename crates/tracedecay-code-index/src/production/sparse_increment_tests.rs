@@ -6,7 +6,7 @@
 use sha2::Digest as _;
 use tracedecay_domain::{LanguageId, ProjectionKeyV1, ProjectionKindV1, SanitizationReceiptId};
 
-use super::worker_tests::{WorkerProjectionSink, worker_config, worker_id};
+use super::worker_tests::{worker_config, worker_id};
 use super::*;
 
 const RUST: &str = "rust";
@@ -96,11 +96,10 @@ fn request(files: &[(&str, &str, &str)], sealed_at: i64) -> CodeIndexBuildReques
     }
 }
 
-type Owner = CodeIndexProductionOwnerV1<MemorySealedPublicationStoreV1, WorkerProjectionSink>;
+type Owner = CodeIndexProductionOwnerV1<MemorySealedPublicationStoreV1>;
 
 fn owner(store: &MemorySealedPublicationStoreV1) -> Owner {
-    CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-        .expect("production owner")
+    CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner")
 }
 
 fn publish(

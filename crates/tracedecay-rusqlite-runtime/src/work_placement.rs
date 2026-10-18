@@ -4,7 +4,7 @@
 //! Linked and isolated placements are exclusive and fenced. That rule is
 //! enforced by the partial unique index in `work/schema.rs`, not only by the
 //! service that reads
-//! [`target_holder`](WorkPlacementStoragePort::target_holder). The read is what
+//! [`target_held_by_other`](WorkPlacementStoragePort::target_held_by_other). The read is what
 //! produces a *typed* refusal; the index is what makes the rule survive a crash
 //! between the read and the write.
 
@@ -14,8 +14,8 @@ use tracedecay_contracts::{
     WorkPlacementPublicationPort, WorkPlacementStorageError, WorkPlacementStoragePort,
 };
 use tracedecay_domain::{
-    ProjectId, RepositoryId, RunId, TaskId, WorkAuthority, WorkPlacementIdentityV1,
-    WorkPlacementKindV1, WorkPlacementStateV1, WorkPlacementV1,
+    ProjectId, RepositoryId, WorkAuthority, WorkPlacementIdentityV1, WorkPlacementKindV1,
+    WorkPlacementStateV1, WorkPlacementV1,
 };
 
 use crate::exact_sql::{ExactSqlRows, ExactSqlStatement, ExactSqlValue};
@@ -54,12 +54,13 @@ impl WorkPlacementStoragePort for WorkSqliteJobStorage<'_> {
         load_placement_from(self.transaction, authority, identity)
     }
 
-    fn target_holder(
+    fn target_held_by_other(
         &self,
         authority: &WorkAuthority,
+        identity: &WorkPlacementIdentityV1,
         root: &str,
-    ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError> {
-        target_holder_from(self.transaction, authority, root)
+    ) -> Result<bool, WorkPlacementStorageError> {
+        target_held_by_other_from(self.transaction, authority, identity, root)
     }
 }
 
@@ -85,12 +86,13 @@ impl WorkPlacementStoragePort for WorkSqliteStorage {
         load_placement_from(self.handle(), authority, identity)
     }
 
-    fn target_holder(
+    fn target_held_by_other(
         &self,
         authority: &WorkAuthority,
+        identity: &WorkPlacementIdentityV1,
         root: &str,
-    ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError> {
-        target_holder_from(self.handle(), authority, root)
+    ) -> Result<bool, WorkPlacementStorageError> {
+        target_held_by_other_from(self.handle(), authority, identity, root)
     }
 
     fn has_target_holder_in_exact_repository_root(
@@ -159,33 +161,31 @@ fn load_placement_from(
     placement_from_rows(&rows)
 }
 
-fn target_holder_from(
+/// The holder test is scoped by project and repository only. The exclusivity
+/// index has the same key, so this read and the write it guards agree on what
+/// "the same root" means across actors, policy digests, and worktree routes.
+fn target_held_by_other_from(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
+    identity: &WorkPlacementIdentityV1,
     root: &str,
-) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError> {
+) -> Result<bool, WorkPlacementStorageError> {
     let rows = registered_work_query(
         source,
-        "SELECT task_id, run_id FROM work_placements_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5
-           AND target_root = ?6 AND state IN ('admitted', 'quarantined')",
+        "SELECT 1 FROM work_placements_v1
+         WHERE project_id = ?1 AND repository_id = ?2
+           AND target_root = ?8 AND state IN ('admitted', 'quarantined')
+           AND NOT (worktree_id = ?3 AND actor_id = ?4 AND policy_digest = ?5
+                    AND task_id = ?6 AND run_id = ?7)
+         LIMIT 1",
         authority_params_owned(authority)
             .into_iter()
+            .chain(identity_params(identity))
             .chain([ExactSqlValue::Text(root.to_owned())])
             .collect(),
     )
     .map_err(|_| WorkPlacementStorageError::Unavailable)?;
-    let Some(row) = rows.rows.first() else {
-        return Ok(None);
-    };
-    let task_id = exact_sql_text(&row.values, 0).ok_or(WorkPlacementStorageError::Unavailable)?;
-    let run_id = exact_sql_text(&row.values, 1).ok_or(WorkPlacementStorageError::Unavailable)?;
-    let task_id =
-        TaskId::new(task_id.to_owned()).map_err(|_| WorkPlacementStorageError::Unavailable)?;
-    let run_id =
-        RunId::new(run_id.to_owned()).map_err(|_| WorkPlacementStorageError::Unavailable)?;
-    Ok(Some(WorkPlacementIdentityV1::new(task_id, run_id)))
+    Ok(!rows.rows.is_empty())
 }
 
 fn publish_placement_tx(

@@ -30,7 +30,7 @@ pub async fn handle_work<Invoke, InvokeFuture>(
 ) -> Result<ToolResult>
 where
     Invoke: FnOnce(WorkHttpRequest) -> InvokeFuture,
-    InvokeFuture: Future<Output = Result<Value>>,
+    InvokeFuture: Future<Output = Result<tracedecay_api::HttpJsonEnvelope<Value>>>,
 {
     let (operation, request_id, controls) = {
         let _span = tracing::trace_span!("mcp.work.request_build").entered();

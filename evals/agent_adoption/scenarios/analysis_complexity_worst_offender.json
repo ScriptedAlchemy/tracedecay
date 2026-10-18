@@ -35,9 +35,17 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "place_order"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 5,
   "notes": "complexity worst-offenders; place_order loops over items calling reserve_stock then compute_total, the widest fan-out in the crate."
 }

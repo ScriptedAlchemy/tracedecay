@@ -13,8 +13,8 @@ use tracedecay_domain::{CommitId, RepositoryDirtyStateV1, SnapshotFileDispositio
 
 use crate::{
     production_orchestration::{
-        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, add_present_typescript_file,
-        applying_owner, config, request_with_source,
+        ActiveControl, SharedPublicationStore, add_present_typescript_file, applying_owner, config,
+        request_with_source,
     },
     support::{PartitionedSealV1, cold_generation, id, reseal_manifest},
 };
@@ -84,8 +84,7 @@ fn assert_rejected_before_publication(request: CodeIndexBuildRequestV1) {
     let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
     let store = SharedPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
 
     owner
         .build_and_publish(request, &ActiveControl)
