@@ -1,59 +1,61 @@
-import { createBrowserRouter } from 'react-router';
-import { RouteChunkBoundary, type RouteChunkLoader } from './RouteChunkBoundary';
+import { createBrowserRouter, Navigate, useLocation, type RouteObject } from 'react-router';
+import { CHANNELS, type ChannelView, type ViewPath } from './channels.ts';
+import { LEGACY_PATHS, legacyDestination, type LegacyPath } from './legacyRoutes.ts';
+import { RouteChunkBoundary } from './RouteChunkBoundary';
+import { FamilyLayout } from './shell/FamilyLayout';
 import { Shell } from './shell/Shell';
+import { VIEW_CHUNKS } from './viewChunks.ts';
 
-function page<T extends string>(path: T, label: string, load: RouteChunkLoader) {
-  return { path, label, load } as const;
+function view(path: ViewPath) {
+  return <RouteChunkBoundary load={VIEW_CHUNKS[path]} />;
 }
 
-// The fourteen workspaces, each its own lazy code-split chunk: the shell stays
-// light and a surface loads on first navigation. A surface renders what its
-// contract answered, and never substitutes fixture or browser-owned state for
-// a read that did not land.
-export const WORKSPACES = [
-  page('brain', 'Brain', () =>
-    import('../workspaces/brain/BrainPage.tsx').then((m) => ({ default: m.BrainPage }))),
-  page('explorer', 'Explorer', () =>
-    import('../workspaces/explorer/ExplorerPage.tsx').then((m) => ({ default: m.ExplorerPage }))),
-  page('loom', 'Loom', () =>
-    import('../workspaces/loom/LoomPage.tsx').then((m) => ({ default: m.LoomPage }))),
-  page('sessions', 'Sessions', () =>
-    import('../workspaces/sessions/SessionsPage.tsx').then((m) => ({ default: m.SessionsPage }))),
-  page('agents', 'Agents', () =>
-    import('../workspaces/agents/AgentsPage.tsx').then((m) => ({ default: m.AgentsPage }))),
-  page('code', 'Code', () =>
-    import('../workspaces/code/CodePage.tsx').then((m) => ({ default: m.CodePage }))),
-  page('knowledge', 'Knowledge', () =>
-    import('../workspaces/knowledge/KnowledgePage.tsx').then((m) => ({ default: m.KnowledgePage }))),
-  page('delivery', 'Delivery', () =>
-    import('../workspaces/delivery/DeliveryPage.tsx').then((m) => ({ default: m.DeliveryPage }))),
-  page('automations', 'Automations', () =>
-    import('../workspaces/automations/AutomationsPage.tsx').then((m) => ({ default: m.AutomationsPage }))),
-  page('observatory', 'Observatory', () =>
-    import('../workspaces/observatory/ObservatoryPage.tsx').then((m) => ({ default: m.ObservatoryPage }))),
-  page('costs', 'Costs', () =>
-    import('../workspaces/costs/CostsPage.tsx').then((m) => ({ default: m.CostsPage }))),
-  page('settings', 'Settings', () =>
-    import('../workspaces/settings/SettingsPage.tsx').then((m) => ({ default: m.SettingsPage }))),
-  page('work', 'Work', () =>
-    import('../workspaces/work/WorkPage.tsx').then((m) => ({ default: m.WorkPage }))),
-  page('workflows', 'Workflows', () =>
-    import('../workspaces/workflows/WorkflowsPage.tsx').then((m) => ({ default: m.WorkflowsPage }))),
-] as const;
+/** Carries a retired path to its new home, keeping the query string (project
+ * scope included) and the hash. Replaces the entry so Back leaves the
+ * dashboard's own history instead of bouncing off the old path. */
+function Redirect({ from }: { from: LegacyPath }) {
+  const { search, hash } = useLocation();
+  const destination = legacyDestination(from, search);
+  return <Navigate to={{ pathname: destination.pathname, search: destination.search, hash }} replace />;
+}
 
-export const router = createBrowserRouter([
-  {
-    path: '/',
-    element: <Shell />,
-    children: [
-      {
-        index: true,
-        element: <RouteChunkBoundary load={WORKSPACES[0].load} />,
-      },
-      ...WORKSPACES.map(({ path, load }) => ({
-        path,
-        element: <RouteChunkBoundary load={load} />,
-      })),
-    ],
-  },
-]);
+/** Path of a view relative to its family route. */
+function relative(familyPath: string, viewPath: string): string {
+  return viewPath.slice(familyPath.length + 1);
+}
+
+export function dashboardRoutes(): RouteObject[] {
+  return [
+    {
+      path: '/',
+      element: <Shell />,
+      children: [
+        // `/` is the retired Brain path, so it takes the same redirect and keeps its
+        // query string, project scope included.
+        { index: true, element: <Redirect from="brain" /> },
+        ...CHANNELS.map((channel): RouteObject => {
+          const [first, ...rest]: readonly ChannelView[] = channel.views;
+          if (first === undefined) throw new Error(`channel ${channel.path} lists no view`);
+          if (rest.length === 0) return { path: channel.path, element: view(first.path as ViewPath) };
+          return {
+            path: channel.path,
+            element: <FamilyLayout channel={channel} />,
+            children: [
+              { index: true, element: view(first.path as ViewPath) },
+              ...rest.map((member) => ({
+                path: relative(channel.path, member.path),
+                element: view(member.path as ViewPath),
+              })),
+            ],
+          };
+        }),
+        ...(Object.keys(LEGACY_PATHS) as LegacyPath[]).map((from) => ({
+          path: from,
+          element: <Redirect from={from} />,
+        })),
+      ],
+    },
+  ];
+}
+
+export const router = createBrowserRouter(dashboardRoutes());

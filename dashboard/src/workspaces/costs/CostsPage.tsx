@@ -113,7 +113,7 @@ export function CostsPage() {
   return (
     <div className="flex h-full flex-col" role="region" aria-label="Costs content">
       <WorkspaceHeader
-        path="costs"
+        path="operations/costs"
         title="Costs"
         note="actual provider spend · canonical pricing · usage facts independent of price"
       />

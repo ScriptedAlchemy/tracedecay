@@ -14,22 +14,22 @@ describe('sessionHref', () => {
   it('names a session the way each workspace reads one', () => {
     const session = { provider: 'claude', sessionId: 'abc' };
     expect(read(sessionHref('sessions', session, ALL))).toEqual({
-      pathname: '/sessions',
+      pathname: '/memory/sessions',
       params: { sessionId: 'abc', sessionProvider: 'claude' },
     });
     expect(read(sessionHref('agents', session, ALL))).toEqual({
-      pathname: '/agents',
+      pathname: '/memory/agents',
       params: { sessionId: 'abc', sessionProvider: 'claude' },
     });
     expect(read(sessionHref('loom', session, ALL))).toEqual({
-      pathname: '/loom',
+      pathname: '/memory/loom',
       params: { loomSession: '["claude","abc"]' },
     });
   });
 
   it('carries the project scope and nothing else from the workspace it leaves', () => {
     expect(read(sessionHref('agents', { provider: 'codex', sessionId: 'abc' }, PROJECT))).toEqual({
-      pathname: '/agents',
+      pathname: '/memory/agents',
       params: { scope: 'p1', scopeLabel: 'P 1', sessionId: 'abc', sessionProvider: 'codex' },
     });
     expect(read(sessionHref('loom', { provider: 'codex', sessionId: 'abc' }, PROJECT)).params).toEqual({
@@ -47,7 +47,7 @@ describe('sessionHref', () => {
 
   it('links a provider-less id to Loom by the bare id Delivery has always sent', () => {
     expect(sessionHref('loom', { provider: null, sessionId: 'session.alpha.1' }, ALL)).toBe(
-      '/loom?loomSession=session.alpha.1',
+      '/memory/loom?loomSession=session.alpha.1',
     );
     expect(read(sessionHref('agents', { provider: null, sessionId: 'abc' }, ALL)).params).toEqual({
       sessionId: 'abc',

@@ -75,7 +75,7 @@ describe('DeliveryPage · inbox', () => {
     expect(within(correlation).getByText('WORK / EXPLICIT')).toBeTruthy();
     expect(within(correlation).getByText('TRANSCRIPT / INFERRED')).toBeTruthy();
     expect(within(correlation).getByRole('link', { name: /Open in Loom/ }).getAttribute('href')).toBe(
-      '/loom?loomSession=session.alpha.1',
+      '/memory/loom?loomSession=session.alpha.1',
     );
   });
 

@@ -87,7 +87,7 @@ export function AutomationsPage() {
   return (
     <div data-testid="automations-page" className="flex h-full min-h-0 min-w-0 flex-col" onKeyDown={onKeyDown}>
       <WorkspaceHeader
-        path="automations"
+        path="operations/automations"
         title="Automations"
         note="scheduler readings, managed jobs, skills, fact outcomes and the durable run ledger · daemon-owned automation authorities"
       />

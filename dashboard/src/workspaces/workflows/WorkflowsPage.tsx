@@ -84,7 +84,7 @@ export function WorkflowsPage() {
   return (
     <div className="min-w-0" data-testid="workflows-page">
       <WorkspaceHeader
-        path="workflows"
+        path="work/workflows"
         title="Workflows"
         note="definition ledger · immutable versions · pinned references · daemon-validated CAS · exact run lookup"
       />

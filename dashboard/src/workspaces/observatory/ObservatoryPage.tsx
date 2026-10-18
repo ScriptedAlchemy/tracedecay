@@ -121,7 +121,7 @@ export function ObservatoryPage() {
       onKeyDown={onKeyDown}
     >
       <WorkspaceHeader
-        path="observatory"
+        path="operations"
         title="Observatory"
         note="system evidence · independent authorities · one time context · no aggregate health"
       />

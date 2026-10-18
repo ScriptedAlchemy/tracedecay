@@ -208,7 +208,7 @@ export function AgentsPage() {
       }}
     >
       <WorkspaceHeader
-        path="agents"
+        path="memory/agents"
         title="Agents"
         note="delegation topology · handoffs, tokens and failures from their own authorities"
       />

@@ -102,7 +102,7 @@ export function LoomPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <WorkspaceHeader
-        path="loom"
+        path="memory/loom"
         title="Loom"
         note="temporal execution field · time left to right, recorded hierarchy down"
       />

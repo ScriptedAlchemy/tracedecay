@@ -267,10 +267,10 @@ describe('AgentsPage delegation topology', () => {
     await waitFor(() => expect(asked).toEqual(['session.codex.child']));
     const links = within(inspector() as HTMLElement).getByRole('navigation', { name: 'Open this session in' });
     const loom = new URL(within(links).getByRole('link', { name: /Open in Loom/ }).getAttribute('href')!, 'http://dashboard.test');
-    expect(loom.pathname).toBe('/loom');
+    expect(loom.pathname).toBe('/memory/loom');
     expect(loom.searchParams.get('loomSession')).toBe('["codex","session.codex.child"]');
     expect(within(links).getByRole('link', { name: /Open in Sessions/ }).getAttribute('href')).toBe(
-      '/sessions?sessionId=session.codex.child&sessionProvider=codex',
+      '/memory/sessions?sessionId=session.codex.child&sessionProvider=codex',
     );
   });
 
@@ -302,7 +302,7 @@ describe('AgentsPage delegation topology', () => {
     const unresolved = document.querySelector<HTMLElement>('[data-agents-unresolved="absent"]')!;
     expect(
       within(unresolved).getByRole('link', { name: /Open in Sessions/ }).getAttribute('href'),
-    ).toBe('/sessions?sessionId=session.gone&sessionProvider=codex');
+    ).toBe('/memory/sessions?sessionId=session.gone&sessionProvider=codex');
     expect(document.querySelector('[data-topology-selected]')).toBeNull();
     expect(inspector().getAttribute('data-agent-inspector-id')).toBe('cursor:session.cursor.solo');
     expect(screen.getAllByRole('navigation', { name: 'Open this session in' })).toEqual([

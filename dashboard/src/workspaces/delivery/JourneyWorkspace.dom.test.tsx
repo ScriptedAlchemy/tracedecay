@@ -81,7 +81,7 @@ describe('JourneyWorkspace', () => {
 
     const session = within(table).getByRole('button', { name: 'Session session.alpha.1' }).closest('tr')!;
     expect(within(session).getByText('TRANSCRIPT / INFERRED')).toBeTruthy();
-    expect(within(session).getByRole('link').getAttribute('href')).toBe('/loom?loomSession=session.alpha.1');
+    expect(within(session).getByRole('link').getAttribute('href')).toBe('/memory/loom?loomSession=session.alpha.1');
 
     const rows = within(table).getAllByRole('row').slice(1);
     const undatedIndex = rows.findIndex((row) => row.textContent?.startsWith('undated'));

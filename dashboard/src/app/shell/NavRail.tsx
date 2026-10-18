@@ -1,20 +1,5 @@
 import type { LucideIcon } from 'lucide-react';
-import {
-  Activity,
-  BookOpen,
-  Bot,
-  Boxes,
-  Brain,
-  Code2,
-  Compass,
-  GitBranch,
-  ListTodo,
-  MessagesSquare,
-  Settings,
-  Wallet,
-  Waypoints,
-  Workflow,
-} from 'lucide-react';
+import { Activity, Boxes, Brain, Code2, ListTodo, Settings } from 'lucide-react';
 import { NavLink } from 'react-router';
 import type { StorageFindingKindStatusV1 } from '../../contracts/generated.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
@@ -29,22 +14,11 @@ import { CHANNELS, channelNumber } from '../channels.ts';
 /** 14-16px monoline glyphs (DESIGN-SYSTEM.md "Brand"). An anatomical Brain
  * icon identifies channel 01; it is never the product logo. */
 const ICONS: Record<string, LucideIcon> = {
-  brain: Brain,
-  explorer: Compass,
-  loom: Workflow,
-  sessions: MessagesSquare,
-  agents: Bot,
   code: Code2,
-  knowledge: BookOpen,
-  delivery: GitBranch,
-  automations: Boxes,
-  observatory: Activity,
-  costs: Wallet,
-  settings: Settings,
+  memory: Brain,
   work: ListTodo,
-  // `Workflow` is Loom's icon; the Workflows workspace uses the DAG waypoints
-  // mark so the two channels stay distinguishable at a glance.
-  workflows: Waypoints,
+  operations: Activity,
+  settings: Settings,
 };
 
 /**
@@ -248,11 +222,11 @@ function BrandBlock() {
 }
 
 /**
- * The navigation rail (NAVIGATION.md "Persistent regions" 2): all fourteen
- * numbered workspaces in their fixed order, 192px expanded or 48px compact.
+ * The navigation rail (NAVIGATION.md "Persistent regions" 2): the five
+ * numbered task families in their fixed order, 192px expanded or 48px compact.
  *
  * Navigation only: no status, no badges except the single Doctor health dot
- * on Observatory, which is where Doctor lives. One flat register, the rail
+ * on Operations, the family whose first view, Observatory, is where Doctor lives. One flat register, the rail
  * used to file channels under group dividers and pin Settings to its foot,
  * which drew channel 12 below channel 14; the canonical rail draws them in
  * numeric order and nowhere else.
@@ -273,7 +247,7 @@ export function NavRail() {
             key={channel.path}
             path={channel.path}
             label={channel.label}
-            health={channel.path === 'observatory' ? health : undefined}
+            health={channel.path === 'operations' ? health : undefined}
             scope={scope}
           />
         ))}

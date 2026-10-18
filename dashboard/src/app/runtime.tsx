@@ -7,9 +7,7 @@ import {
   dashboardRouterBasename,
   HERMES_EMBED_BASENAME,
 } from './embedBasename.ts';
-import { RouteChunkBoundary } from './RouteChunkBoundary';
-import { WORKSPACES, router as defaultRouter } from './routes';
-import { Shell } from './shell/Shell';
+import { dashboardRoutes, router as defaultRouter } from './routes';
 
 export {
   applyEmbeddedPublicPath,
@@ -19,29 +17,7 @@ export {
 
 /** Same tree as `router` in `routes.tsx`, with the Hermes embed basename. */
 function createDashboardRouter(basename: string) {
-  const indexWorkspace = WORKSPACES[0];
-  if (indexWorkspace === undefined) {
-    throw new Error('dashboard workspace list is empty');
-  }
-  return createBrowserRouter(
-    [
-      {
-        path: '/',
-        element: <Shell />,
-        children: [
-          {
-            index: true,
-            element: <RouteChunkBoundary load={indexWorkspace.load} />,
-          },
-          ...WORKSPACES.map(({ path, load }) => ({
-            path,
-            element: <RouteChunkBoundary load={load} />,
-          })),
-        ],
-      },
-    ],
-    { basename },
-  );
+  return createBrowserRouter(dashboardRoutes(), { basename });
 }
 
 export function dashboardRouterForPath(pathname: string) {

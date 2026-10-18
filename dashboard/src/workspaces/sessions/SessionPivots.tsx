@@ -8,6 +8,13 @@ import { writeSessionSelection, type SessionSelection } from './model.ts';
 
 export type SessionWorkspace = 'sessions' | 'loom' | 'agents';
 
+/** Where each session workspace lives in the Memory family. */
+const PIVOT_PATHS: Record<SessionWorkspace, string> = {
+  sessions: 'memory/sessions',
+  loom: 'memory/loom',
+  agents: 'memory/agents',
+};
+
 const PIVOTS: Record<SessionWorkspace, { label: string; icon: LucideIcon }> = {
   sessions: { label: 'Open in Sessions', icon: MessagesSquare },
   loom: { label: 'Open in Loom', icon: Waypoints },
@@ -19,7 +26,7 @@ export function sessionHref(
   session: SessionSelection,
   scope: DashboardScope,
 ): string {
-  const [pathname, search = ''] = scopedWorkspacePath(scope, target).split('?');
+  const [pathname, search = ''] = scopedWorkspacePath(scope, PIVOT_PATHS[target]).split('?');
   const params = new URLSearchParams(search);
   if (target !== 'loom') return `${pathname}?${writeSessionSelection(params, session).toString()}`;
   params.set(

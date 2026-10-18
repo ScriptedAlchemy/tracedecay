@@ -1,7 +1,7 @@
 /**
  * The persistent shell's structural contract with
- * `mockups/ui-concept-v2/NAVIGATION.md`: one flat rail of fourteen numbered
- * channels in canonical order with a brand block that is identity only; a
+ * `mockups/ui-concept-v2/NAVIGATION.md`: one flat rail of five numbered
+ * task families in canonical order with a brand block that is identity only; a
  * register that names the scope, its canonical ID and the active channel; a
  * status strip whose registry cell reports the registry's own typed state.
  *
@@ -46,7 +46,7 @@ function queryWrapper(children: ReactNode) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
-function renderRail(route = '/brain') {
+function renderRail(route = '/memory') {
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
   return render(
     queryWrapper(
@@ -58,16 +58,20 @@ function renderRail(route = '/brain') {
 }
 
 describe('the navigation rail', () => {
-  it('draws all fourteen channels once, in canonical order, with no grouping', () => {
+  it('draws the five task families once, in canonical order, with no grouping', () => {
     renderRail();
     const nav = screen.getByRole('navigation', { name: 'Workspaces' });
     const links = Array.from(nav.querySelectorAll('a'));
     expect(links.map((link) => link.getAttribute('aria-label'))).toEqual(
       CHANNELS.map((channel) => channel.label),
     );
-    // Settings is channel 12 and sits at 12; it is not pinned to the foot.
-    expect(links[11]?.getAttribute('aria-label')).toBe('Settings');
-    expect(links.at(-1)?.getAttribute('aria-label')).toBe('Workflows');
+    expect(links.map((link) => link.getAttribute('aria-label'))).toEqual([
+      'Code',
+      'Memory',
+      'Work',
+      'Operations',
+      'Settings',
+    ]);
     // No register dividers: the rail is one list of channels.
     expect(nav.querySelectorAll('section')).toHaveLength(0);
   });
@@ -79,7 +83,7 @@ describe('the navigation rail', () => {
       (link) => link.querySelector('[aria-hidden]:nth-child(2)')?.textContent,
     );
     expect(numbers).toEqual(
-      Array.from({ length: 14 }, (_, index) => String(index + 1).padStart(2, '0')),
+      Array.from({ length: 5 }, (_, index) => String(index + 1).padStart(2, '0')),
     );
   });
 
@@ -120,13 +124,13 @@ describe('the scope/workspace register', () => {
     expect(screen.getByText('all')).toBeTruthy();
     const channel = screen.getByLabelText('Active channel');
     expect(channel.getAttribute('data-active-channel')).toBe('code');
-    expect(channel.textContent).toBe('06Code');
+    expect(channel.textContent).toBe('01Code');
   });
 
   it('shows the reconciled label with its canonical ID as a separate field', () => {
     useScope.getState().selectProject('prj_7fc9a21e8b4', 'neuronet', 'active');
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
-    render(queryWrapper(<ScopeBar channel={{ path: 'brain', label: 'Brain' }} />));
+    render(queryWrapper(<ScopeBar channel={{ path: 'memory', label: 'Memory' }} />));
 
     expect(document.querySelector('[data-scope-label]')?.textContent).toBe('neuronet');
     expect(document.querySelector('[data-scope-id]')?.textContent).toBe('prj_7fc9a21e8b4');

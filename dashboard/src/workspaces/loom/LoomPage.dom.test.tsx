@@ -775,8 +775,8 @@ describe('LoomPage', () => {
       return [url.pathname, Object.fromEntries(url.searchParams)];
     };
     const scoped = { scope: 'project-loom', scopeLabel: 'project loom', sessionId: 'session.old' };
-    expect(href(/Open in Sessions/)).toEqual(['/sessions', scoped]);
-    expect(href(/Open in Agents/)).toEqual(['/agents', scoped]);
+    expect(href(/Open in Sessions/)).toEqual(['/memory/sessions', scoped]);
+    expect(href(/Open in Agents/)).toEqual(['/memory/agents', scoped]);
     expect(within(links).queryByRole('link', { name: /Open in Loom/ })).toBeNull();
   });
 

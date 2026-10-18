@@ -2,8 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { WORKSPACES } from '../routes';
-import { channelNumber } from '../channels.ts';
+import { CHANNELS, channelNumber } from '../channels.ts';
 import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
 import {
@@ -62,16 +61,21 @@ export function CommandPalette({
   const projects = useProjectRegistry({ enabled: open });
 
   const entries = useMemo<CommandPaletteRow[]>(() => {
-    const workspaceEntries = WORKSPACES.map((w) => ({
-      id: `nav:${w.path}`,
-      label: w.label,
-      hint: 'workspace',
-      channel: channelNumber(w.path),
-      action: () => {
-        navigate(scopedWorkspacePath(scope, w.path));
-        onOpenChange(false);
-      },
-    }));
+    // Every view is a row, so a view is one keystroke away whichever family
+    // holds it. The hint names the family and is searched too: typing a
+    // family name lists its views.
+    const workspaceEntries = CHANNELS.flatMap((channel) =>
+      channel.views.map((v) => ({
+        id: `nav:${v.path}`,
+        label: v.label,
+        hint: channel.views.length === 1 ? 'workspace' : `${channel.label} · view`,
+        channel: channelNumber(v.path),
+        action: () => {
+          navigate(scopedWorkspacePath(scope, v.path));
+          onOpenChange(false);
+        },
+      })),
+    );
     const listing = projectRegistryPayload(projects.data);
     const projectEntries =
       listing?.status === 'ok'
@@ -97,7 +101,7 @@ export function CommandPalette({
                     isActive: project.is_active ?? null,
                   }),
                 );
-                navigate(scopedWorkspacePath(useScope.getState().scope, 'brain'));
+                navigate(scopedWorkspacePath(useScope.getState().scope, 'memory'));
                 onOpenChange(false);
               },
             })),
@@ -109,7 +113,11 @@ export function CommandPalette({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return entries;
-    return entries.filter((entry) => entry.label.toLowerCase().includes(q));
+    return entries.filter(
+      (entry) =>
+        entry.label.toLowerCase().includes(q) ||
+        (entry.channel !== null && entry.hint.toLowerCase().startsWith(q)),
+    );
   }, [entries, query]);
 
   useEffect(() => setActive(0), [query, open]);

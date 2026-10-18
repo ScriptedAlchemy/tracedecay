@@ -31,9 +31,9 @@ function crossLinks(id: EvidenceSourceId): readonly { path: string; label: strin
     case 'analytics':
       return [{ path: 'settings', label: 'Settings · analytics' }];
     case 'hooks':
-      return [{ path: 'agents', label: 'Agents · hook and tool activity' }];
+      return [{ path: 'memory/agents', label: 'Agents · hook and tool activity' }];
     case 'topology':
-      return [{ path: 'work', label: 'Work · execution topology' }];
+      return [{ path: 'work', label: 'Work · task placement' }];
     case 'observations':
     case 'doctor':
     case 'adoption':

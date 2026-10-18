@@ -267,7 +267,7 @@ describe('Session provenance inspector', () => {
     expect(within(relations).getByText(/feat\/spans · \/fast\/projects\/tracedecay/)).toBeTruthy();
 
     const pivot = screen.getByRole('link', { name: /Open in Loom/ });
-    expect(pivot.getAttribute('href')).toContain('/loom?');
+    expect(pivot.getAttribute('href')).toContain('/memory/loom?');
     expect(decodeURIComponent(pivot.getAttribute('href') ?? '')).toContain(
       'loomSession=["claude","claude:035c8f3c"]',
     );
@@ -319,7 +319,7 @@ describe('Session provenance inspector', () => {
     expect(identity.querySelector('[data-evidence-grade="AMBIGUOUS"]')).not.toBeNull();
     expect(screen.queryByRole('link', { name: /Open in Loom/ })).toBeNull();
     expect(screen.getByRole('link', { name: /Open in Agents/ }).getAttribute('href')).toBe(
-      '/agents?sessionId=claude%3A035c8f3c',
+      '/memory/agents?sessionId=claude%3A035c8f3c',
     );
     await userEvent.click(within(identity).getByRole('button', { name: /codex/ }));
     expect(onSelectProvider).toHaveBeenCalledWith('codex');

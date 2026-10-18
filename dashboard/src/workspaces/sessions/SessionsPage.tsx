@@ -111,7 +111,7 @@ export function SessionsPage() {
   return (
     <div className="flex flex-col lg:h-full lg:min-h-0">
       <WorkspaceHeader
-        path="sessions"
+        path="memory/sessions"
         title="Sessions"
         note="complete message timeline and session index"
       />

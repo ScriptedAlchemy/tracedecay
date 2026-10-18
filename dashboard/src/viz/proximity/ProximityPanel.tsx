@@ -179,13 +179,13 @@ function EncounterDetail({
               <a href={codeHref(encounter.relation)} className="min-h-11 text-accent">
                 Open Code
               </a>
-              <a href="/sessions" className="min-h-11 text-accent">
+              <a href="/memory/sessions" className="min-h-11 text-accent">
                 Open Sessions
               </a>
               <a href="/work" className="min-h-11 text-accent">
                 Open Work
               </a>
-              <a href="/delivery" className="min-h-11 text-accent">
+              <a href="/code/delivery" className="min-h-11 text-accent">
                 Open Delivery
               </a>
             </nav>

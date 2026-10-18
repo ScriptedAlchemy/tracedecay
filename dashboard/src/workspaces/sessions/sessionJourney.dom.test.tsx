@@ -44,9 +44,9 @@ function renderJourney(entry: string) {
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[entry]}>
         <Routes>
-          <Route path="/sessions" element={<SessionsPage />} />
-          <Route path="/agents" element={<AgentsPage />} />
-          <Route path="/loom" element={<LoomPage />} />
+          <Route path="/memory/sessions" element={<SessionsPage />} />
+          <Route path="/memory/agents" element={<AgentsPage />} />
+          <Route path="/memory/loom" element={<LoomPage />} />
         </Routes>
         <LocationProbe />
       </MemoryRouter>
@@ -64,12 +64,12 @@ const pivots = () => screen.getByRole('navigation', { name: 'Open this session i
 
 describe('session investigation journey', () => {
   it('follows one session from Sessions to Agents to Loom and back, in scope', async () => {
-    renderJourney('/sessions?scope=proj-1&scopeLabel=Project+one&sessionId=session.codex.child&sessionProvider=codex');
+    renderJourney('/memory/sessions?scope=proj-1&scopeLabel=Project+one&sessionId=session.codex.child&sessionProvider=codex');
     const sessionsInspector = await screen.findByRole('complementary', { name: 'Inspector' });
     expect(within(sessionsInspector).getByText('session.codex.child')).toBeTruthy();
 
     await userEvent.click(within(pivots()).getByRole('link', { name: /Open in Agents/ }));
-    expect(address.pathname).toBe('/agents');
+    expect(address.pathname).toBe('/memory/agents');
     expectScoped();
     await waitFor(() =>
       expect(
@@ -81,14 +81,14 @@ describe('session investigation journey', () => {
     );
 
     await userEvent.click(within(pivots()).getByRole('link', { name: /Open in Loom/ }));
-    expect(address.pathname).toBe('/loom');
+    expect(address.pathname).toBe('/memory/loom');
     expectScoped();
     const thread = await screen.findByRole('region', { name: 'Loaded execution' });
     expect(thread.textContent).toContain('session.codex.child');
     expect(thread.textContent).toContain('codex');
 
     await userEvent.click(within(pivots()).getByRole('link', { name: /Open in Sessions/ }));
-    expect(address.pathname).toBe('/sessions');
+    expect(address.pathname).toBe('/memory/sessions');
     expectScoped();
     expect(new URLSearchParams(address.search).get('sessionId')).toBe('session.codex.child');
     expect(new URLSearchParams(address.search).get('sessionProvider')).toBe('codex');
