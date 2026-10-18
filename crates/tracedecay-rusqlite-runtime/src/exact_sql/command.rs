@@ -6,7 +6,7 @@
 
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -18,10 +18,10 @@ use super::clock;
 use super::guard::{ExactSqlAuthority, with_exact_sql_guard};
 use super::{
     EXACT_SQL_TRANSACTION_IDLE_LIMIT, EXACT_SQL_TRANSACTION_LIMIT, ExactSqlAttachment,
-    ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
-    ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, MAX_EXACT_SQL_ATTACHMENTS,
-    SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database,
-    execute_query_unchecked, execute_request, read_across_wal_recovery,
+    ExactSqlBatchResult, ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt,
+    ExactSqlRows, ExactSqlStatement, ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy,
+    MAX_EXACT_SQL_ATTACHMENTS, SqlRequest, SqlResult, TransactionPolicy, attach_database,
+    detach_database, execute_query_unchecked, execute_request, read_across_wal_recovery,
     request_across_wal_recovery, sqlite_error, verify_write_authority,
 };
 use crate::connection::ConnectionMode;
@@ -51,21 +51,72 @@ pub(crate) enum WriterCommand {
     /// per statement. The job answers whether to commit.
     Job {
         job: WriterJob,
+        policy: JobPolicy,
         reply: async_channel::Sender<Result<(), ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
 }
 
-pub(crate) type WriterJob = Box<dyn FnOnce(&ExactSqlJobTransaction<'_>) -> bool + Send>;
+/// Answers whether to commit; an error rolls back and becomes the job's reply.
+pub(crate) type WriterJob =
+    Box<dyn FnOnce(&ExactSqlJobTransaction<'_>) -> Result<bool, ExactSqlError> + Send>;
+
+/// How long a write job may hold the writer. `Bounded` is one fixed lease.
+/// `AuthorizedLongLease` renews the lease after every successful statement,
+/// as the interactive long lease does, and needs attached write authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobPolicy {
+    Bounded,
+    AuthorizedLongLease,
+}
 
 /// The statements a write job may run inside its transaction, on the writer
 /// thread. Each statement gets the same guard, authority check and deadline as
 /// a statement of an interactive transaction.
 pub struct ExactSqlJobTransaction<'transaction> {
-    transaction: &'transaction Transaction<'transaction>,
+    transaction: &'transaction (dyn JobConnection + 'transaction),
     shutdown_requested: &'transaction Arc<AtomicBool>,
     authority: Option<&'transaction dyn ExactSqlWriteAuthority>,
-    deadline: Instant,
+    policy: JobPolicy,
+    deadline: Mutex<Instant>,
+}
+
+const _: () = {
+    const fn shareable<T: Send + Sync>() {}
+    shareable::<ExactSqlJobTransaction<'static>>();
+    shareable::<&ExactSqlJobTransaction<'static>>();
+};
+
+/// The job's transaction behind a trait object. A `Mutex` field would name the
+/// connection's lifetime and make [`ExactSqlJobTransaction`] invariant, and
+/// callers such as `WorkSqliteJobStorage` shorten its lifetime.
+trait JobConnection: Sync {
+    fn execute(
+        &self,
+        request: SqlRequest,
+        shutdown_requested: &Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<SqlResult, ExactSqlError>;
+}
+
+impl JobConnection for Mutex<TaskTransaction<'_>> {
+    fn execute(
+        &self,
+        request: SqlRequest,
+        shutdown_requested: &Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<SqlResult, ExactSqlError> {
+        let transaction = self.lock().unwrap_or_else(PoisonError::into_inner);
+        execute_request(
+            &transaction,
+            request,
+            true,
+            Some(Arc::clone(shutdown_requested)),
+            Some(deadline),
+            true,
+            None,
+        )
+    }
 }
 
 impl ExactSqlJobTransaction<'_> {
@@ -86,20 +137,27 @@ impl ExactSqlJobTransaction<'_> {
         }
     }
 
+    pub fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult, ExactSqlError> {
+        match self.dispatch(SqlRequest::ExecuteBatch(sql))? {
+            SqlResult::BatchExecuted(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
     fn dispatch(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
-        if clock::now() >= self.deadline {
+        let deadline = *self.deadline.lock().unwrap_or_else(PoisonError::into_inner);
+        if clock::now() >= deadline {
             return Err(ExactSqlError::TransactionExpired);
         }
         verify_write_authority(self.authority, request.intent())?;
-        execute_request(
-            self.transaction,
-            request,
-            true,
-            Some(Arc::clone(self.shutdown_requested)),
-            Some(self.deadline),
-            true,
-            None,
-        )
+        let result = self
+            .transaction
+            .execute(request, self.shutdown_requested, deadline);
+        if result.is_ok() && self.policy == JobPolicy::AuthorizedLongLease {
+            *self.deadline.lock().unwrap_or_else(PoisonError::into_inner) =
+                clock::now() + EXACT_SQL_TRANSACTION_LIMIT;
+        }
+        result
     }
 }
 
@@ -108,10 +166,16 @@ impl ExactSqlJobTransaction<'_> {
 async fn run_writer_job(
     connection: &mut Connection,
     job: WriterJob,
+    policy: JobPolicy,
     reply: &async_channel::Sender<Result<(), ExactSqlError>>,
     authority: Option<&dyn ExactSqlWriteAuthority>,
     shutdown_requested: &Arc<AtomicBool>,
 ) -> Result<(), ExactSqlError> {
+    if policy == JobPolicy::AuthorizedLongLease && authority.is_none() {
+        return Err(ExactSqlError::AuthorityDenied(
+            "long-lease job requires attached write authority".to_owned(),
+        ));
+    }
     verify_write_authority(authority, ExactSqlWriteIntent::BeginTransaction)?;
     let before = connection.total_changes();
     let transaction = begin_transaction_with_busy_retry(
@@ -122,24 +186,37 @@ async fn run_writer_job(
     )
     .await
     .map_err(|error| sqlite_error("begin exact SQL job", error))?;
+    // SAFETY: `TaskTransaction::new`'s contract holds. The transaction
+    // reborrows `run_writer_job`'s `&mut Connection`, so nothing else reaches
+    // the connection. The job may use it from any thread, but only through
+    // this mutex.
+    let transaction = Mutex::new(unsafe { TaskTransaction::new(transaction) });
     let _span = tracing::trace_span!("rusqlite.exact_sql.job").entered();
-    let commit = job(&ExactSqlJobTransaction {
+    let verdict = job(&ExactSqlJobTransaction {
         transaction: &transaction,
         shutdown_requested,
         authority,
-        deadline: clock::now() + EXACT_SQL_TRANSACTION_LIMIT,
+        policy,
+        deadline: Mutex::new(clock::now() + EXACT_SQL_TRANSACTION_LIMIT),
     });
+    let transaction = transaction
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_inner();
     // An interrupted write statement already rolled the transaction back
     // (see `discard_transaction`), so there is nothing left to commit.
-    if !commit || transaction.is_autocommit() || shutdown_requested.load(Ordering::Acquire) {
+    if !matches!(verdict, Ok(true))
+        || transaction.is_autocommit()
+        || shutdown_requested.load(Ordering::Acquire)
+    {
         let rollback = discard_transaction(transaction, before);
         if rollback.is_err() {
             shutdown_requested.store(true, Ordering::Release);
         }
-        return match (commit, rollback) {
-            (_, Err(error)) => Err(error),
-            (false, Ok(_)) => Ok(()),
-            (true, Ok(_)) => Err(ExactSqlError::TransactionClosed),
+        return match (verdict, rollback) {
+            (_, Err(error)) | (Err(error), Ok(_)) => Err(error),
+            (Ok(false), Ok(_)) => Ok(()),
+            (Ok(true), Ok(_)) => Err(ExactSqlError::TransactionClosed),
         };
     }
     verify_write_authority(authority, ExactSqlWriteIntent::Commit)?;
@@ -506,12 +583,14 @@ pub(crate) async fn run_writer_command(
         }
         WriterCommand::Job {
             job,
+            policy,
             reply,
             authority,
         } => {
             let result = run_writer_job(
                 connection,
                 job,
+                policy,
                 &reply,
                 authority.as_deref(),
                 shutdown_requested,

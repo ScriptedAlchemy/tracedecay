@@ -476,7 +476,20 @@ impl BoundedObservabilityProducerV1 {
     pub async fn shutdown(
         &self,
     ) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
-        self.core.stop(false).await
+        self.core
+            .stop(false, Instant::now() + self.core.deadlines.shutdown)
+            .await
+    }
+
+    /// Shutdown bounded by the caller's deadline instead of the producer's
+    /// own budget. A daemon shutdown phase can outlast that budget, and the
+    /// drain must finish its in-flight and terminal writes, each bounded by
+    /// the persistence deadline, before it can join.
+    pub async fn shutdown_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
+        self.core.stop(false, deadline).await
     }
 
     /// Confirms worker join and the writer fence completed. Persistence
@@ -504,7 +517,9 @@ impl BoundedObservabilityProducerV1 {
     }
 
     pub async fn cancel(&self) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
-        self.core.stop(true).await
+        self.core
+            .stop(true, Instant::now() + self.core.deadlines.shutdown)
+            .await
     }
 }
 
@@ -519,8 +534,8 @@ impl ObservabilityProducerCoreV1 {
     async fn stop(
         &self,
         cancelled: bool,
+        shutdown_deadline: Instant,
     ) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
-        let shutdown_deadline = Instant::now() + self.deadlines.shutdown;
         if self
             .state
             .compare_exchange(
