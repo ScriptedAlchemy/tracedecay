@@ -200,12 +200,14 @@ impl RegisteredGlobalDb {
             }
         }
 
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        schema::set_gc_meta(&transaction, LCM_PRIVACY_RESCAN_META_KEY, detector_revision).await?;
-        transaction.commit().await?;
+        let revision = detector_revision.to_owned();
+        self.transact_or(
+            |error| LcmError::Db(error.to_string()),
+            async move |transaction| {
+                schema::set_gc_meta(&transaction, LCM_PRIVACY_RESCAN_META_KEY, &revision).await
+            },
+        )
+        .await?;
 
         Ok(LcmPrivacyRescanOutcomeV1::Completed(
             LcmPrivacyRescanReceiptV1 {
@@ -352,21 +354,28 @@ impl RegisteredGlobalDb {
             LcmError::Db("metadata remediation requires stored metadata".to_owned())
         })?;
         let sanitized = raw::resanitize_stored_provider_metadata_json(stored)?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        let changed = transaction.execute(
-            "UPDATE lcm_raw_messages SET metadata_json = ?1 WHERE store_id = ?2 AND provider = ?3 AND message_id = ?4 AND metadata_json IS ?5",
-            params![sanitized, row.store_id, row.provider.as_str(), row.message_id.as_str(), stored],
-        ).await?;
-        if changed != 1 {
-            return Err(LcmError::Db(
-                "stored metadata changed during privacy remediation".to_owned(),
-            ));
-        }
-        transaction.commit().await?;
-        Ok(())
+        let (store_id, provider, message_id, stored) = (
+            row.store_id,
+            row.provider.clone(),
+            row.message_id.clone(),
+            stored.to_owned(),
+        );
+        self.transact_or(
+            |error| LcmError::Db(error.to_string()),
+            async move |transaction| {
+                let changed = transaction.execute(
+                    "UPDATE lcm_raw_messages SET metadata_json = ?1 WHERE store_id = ?2 AND provider = ?3 AND message_id = ?4 AND metadata_json IS ?5",
+                    params![sanitized.as_str(), store_id, provider.as_str(), message_id.as_str(), stored.as_str()],
+                ).await?;
+                if changed != 1 {
+                    return Err(LcmError::Db(
+                        "stored metadata changed during privacy remediation".to_owned(),
+                    ));
+                }
+                Ok(())
+            },
+        )
+        .await
     }
 
     /// Re-ingests one dirty row through the canonical staging and commit

@@ -164,46 +164,51 @@ pub async fn apply_registry_gc(
     profile_root: &Path,
     prefix: Option<String>,
 ) -> tracedecay_domain::errors::Result<RegistryGcReport> {
-    let transaction = db.begin_write_transaction().await?;
+    // Plan outside the job, then validate and apply inside one: the job reads
+    // the candidates' contexts through its own transaction, so the delete sees
+    // exactly what it re-probed.
     let mut report = registry_gc_report(db, profile_root, prefix).await?;
-    // Re-probe with the planning rule: an alias or store that appeared since
-    // the plan would otherwise be cascaded away with its identity.
-    for context in db
-        .project_registry_contexts_for_projects(&report.candidates)
-        .await?
-    {
-        if !project_context_liveness(&context).permits_retirement() {
-            return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "registry cleanup candidate '{}' became live while applying the plan",
-                    context.project.project_id
-                ),
-            });
-        }
-    }
-    for project_path in &report.storage_project_candidates {
-        if project_path.exists() {
-            return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "registry cleanup candidate '{}' became live while applying the plan",
-                    project_path.display()
-                ),
-            });
-        }
-    }
-    let project_ids = report
-        .candidates
-        .iter()
-        .map(|project| project.project_id.clone())
-        .collect::<Vec<_>>();
-    let (deleted_code_projects, deleted_storage_projects) =
-        delete_registry_gc_candidates_in_transaction(
-            &transaction,
-            &project_ids,
-            &report.storage_project_candidates,
-        )
-        .await?;
-    transaction.commit().await?;
+    let candidates = report.candidates.clone();
+    let storage_project_candidates = report.storage_project_candidates.clone();
+    let (deleted_code_projects, deleted_storage_projects) = db
+        .transact(async move |transaction| {
+            // Re-probe with the planning rule: an alias or store that appeared
+            // since the plan would otherwise be cascaded away with its identity.
+            for context in
+                crate::registered_dashboard::contexts_for_projects(&transaction, &candidates)
+                    .await?
+            {
+                if !project_context_liveness(&context).permits_retirement() {
+                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!(
+                            "registry cleanup candidate '{}' became live while applying the plan",
+                            context.project.project_id
+                        ),
+                    });
+                }
+            }
+            for project_path in &storage_project_candidates {
+                if project_path.exists() {
+                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!(
+                            "registry cleanup candidate '{}' became live while applying the plan",
+                            project_path.display()
+                        ),
+                    });
+                }
+            }
+            let project_ids = candidates
+                .iter()
+                .map(|project| project.project_id.clone())
+                .collect::<Vec<_>>();
+            delete_registry_gc_candidates_in_transaction(
+                &transaction,
+                &project_ids,
+                &storage_project_candidates,
+            )
+            .await
+        })
+        .await??;
     report.record_deletions(deleted_code_projects, deleted_storage_projects);
     Ok(report)
 }

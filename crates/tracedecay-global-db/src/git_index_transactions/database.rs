@@ -1,14 +1,12 @@
-use crate::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriteTransaction};
+use crate::RegisteredGlobalDb;
+use crate::registered::RegisteredGlobalDbWriteTx;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
-use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
+use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, Rows};
 
 #[derive(Clone, Copy)]
 pub(crate) enum GitMutationDatabase<'db> {
     Registered(&'db RegisteredGlobalDb),
-}
-
-pub(crate) enum GitMutationWriteTransaction<'db> {
-    Registered(RegisteredGlobalDbWriteTransaction<'db>),
 }
 
 pub(crate) enum GitMutationReadSnapshot {
@@ -30,52 +28,21 @@ impl QueryExecutor for GitMutationReadSnapshot {
     }
 }
 
-impl QueryExecutor for GitMutationWriteTransaction<'_> {
-    async fn query<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
-    where
-        P: IntoParams,
-    {
-        match self {
-            Self::Registered(transaction) => transaction.query(sql, params).await,
-        }
-    }
-}
-
-impl Executor for GitMutationWriteTransaction<'_> {
-    async fn execute<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> tracedecay_runtime_core::db::engine::Result<u64>
-    where
-        P: IntoParams,
-    {
-        match self {
-            Self::Registered(transaction) => transaction.execute(sql, params).await,
-        }
-    }
-
-    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
-        match self {
-            Self::Registered(transaction) => transaction.execute_batch(sql).await,
-        }
-    }
-}
-
 impl GitMutationDatabase<'_> {
-    #[tracing::instrument(name = "global_db.git_index.txn.begin", level = "trace", skip_all)]
-    pub(crate) async fn begin_write(
+    /// Runs `body` as one write job. A refused or failed job becomes
+    /// `wrap(cause)`; the body's own error is returned as is.
+    #[tracing::instrument(name = "global_db.git_index.txn.job", level = "trace", skip_all)]
+    pub(crate) async fn transact<R, E>(
         &self,
-    ) -> tracedecay_domain::errors::Result<GitMutationWriteTransaction<'_>> {
+        wrap: impl FnOnce(TraceDecayError) -> E,
+        body: impl AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> Result<R, E> + Send + Sync + 'static,
+    ) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: Send + 'static,
+    {
         match self {
-            Self::Registered(db) => db
-                .begin_write_transaction()
-                .await
-                .map(GitMutationWriteTransaction::Registered),
+            Self::Registered(db) => db.transact_or(wrap, body).await,
         }
     }
 
@@ -91,35 +58,5 @@ impl GitMutationDatabase<'_> {
                     tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
                 }),
         }
-    }
-}
-
-impl GitMutationWriteTransaction<'_> {
-    pub(crate) async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
-        match self {
-            Self::Registered(transaction) => transaction.commit().await,
-        }
-    }
-
-    pub(crate) async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
-        match self {
-            Self::Registered(transaction) => transaction.rollback().await,
-        }
-    }
-}
-
-impl crate::sqlite_persist::PersistWriteTransaction for GitMutationWriteTransaction<'_> {
-    fn commit(
-        self,
-    ) -> impl std::future::Future<Output = tracedecay_runtime_core::db::engine::Result<()>> + Send
-    {
-        GitMutationWriteTransaction::commit(self)
-    }
-
-    fn rollback(
-        self,
-    ) -> impl std::future::Future<Output = tracedecay_runtime_core::db::engine::Result<()>> + Send
-    {
-        GitMutationWriteTransaction::rollback(self)
     }
 }

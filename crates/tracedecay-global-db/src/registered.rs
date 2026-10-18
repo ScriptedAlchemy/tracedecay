@@ -984,6 +984,25 @@ impl<R, E> From<E> for JobExit<R, E> {
     }
 }
 
+/// [`RegisteredGlobalDb::transact_or_rollback`] for a site that holds the
+/// bare [`Database`]: a refused or failed job becomes `wrap(cause)`, and a
+/// `Rollback` exit returns its value without a commit.
+pub(crate) async fn database_transact_or_rollback<R, E>(
+    database: &Database,
+    operation: &str,
+    wrap: impl FnOnce(TraceDecayError) -> E,
+    body: impl AsyncFn(&WriteTx<'_, '_>) -> Result<R, JobExit<R, E>> + Send + Sync + 'static,
+) -> Result<R, E>
+where
+    R: Send + 'static,
+    E: Send + 'static,
+{
+    match database.transact(operation, body).await.map_err(wrap)? {
+        Ok(value) | Err(JobExit::Rollback(value)) => Ok(value),
+        Err(JobExit::Fail(error)) => Err(error),
+    }
+}
+
 /// The transaction a [`RegisteredGlobalDb::transact`] body runs in. It is a
 /// borrowed handle, so the body takes it by value and lends `&transaction` to
 /// helpers written against the executor traits.

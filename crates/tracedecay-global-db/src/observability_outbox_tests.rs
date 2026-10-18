@@ -993,3 +993,59 @@ async fn owner_fact_run_resolves_repeats_claims_and_stored_events_within_one_wri
         3
     );
 }
+
+#[asupersync::test]
+async fn owner_fact_job_never_prepares_and_commits_nothing_for_an_unprepared_fact() {
+    use crate::registered_analytics::ClaimSettleRun;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let harness = RegisteredGlobalDbHarness::open("observability-owner-unprepared").await;
+    let project = "scope:owner-unprepared";
+    let emissions: Arc<[ObservabilityOwnerEmissionWriteV1]> =
+        vec![owner_write(project, "owner:new", r#"{"owner":"new"}"#)].into();
+
+    let unprepared = harness
+        .registered
+        .claim_and_settle_prepared(Arc::clone(&emissions), Arc::new(BTreeMap::new()))
+        .await
+        .expect("job runs");
+    assert!(
+        matches!(&unprepared, ClaimSettleRun::Unprepared(missing) if missing == &[0]),
+        "a fact with no prepared delivery is reported, not settled: {unprepared:?}"
+    );
+    assert!(
+        harness
+            .registered
+            .read_observability_event(project, "owner:new")
+            .await
+            .expect("lookup")
+            .is_none(),
+        "an unprepared run must leave no commit"
+    );
+
+    let prepared = BTreeMap::from([(
+        0,
+        Ok(prepared_delivery(
+            project,
+            "owner:new",
+            r#"{"delivery":"new"}"#,
+        )),
+    )]);
+    let settled = harness
+        .registered
+        .claim_and_settle_prepared(emissions, Arc::new(prepared))
+        .await
+        .expect("job runs");
+    assert!(
+        matches!(
+            &settled,
+            ClaimSettleRun::Settled(outcomes)
+                if matches!(
+                    outcomes.as_slice(),
+                    [ObservabilityOwnerEmissionWriteOutcomeV1::Settled { .. }]
+                )
+        ),
+        "a prepared fact settles: {settled:?}"
+    );
+}

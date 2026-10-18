@@ -791,6 +791,34 @@ changes a file that holds memory.
   and the project registry, observation projection, LCM, provider usage,
   dashboard, session, schema-stage and invariant, git-index and observation
   retention and canonical-body groups.
+- Step 5i-5, global-db job writes, part three (2026-10-18, branch
+  `refactor/storage-global-db-jobs-3`). The three sites 5i-4 left for design
+  now run as jobs. `apply_registry_gc` plans outside, then one job re-probes the
+  candidates through its own transaction and deletes them.
+  `relink_orphan_store_instance` plans against a snapshot first, so a relink that
+  will not apply never touches the manifest. It then writes the manifest, runs
+  the move as a job that re-plans and applies, and puts the prior manifest back
+  whenever the job does not commit, but only while the file still holds what the
+  relink wrote. `claim_and_settle_observability_emissions` calls its `FnMut`
+  producer outside the job: a snapshot read finds the facts no outbox row owns,
+  the producer prepares those once, and the job reads each delivery from that
+  map. A fact the job finds unowned that the plan missed ends the job
+  uncommitted with its index and is prepared before the job runs again, so a
+  re-run never allocates a sequence. The same slice moves the project registry
+  upserts, deletes and reap, the git-index and native-integration stores (the
+  `GitMutationWriteTransaction` wrapper and `commit_outcome` are deleted), the
+  canonical-body and observation-retention pages, the observation-projection
+  retry re-arm and Codex echo convergence pages, the attached-store schema
+  install and performance indexes through `Database::transact_bulk`, and the
+  two LCM privacy rescan writes that touch only storage. Still interactive:
+  the session and temporal handle traits and `git_correlation_adapter`, whose
+  transactions cross into `tracedecay-sessions` and
+  `tracedecay-session-temporal-store`; the LCM publish, compress and
+  payload-remediation paths, which interleave payload file effects and
+  caller closures with the transaction; the observation-projection apply and
+  rebuild helpers, which are typed to `DatabaseWriteTransaction`; the
+  observation adapter refusal write; and the schema-contract invariant steps.
+  The interactive API therefore stays until those cross-crate traits move.
 - #4138 (2026-10-16). Shutdown store close waits up to 3 s for leases to drain
   before deciding a store's WAL cannot be truncated. Under load, owners joined
   before store close could still be unwinding the tasks that held their leases,

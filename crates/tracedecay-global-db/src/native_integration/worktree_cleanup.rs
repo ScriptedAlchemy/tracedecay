@@ -11,7 +11,7 @@ use tracedecay_store::{
 
 use super::GlobalDbNativeIntegrationStore;
 use super::store::{decode, encode, invalid, invalid_domain, text, unavailable};
-use crate::sqlite_persist::{commit_outcome, replay_if_equal, require_single_cas_row};
+use crate::sqlite_persist::{replay_if_equal, require_single_cas_row};
 
 impl GlobalDbNativeIntegrationStore<'_> {
     #[tracing::instrument(
@@ -30,8 +30,7 @@ impl GlobalDbNativeIntegrationStore<'_> {
         {
             return Err(NativeIntegrationStoreError::CleanupTransactionConflict);
         }
-        let transaction = self.begin_write().await?;
-        let outcome = async {
+        self.transact(async move |transaction| {
             if let Some((existing, receipt)) =
                 read_cleanup_record(&transaction, &record.confirmation_digest).await?
             {
@@ -77,15 +76,9 @@ impl GlobalDbNativeIntegrationStore<'_> {
                 .await
                 .map_err(unavailable)?;
             Ok(NativeWorktreeCleanupBeginResultV1::Started(Box::new(
-                record,
+                record.clone(),
             )))
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            NativeIntegrationStoreError::Unavailable,
-        )
+        })
         .await
     }
 
@@ -162,9 +155,9 @@ impl GlobalDbNativeIntegrationStore<'_> {
         {
             return Err(NativeIntegrationStoreError::StatusConflict);
         }
-        let transaction = self.begin_write().await?;
-        let outcome = async {
-            let (current, receipt) = read_cleanup_record(&transaction, confirmation_digest)
+        let confirmation_digest = confirmation_digest.clone();
+        self.transact(async move |transaction| {
+            let (current, receipt) = read_cleanup_record(&transaction, &confirmation_digest)
                 .await?
                 .ok_or(NativeIntegrationStoreError::StatusConflict)?;
             if receipt.is_some()
@@ -175,14 +168,8 @@ impl GlobalDbNativeIntegrationStore<'_> {
             let changed =
                 update_cleanup(&transaction, &replacement, expected_phase_revision).await?;
             require_single_cas_row(changed, NativeIntegrationStoreError::StatusConflict)?;
-            Ok(replacement)
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            NativeIntegrationStoreError::Unavailable,
-        )
+            Ok(replacement.clone())
+        })
         .await
     }
 
@@ -202,10 +189,10 @@ impl GlobalDbNativeIntegrationStore<'_> {
         if receipt.transaction.confirmation_digest != *confirmation_digest {
             return Err(NativeIntegrationStoreError::CleanupReceiptConflict);
         }
-        let transaction = self.begin_write().await?;
-        let outcome = async {
+        let confirmation_digest = confirmation_digest.clone();
+        self.transact(async move |transaction| {
             let (current, existing_receipt) =
-                read_cleanup_record(&transaction, confirmation_digest)
+                read_cleanup_record(&transaction, &confirmation_digest)
                     .await?
                     .ok_or(NativeIntegrationStoreError::CleanupReceiptConflict)?;
             if let Some(existing) = existing_receipt {
@@ -243,14 +230,8 @@ impl GlobalDbNativeIntegrationStore<'_> {
                 )
                 .await
                 .map_err(unavailable)?;
-            Ok(receipt)
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            NativeIntegrationStoreError::Unavailable,
-        )
+            Ok(receipt.clone())
+        })
         .await
     }
 }

@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
-    engine::{Row, Value},
+    engine::{Executor, QueryExecutor, Row, Value},
 };
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,
     ProjectStoreContext, RegisteredGlobalDb, StoreArtifactRecord, StoreInstanceRecord,
+    registered::JobExit,
 };
 
 type Result<T> = std::result::Result<T, TraceDecayError>;
@@ -343,68 +344,179 @@ impl RegisteredGlobalDb {
             ));
         }
 
-        let transaction = self.begin_write_transaction().await?;
-        let target_project_id = resolve_exact_project_at_root(&transaction, live_root).await?;
-        let Some(target_project_id) = target_project_id else {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| dashboard_error("rollback unregistered orphan relink", error))?;
+        let relink = OrphanRelink {
+            source_project_id: source_project_id.to_owned(),
+            store_id: store_id.to_owned(),
+            live_root: live_root.to_path_buf(),
+            expected_store_relpath: expected_store_relpath.to_owned(),
+            expected_created_at,
+            expected_last_write_at,
+            manifest_project_id: original_manifest.project_id.clone(),
+        };
+        // Plan against a snapshot first: a relink that will not apply must not
+        // touch the manifest at all.
+        let snapshot = self.dashboard_snapshot("plan orphan store relink").await?;
+        let Some(planned) = relink.plan(&snapshot).await? else {
             return Ok(false);
         };
-        if target_project_id == source_project_id {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| dashboard_error("rollback no-op orphan relink", error))?;
-            return Ok(false);
+        drop(snapshot);
+
+        let mut relinked_manifest = original_manifest.clone();
+        relinked_manifest.project_id = Some(planned.target_project_id.clone());
+        relinked_manifest.project_root = live_root.to_path_buf();
+        let current_manifest_bytes =
+            std::fs::read(&manifest_path).map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to recheck store manifest '{}': {error}",
+                    manifest_path.display()
+                ),
+            })?;
+        if current_manifest_bytes != original_manifest_bytes {
+            return Err(dashboard_message(
+                "relink orphan store instance",
+                "store manifest changed before relink",
+            ));
         }
-        if original_manifest.project_id.as_deref() != Some(source_project_id)
-            && original_manifest.project_id.as_deref() != Some(target_project_id.as_str())
+        let relinked_manifest_bytes =
+            serde_json::to_string_pretty(&relinked_manifest).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "failed to serialize store manifest '{}': {error}",
+                        manifest_path.display()
+                    ),
+                }
+            })?;
+        // The manifest is the one file effect. It is written before the job
+        // and put back by `restore_original_manifest` whenever the job does not
+        // commit the move, so the job body itself stays a pure storage write.
+        tracedecay_runtime_core::storage::write_store_manifest_to_path(
+            &manifest_path,
+            &relinked_manifest,
+        )?;
+
+        let outcome = self
+            .transact_or_rollback(
+                |error| dashboard_error("commit orphan store relink", error),
+                async move |transaction| {
+                    // The job re-reads what the plan read: a target or store
+                    // that moved since the snapshot ends the job uncommitted.
+                    match relink.plan(&transaction).await? {
+                        Some(applied) if applied.target_project_id == planned.target_project_id => {
+                            relink.apply(&transaction, &applied).await?;
+                            Ok(true)
+                        }
+                        _ => Err(JobExit::Rollback(false)),
+                    }
+                },
+            )
+            .await;
+        match outcome {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                restore_original_manifest(
+                    &manifest_path,
+                    &relinked_manifest_bytes,
+                    &original_manifest,
+                )
+                .map_err(|error| dashboard_message("restore orphan store manifest", error))?;
+                Ok(false)
+            }
+            Err(error) => match restore_original_manifest(
+                &manifest_path,
+                &relinked_manifest_bytes,
+                &original_manifest,
+            ) {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(dashboard_message(
+                    "commit orphan store relink",
+                    format!("{error}; {restore_error}"),
+                )),
+            },
+        }
+    }
+
+    async fn dashboard_snapshot(
+        &self,
+        operation: &'static str,
+    ) -> Result<DatabaseEngineReadSnapshot> {
+        self.read_snapshot()
+            .await
+            .map_err(|error| dashboard_error(operation, error))
+    }
+}
+
+/// An orphan store relink's inputs, owned so the job body can re-run them.
+struct OrphanRelink {
+    source_project_id: String,
+    store_id: String,
+    live_root: PathBuf,
+    expected_store_relpath: String,
+    expected_created_at: i64,
+    expected_last_write_at: Option<i64>,
+    manifest_project_id: Option<String>,
+}
+
+/// The rows a relink moves, read by [`OrphanRelink::plan`].
+struct OrphanRelinkMove {
+    target_project_id: String,
+    store: StoreInstanceRecord,
+    graph_scopes: Vec<GraphScopeRecord>,
+    artifacts: Vec<StoreArtifactRecord>,
+}
+
+impl OrphanRelink {
+    /// Reads what the move needs. `None` means the relink no longer applies.
+    async fn plan(&self, read: &impl QueryExecutor) -> Result<Option<OrphanRelinkMove>> {
+        let Some(target_project_id) = resolve_exact_project_at_root(read, &self.live_root).await?
+        else {
+            return Ok(None);
+        };
+        if target_project_id == self.source_project_id {
+            return Ok(None);
+        }
+        if self.manifest_project_id.as_deref() != Some(self.source_project_id.as_str())
+            && self.manifest_project_id.as_deref() != Some(target_project_id.as_str())
         {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| dashboard_error("rollback stale orphan relink", error))?;
             return Err(dashboard_message(
                 "relink orphan store instance",
                 "store manifest project identity changed before relink",
             ));
         }
-
-        let Some(store) = load_exact_store(&transaction, source_project_id, store_id).await? else {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| dashboard_error("rollback raced orphan relink", error))?;
-            return Ok(false);
+        let Some(store) = load_exact_store(read, &self.source_project_id, &self.store_id).await?
+        else {
+            return Ok(None);
         };
-        if store.store_relpath != expected_store_relpath
-            || store.created_at != expected_created_at
-            || store.last_write_at != expected_last_write_at
+        if store.store_relpath != self.expected_store_relpath
+            || store.created_at != self.expected_created_at
+            || store.last_write_at != self.expected_last_write_at
         {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| dashboard_error("rollback changed orphan relink", error))?;
-            return Ok(false);
+            return Ok(None);
         }
-        let graph_scopes = load_store_graph_scopes(&transaction, store_id).await?;
-        let artifacts = load_store_artifacts(&transaction, store_id).await?;
+        let graph_scopes = load_store_graph_scopes(read, &self.store_id).await?;
+        let artifacts = load_store_artifacts(read, &self.store_id).await?;
+        Ok(Some(OrphanRelinkMove {
+            target_project_id,
+            store,
+            graph_scopes,
+            artifacts,
+        }))
+    }
 
+    async fn apply(&self, transaction: &impl Executor, moved: &OrphanRelinkMove) -> Result<()> {
+        let store = &moved.store;
+        let target_project_id = moved.target_project_id.as_str();
         let deleted = transaction
             .execute(
                 "DELETE FROM store_instances
                  WHERE store_id = ?1 AND project_id = ?2",
-                tracedecay_runtime_core::db::engine::params![store_id, source_project_id],
+                tracedecay_runtime_core::db::engine::params![
+                    self.store_id.as_str(),
+                    self.source_project_id.as_str()
+                ],
             )
             .await
             .map_err(|error| dashboard_error("remove prior orphan store identity", error))?;
         if deleted != 1 {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| dashboard_error("rollback ambiguous orphan relink", error))?;
             return Err(dashboard_message(
                 "relink orphan store instance",
                 "orphan store identity was not unique",
@@ -417,12 +529,12 @@ impl RegisteredGlobalDb {
                     manifest_relpath, created_at, last_verified_at, last_write_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 tracedecay_runtime_core::db::engine::params![
-                    store.store_id,
-                    target_project_id.as_str(),
-                    store.store_kind,
-                    store.storage_mode,
-                    store.store_relpath,
-                    store.manifest_relpath,
+                    store.store_id.as_str(),
+                    target_project_id,
+                    store.store_kind.as_str(),
+                    store.storage_mode.as_str(),
+                    store.store_relpath.as_str(),
+                    store.manifest_relpath.as_str(),
                     store.created_at,
                     store.last_verified_at,
                     store.last_write_at
@@ -430,7 +542,7 @@ impl RegisteredGlobalDb {
             )
             .await
             .map_err(|error| dashboard_error("insert transferred orphan store identity", error))?;
-        for scope in graph_scopes {
+        for scope in &moved.graph_scopes {
             transaction
                 .execute(
                     "INSERT INTO graph_scopes (
@@ -438,11 +550,11 @@ impl RegisteredGlobalDb {
                         parent_scope_id, last_synced_at, writable
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     tracedecay_runtime_core::db::engine::params![
-                        scope.graph_scope_id,
-                        target_project_id.as_str(),
-                        scope.store_id,
-                        scope.branch_name,
-                        scope.parent_scope_id,
+                        scope.graph_scope_id.as_str(),
+                        target_project_id,
+                        scope.store_id.as_str(),
+                        scope.branch_name.as_str(),
+                        scope.parent_scope_id.clone(),
                         scope.last_synced_at,
                         i64::from(scope.writable)
                     ],
@@ -450,16 +562,16 @@ impl RegisteredGlobalDb {
                 .await
                 .map_err(|error| dashboard_error("restore transferred graph scope", error))?;
         }
-        for artifact in artifacts {
+        for artifact in &moved.artifacts {
             transaction
                 .execute(
                     "INSERT INTO store_artifacts (
                         store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     tracedecay_runtime_core::db::engine::params![
-                        artifact.store_id,
-                        artifact.artifact_kind,
-                        artifact.relpath,
+                        artifact.store_id.as_str(),
+                        artifact.artifact_kind.as_str(),
+                        artifact.relpath.as_str(),
                         artifact.size_bytes,
                         artifact.schema_version,
                         artifact.updated_at
@@ -475,94 +587,33 @@ impl RegisteredGlobalDb {
                    AND NOT EXISTS (
                        SELECT 1 FROM store_instances WHERE project_id = ?1
                    )",
-                tracedecay_runtime_core::db::engine::params![source_project_id],
+                tracedecay_runtime_core::db::engine::params![self.source_project_id.as_str()],
             )
             .await
             .map_err(|error| dashboard_error("retire empty orphan project identity", error))?;
-
-        let mut relinked_manifest = original_manifest.clone();
-        relinked_manifest.project_id = Some(target_project_id);
-        relinked_manifest.project_root = live_root.to_path_buf();
-        let current_manifest_bytes =
-            std::fs::read(&manifest_path).map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "failed to recheck store manifest '{}': {error}",
-                    manifest_path.display()
-                ),
-            })?;
-        if current_manifest_bytes != original_manifest_bytes {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| dashboard_error("rollback raced orphan manifest relink", error))?;
-            return Err(dashboard_message(
-                "relink orphan store instance",
-                "store manifest changed before relink",
-            ));
-        }
-        let relinked_manifest_bytes =
-            serde_json::to_string_pretty(&relinked_manifest).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to serialize store manifest '{}': {error}",
-                        manifest_path.display()
-                    ),
-                }
-            })?;
-        if let Err(error) = tracedecay_runtime_core::storage::write_store_manifest_to_path(
-            &manifest_path,
-            &relinked_manifest,
-        ) {
-            transaction.rollback().await.map_err(|rollback_error| {
-                dashboard_message(
-                    "rollback orphan relink after manifest failure",
-                    format!("{error}; rollback failed: {rollback_error}"),
-                )
-            })?;
-            return Err(error);
-        }
-
-        if let Err(error) = transaction.commit().await {
-            return match std::fs::read(&manifest_path) {
-                Ok(current) if current == relinked_manifest_bytes.as_bytes() => {
-                    match tracedecay_runtime_core::storage::write_store_manifest_to_path(
-                        &manifest_path,
-                        &original_manifest,
-                    ) {
-                        Ok(()) => Err(dashboard_error("commit orphan store relink", error)),
-                        Err(restore_error) => Err(dashboard_message(
-                            "commit orphan store relink",
-                            format!(
-                                "{error}; restoring the prior manifest failed: {restore_error}"
-                            ),
-                        )),
-                    }
-                }
-                Ok(_) => Err(dashboard_message(
-                    "commit orphan store relink",
-                    format!("{error}; manifest changed concurrently and was not restored"),
-                )),
-                Err(read_error) => Err(dashboard_message(
-                    "commit orphan store relink",
-                    format!("{error}; reading the manifest for rollback failed: {read_error}"),
-                )),
-            };
-        }
-        Ok(true)
+        Ok(())
     }
+}
 
-    async fn dashboard_snapshot(
-        &self,
-        operation: &'static str,
-    ) -> Result<DatabaseEngineReadSnapshot> {
-        self.read_snapshot()
-            .await
-            .map_err(|error| dashboard_error(operation, error))
+/// Puts the prior manifest back after a job that did not commit the move, but
+/// only while the file still holds what the relink wrote.
+fn restore_original_manifest(
+    manifest_path: &Path,
+    relinked_bytes: &str,
+    original: &tracedecay_runtime_core::storage::StoreManifest,
+) -> std::result::Result<(), String> {
+    match std::fs::read(manifest_path) {
+        Ok(current) if current == relinked_bytes.as_bytes() => {
+            tracedecay_runtime_core::storage::write_store_manifest_to_path(manifest_path, original)
+                .map_err(|error| format!("restoring the prior manifest failed: {error}"))
+        }
+        Ok(_) => Err("manifest changed concurrently and was not restored".to_owned()),
+        Err(error) => Err(format!("reading the manifest for rollback failed: {error}")),
     }
 }
 
 async fn resolve_exact_project_at_root(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl QueryExecutor,
     live_root: &Path,
 ) -> Result<Option<String>> {
     let root = RegisteredGlobalDb::canonical_project_key(live_root);
@@ -609,7 +660,7 @@ async fn resolve_exact_project_at_root(
 }
 
 async fn load_exact_store(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl QueryExecutor,
     project_id: &str,
     store_id: &str,
 ) -> Result<Option<StoreInstanceRecord>> {
@@ -636,7 +687,7 @@ async fn load_exact_store(
 }
 
 async fn load_store_graph_scopes(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl QueryExecutor,
     store_id: &str,
 ) -> Result<Vec<GraphScopeRecord>> {
     let mut rows = transaction
@@ -665,7 +716,7 @@ async fn load_store_graph_scopes(
 }
 
 async fn load_store_artifacts(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl QueryExecutor,
     store_id: &str,
 ) -> Result<Vec<StoreArtifactRecord>> {
     let mut rows = transaction
@@ -692,8 +743,8 @@ async fn load_store_artifacts(
     Ok(artifacts)
 }
 
-async fn contexts_for_projects(
-    snapshot: &DatabaseEngineReadSnapshot,
+pub(crate) async fn contexts_for_projects(
+    snapshot: &impl QueryExecutor,
     projects: &[CodeProjectRecord],
 ) -> Result<Vec<ProjectRegistryContext>> {
     if projects.is_empty() {
@@ -836,7 +887,7 @@ async fn contexts_for_projects(
 }
 
 async fn query_ids(
-    snapshot: &DatabaseEngineReadSnapshot,
+    snapshot: &impl QueryExecutor,
     sql_template: &str,
     ids: &[String],
     operation: &'static str,

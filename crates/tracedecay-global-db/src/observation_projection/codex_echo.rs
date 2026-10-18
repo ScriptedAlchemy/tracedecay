@@ -18,6 +18,7 @@ use tracedecay_store::{
 
 use super::apply::retire_replaced_codex_output;
 use super::state::{read_observation, storage, storage_message};
+use crate::registered::{JobExit, database_transact_or_rollback};
 
 const CODEX: &str = "codex";
 const OPERATION: &str = "retire Codex response echoes";
@@ -137,38 +138,38 @@ pub(crate) async fn converge_codex_response_echoes(
 ) -> ProjectionStoreResult<()> {
     let mut after = String::new();
     loop {
-        let transaction = database
-            .begin_write_transaction(OPERATION)
-            .await
-            .map_err(|error| storage(OPERATION, error))?;
-        let converged = !lcm_raw_messages_exist(&transaction).await?
-            || schema_version::read_version(&transaction, CONVERGENCE)
-                .await
-                .map_err(|error| storage(OPERATION, error))?
-                .is_some();
-        if converged {
-            return transaction
-                .commit()
-                .await
-                .map_err(|error| storage(OPERATION, error));
-        }
-        let sessions = codex_session_page(&transaction, &after).await?;
-        for session_id in &sessions {
-            retire_session_echoes(&transaction, session_id).await?;
-        }
-        let last_page = sessions.len() < SESSION_PAGE;
-        if last_page {
-            schema_version::record_version(&transaction, CONVERGENCE, 1)
-                .await
-                .map_err(|error| storage(OPERATION, error))?;
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage(OPERATION, error))?;
-        match sessions.into_iter().last() {
-            Some(last) if !last_page => after = last,
-            _ => return Ok(()),
+        let cursor = after.clone();
+        // `None` ends the convergence: nothing to do, or the last page.
+        let next = database_transact_or_rollback(
+            database,
+            OPERATION,
+            |error| storage(OPERATION, error),
+            async move |transaction| {
+                let converged = !lcm_raw_messages_exist(transaction).await?
+                    || schema_version::read_version(transaction, CONVERGENCE)
+                        .await
+                        .map_err(|error| storage(OPERATION, error))?
+                        .is_some();
+                if converged {
+                    return Err(JobExit::Rollback(None));
+                }
+                let sessions = codex_session_page(transaction, &cursor).await?;
+                for session_id in &sessions {
+                    retire_session_echoes(transaction, session_id).await?;
+                }
+                let last_page = sessions.len() < SESSION_PAGE;
+                if last_page {
+                    schema_version::record_version(transaction, CONVERGENCE, 1)
+                        .await
+                        .map_err(|error| storage(OPERATION, error))?;
+                }
+                Ok(sessions.into_iter().last().filter(|_| !last_page))
+            },
+        )
+        .await?;
+        match next {
+            Some(last) => after = last,
+            None => return Ok(()),
         }
     }
 }

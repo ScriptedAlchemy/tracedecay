@@ -2,17 +2,31 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
-use tracedecay_runtime_core::db::engine::{Executor, Value, opt_text};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value, opt_text};
 
 use super::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
     AnalyticsToolCounts, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
     ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
     ObservabilityRollupRetentionReceiptV1, PreparedObservabilityEmissionV1, RegisteredGlobalDb,
-    RegisteredGlobalDbWriteTransaction, analytics_scope_query,
-    observability_rollup::expire_observability_rollups, row_to_analytics_event,
+    analytics_scope_query, observability_rollup::expire_observability_rollups, registered::JobExit,
+    row_to_analytics_event,
 };
+
+/// How many times a claim-and-settle run prepares facts the plan missed before
+/// it gives up. Only a row pruned between the plan and the job makes one miss,
+/// so a second pass settles the run.
+const CLAIM_SETTLE_ATTEMPTS: usize = 3;
+
+/// What one claim-and-settle job ended with.
+#[derive(Debug)]
+pub(crate) enum ClaimSettleRun {
+    Settled(Vec<ObservabilityOwnerEmissionWriteOutcomeV1>),
+    /// Facts the job found unowned that the plan had not prepared.
+    Unprepared(Vec<usize>),
+}
 
 const OBSERVABILITY_DETAIL_RETENTION_SECONDS: i64 = 30 * 86_400;
 const OBSERVABILITY_ROLLUP_RETENTION_SECONDS: i64 = 395 * 86_400;
@@ -534,7 +548,7 @@ impl RegisteredGlobalDb {
     pub async fn claim_and_settle_observability_emissions<F>(
         &self,
         emissions: &[ObservabilityOwnerEmissionWriteV1],
-        prepare_new: F,
+        mut prepare_new: F,
     ) -> Result<Vec<ObservabilityOwnerEmissionWriteOutcomeV1>, String>
     where
         F: FnMut(usize) -> Result<PreparedObservabilityEmissionV1, String>,
@@ -545,18 +559,112 @@ impl RegisteredGlobalDb {
         if emissions.len() > 1_024 {
             return Err("invalid observability outbox batch".to_owned());
         }
-        let transaction = self.begin_write_transaction().await.map_err(|error| {
-            format!("failed to begin observability outbox claim and settlement: {error}")
-        })?;
-        let outcomes =
-            match claim_and_settle_owner_facts_in_tx(&transaction, emissions, prepare_new).await {
-                Ok(outcomes) => outcomes,
-                Err(error) => return Err(rollback_observability_write(transaction, error).await),
-            };
-        transaction.commit().await.map_err(|error| {
-            format!("failed to commit observability outbox claim and settlement: {error}")
-        })?;
-        Ok(outcomes)
+        let emissions: Arc<[ObservabilityOwnerEmissionWriteV1]> = emissions.into();
+        // `prepare_new` allocates producer sequences, so it runs here, once per
+        // fact, never inside a job that may be replayed. The plan reads the
+        // facts no outbox row owns yet; the job re-reads them in its own
+        // transaction and settles with the prepared deliveries. A fact the job
+        // finds unowned but the plan did not prepare ends the job uncommitted,
+        // is prepared next, and the job runs again.
+        let mut prepared = Arc::new(BTreeMap::new());
+        self.prepare_unclaimed_owner_facts_up_front(&emissions, &mut prepare_new, &mut prepared)
+            .await?;
+        let mut needed = Vec::new();
+        for _ in 0..CLAIM_SETTLE_ATTEMPTS {
+            for index in needed.drain(..) {
+                let candidate = prepare_new(index);
+                Arc::make_mut(&mut prepared).insert(index, candidate);
+            }
+            match self
+                .claim_and_settle_prepared(Arc::clone(&emissions), Arc::clone(&prepared))
+                .await?
+            {
+                ClaimSettleRun::Settled(outcomes) => return Ok(outcomes),
+                ClaimSettleRun::Unprepared(missing) => needed = missing,
+            }
+        }
+        Err("observability outbox batch kept changing while settling".to_owned())
+    }
+
+    /// The settling job. It never calls the producer: a fact it finds unowned
+    /// reads its delivery from `prepared`, and one with no entry ends the job
+    /// uncommitted with that fact's index, so a re-run allocates nothing.
+    pub(crate) async fn claim_and_settle_prepared(
+        &self,
+        emissions: Arc<[ObservabilityOwnerEmissionWriteV1]>,
+        prepared: Arc<BTreeMap<usize, Result<PreparedObservabilityEmissionV1, String>>>,
+    ) -> Result<ClaimSettleRun, String> {
+        self.transact_or_rollback(
+            |error| format!("failed to run observability outbox claim and settlement: {error}"),
+            async move |transaction| {
+                let mut missing = Vec::new();
+                let outcomes =
+                    claim_and_settle_owner_facts_in_tx(&transaction, &emissions, |index| {
+                        prepared.get(&index).cloned().unwrap_or_else(|| {
+                            missing.push(index);
+                            Err(String::new())
+                        })
+                    })
+                    .await?;
+                if missing.is_empty() {
+                    Ok(ClaimSettleRun::Settled(outcomes))
+                } else {
+                    Err(JobExit::Rollback(ClaimSettleRun::Unprepared(missing)))
+                }
+            },
+        )
+        .await
+    }
+
+    /// Prepares a delivery into `prepared` for each valid fact no outbox row
+    /// owns yet, in order. A fact repeated in the run is prepared once, as the
+    /// settling job would.
+    async fn prepare_unclaimed_owner_facts_up_front<F>(
+        &self,
+        emissions: &[ObservabilityOwnerEmissionWriteV1],
+        prepare_new: &mut F,
+        prepared: &mut Arc<BTreeMap<usize, Result<PreparedObservabilityEmissionV1, String>>>,
+    ) -> Result<(), String>
+    where
+        F: FnMut(usize) -> Result<PreparedObservabilityEmissionV1, String>,
+    {
+        let open = emissions
+            .iter()
+            .enumerate()
+            .filter(|(_, emission)| {
+                validate_owner_fact_input(
+                    &emission.project_id,
+                    &emission.owner_event_id,
+                    &emission.owner_fact_json,
+                )
+                .is_ok()
+            })
+            .collect::<Vec<_>>();
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to begin observability outbox snapshot: {error}"))?;
+        let mut known = stored_owner_facts(
+            &snapshot,
+            open.iter()
+                .map(|(_, emission)| (emission.project_id.clone(), emission.owner_event_id.clone()))
+                .collect(),
+        )
+        .await?;
+        for (index, emission) in open {
+            let key = (emission.project_id.clone(), emission.owner_event_id.clone());
+            if known.contains_key(&key) {
+                continue;
+            }
+            let candidate = prepare_new(index);
+            if candidate.as_ref().is_ok_and(|candidate| {
+                validate_prepared_owner_emission(emission, candidate).is_ok()
+            }) {
+                known.insert(key, emission.owner_fact_json.clone());
+            }
+            Arc::make_mut(prepared).insert(index, candidate);
+        }
+        Ok(())
     }
 
     /// Reads only producer-stamped [`tracedecay_domain::ObservabilityEnvelopeV1`]
@@ -1271,7 +1379,7 @@ fn bind_key_pairs(mut sql: String, keys: Vec<(String, String)>) -> (String, Vec<
 
 /// Stored owner facts for `keys`, by `(project_id, owner_event_id)`.
 async fn stored_owner_facts(
-    transaction: &impl Executor,
+    transaction: &impl QueryExecutor,
     keys: Vec<(String, String)>,
 ) -> Result<BTreeMap<(String, String), String>, String> {
     let mut stored = BTreeMap::new();
@@ -1382,16 +1490,6 @@ async fn insert_settled_outbox_rows(
         }
     }
     Ok(())
-}
-
-async fn rollback_observability_write(
-    transaction: RegisteredGlobalDbWriteTransaction<'_>,
-    error: String,
-) -> String {
-    match transaction.rollback().await {
-        Ok(()) => error,
-        Err(rollback_error) => format!("{error}; rollback failed: {rollback_error}"),
-    }
 }
 
 fn validate_outbox_input(

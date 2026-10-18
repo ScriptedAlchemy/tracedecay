@@ -85,7 +85,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::db::{
-    Database, DatabaseWriteTransaction,
+    Database,
     engine::{Executor, IntoParams, Params, QueryExecutor, Value, opt_text, params},
 };
 
@@ -369,22 +369,30 @@ impl LedgerCursor {
 }
 
 async fn write_ledger_cursors(database: &Database, cursors: &[(&str, LedgerCursor)]) -> Result<()> {
-    let txn = database
-        .begin_write_transaction("record observation retention ledger cursors")
-        .await
-        .map_err(db_error)?;
-    for (pass, cursor) in cursors {
-        txn.execute(
-            "INSERT INTO session_backfill_meta(key, value, updated_at)
-             VALUES (?1, ?2, unixepoch())
-             ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value, updated_at = excluded.updated_at",
-            params![LedgerCursor::key(pass), cursor.encode()],
+    let writes = cursors
+        .iter()
+        .map(|(pass, cursor)| (LedgerCursor::key(pass), cursor.encode()))
+        .collect::<Vec<_>>();
+    database
+        .transact(
+            "record observation retention ledger cursors",
+            async move |txn| {
+                for (key, value) in &writes {
+                    txn.execute(
+                        "INSERT INTO session_backfill_meta(key, value, updated_at)
+                         VALUES (?1, ?2, unixepoch())
+                         ON CONFLICT(key) DO UPDATE SET
+                            value = excluded.value, updated_at = excluded.updated_at",
+                        params![key.as_str(), value.as_str()],
+                    )
+                    .await
+                    .map_err(db_error)?;
+                }
+                Ok::<_, TraceDecayError>(())
+            },
         )
         .await
-        .map_err(db_error)?;
-    }
-    commit_transaction(txn).await
+        .map_err(db_error)?
 }
 
 /// Ledger rows one disposition page reads.
@@ -589,15 +597,6 @@ pub async fn run_observation_retention(
     Ok(report)
 }
 
-#[tracing::instrument(
-    name = "global_db.observation.retention.persist",
-    level = "trace",
-    skip_all
-)]
-async fn commit_transaction(transaction: DatabaseWriteTransaction<'_>) -> Result<()> {
-    transaction.commit().await.map_err(db_error)
-}
-
 async fn execute_required(executor: &(impl Executor + ?Sized), sql: &str) -> Result<()> {
     executor
         .execute(sql, ())
@@ -614,6 +613,7 @@ fn reclaimed_bytes(original_len: u64, marker: &str) -> u64 {
 }
 
 /// One row whose payload a pass selected for release.
+#[derive(Clone)]
 struct ReleaseTarget {
     id: String,
     original_len: u64,
@@ -621,6 +621,7 @@ struct ReleaseTarget {
 }
 
 /// The in-place payload rewrite one pass applies to its selected batch.
+#[derive(Clone)]
 struct PayloadRelease {
     intent: &'static str,
     drop_trigger: &'static str,
@@ -696,49 +697,70 @@ async fn release_payload_batch(
     report: &mut ObservationRetentionPhaseReport,
     errors: &mut Vec<String>,
 ) -> Result<()> {
-    let txn = database
-        .begin_write_transaction(release.intent)
-        .await
-        .map_err(db_error)?;
-    execute_required(&txn, release.drop_trigger).await?;
-    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
-        let ids = (0..chunk.len())
-            .map(|index| format!("?{}", index + 3))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = release.update.replace("{ids}", &ids);
-        let mut values = Vec::with_capacity(chunk.len() + 2);
-        values.push(Value::Text(release.marker.to_owned()));
-        values.push(Value::Integer(release.cutoff.0));
-        values.extend(chunk.iter().map(|target| Value::Text(target.id.clone())));
-        let mut rows = match txn.query(&sql, values).await {
-            Ok(rows) => rows,
-            Err(err) => {
-                errors.push(format!(
-                    "release {} batch ({} ids starting {}): {err}",
-                    release.label,
-                    chunk.len(),
-                    chunk[0].id
-                ));
-                continue;
+    // The job body can run again, so it builds its counts and errors fresh and
+    // hands them back for the caller to fold into the report.
+    let intent = release.intent;
+    let release = release.clone();
+    let targets = targets.to_vec();
+    let outcome = database
+        .transact(intent, async move |txn| {
+            let mut outcome = ReleaseBatchOutcome::default();
+            execute_required(txn, release.drop_trigger).await?;
+            for chunk in targets.chunks(RETENTION_DML_CHUNK) {
+                let ids = (0..chunk.len())
+                    .map(|index| format!("?{}", index + 3))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = release.update.replace("{ids}", &ids);
+                let mut values = Vec::with_capacity(chunk.len() + 2);
+                values.push(Value::Text(release.marker.to_owned()));
+                values.push(Value::Integer(release.cutoff.0));
+                values.extend(chunk.iter().map(|target| Value::Text(target.id.clone())));
+                let mut rows = match txn.query(&sql, values).await {
+                    Ok(rows) => rows,
+                    Err(err) => {
+                        outcome.errors.push(format!(
+                            "release {} batch ({} ids starting {}): {err}",
+                            release.label,
+                            chunk.len(),
+                            chunk[0].id
+                        ));
+                        continue;
+                    }
+                };
+                let mut released = std::collections::BTreeSet::new();
+                while let Some(row) = rows.next().await.map_err(db_error)? {
+                    released.insert(row.get::<String>(0).map_err(db_error)?);
+                }
+                drop(rows);
+                outcome.acted = outcome.acted.saturating_add(released.len() as u64);
+                outcome.bytes_reclaimed = outcome.bytes_reclaimed.saturating_add(
+                    chunk
+                        .iter()
+                        .filter(|target| released.contains(&target.id))
+                        .map(|target| reclaimed_bytes(target.original_len, release.marker))
+                        .sum(),
+                );
             }
-        };
-        let mut released = std::collections::BTreeSet::new();
-        while let Some(row) = rows.next().await.map_err(db_error)? {
-            released.insert(row.get::<String>(0).map_err(db_error)?);
-        }
-        drop(rows);
-        report.acted = report.acted.saturating_add(released.len() as u64);
-        report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(
-            chunk
-                .iter()
-                .filter(|target| released.contains(&target.id))
-                .map(|target| reclaimed_bytes(target.original_len, release.marker))
-                .sum(),
-        );
-    }
-    execute_required(&txn, release.create_trigger).await?;
-    commit_transaction(txn).await
+            execute_required(txn, release.create_trigger).await?;
+            Ok::<_, TraceDecayError>(outcome)
+        })
+        .await
+        .map_err(db_error)??;
+    report.acted = report.acted.saturating_add(outcome.acted);
+    report.bytes_reclaimed = report
+        .bytes_reclaimed
+        .saturating_add(outcome.bytes_reclaimed);
+    errors.extend(outcome.errors);
+    Ok(())
+}
+
+/// What one release job counted, for the caller to fold into its report.
+#[derive(Default)]
+struct ReleaseBatchOutcome {
+    acted: u64,
+    bytes_reclaimed: u64,
+    errors: Vec<String>,
 }
 
 /// Shared inputs of the three ledger-driven release passes, and the ledger

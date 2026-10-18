@@ -39,16 +39,19 @@ struct CompactionPage<T> {
     rewrote: bool,
 }
 
-/// Each page restores guards before committing and releases the canonical
-/// writer. Interrupted runs can rescan already-slim rows without changing them.
+/// Each page is one write job that restores guards before it commits.
+/// Interrupted runs can rescan already-slim rows without changing them.
 pub(crate) async fn converge_canonical_bodies(
     database: &Database,
 ) -> tracedecay_domain::errors::Result<()> {
     let mut after = None;
     loop {
-        let transaction = database.begin_write_transaction(OPERATION).await?;
-        let page = compact_observation_page(&transaction, after.as_deref()).await?;
-        transaction.commit().await?;
+        let cursor: Option<String> = after.take();
+        let page = database
+            .transact(OPERATION, async move |transaction| {
+                compact_observation_page(transaction, cursor.as_deref()).await
+            })
+            .await??;
         after = page.next;
         if after.is_none() {
             break;
@@ -57,20 +60,22 @@ pub(crate) async fn converge_canonical_bodies(
     }
     let mut after = 0;
     loop {
-        let transaction = database.begin_write_transaction(OPERATION).await?;
-        if migration_recorded(&transaction, LCM_CANONICAL_BODY_MIGRATION).await?
-            && migration_recorded(&transaction, LCM_PLACEHOLDER_SNIPPET_MIGRATION).await?
-        {
-            transaction.commit().await?;
-            break;
-        }
-        let page = compact_lcm_page(&transaction, after).await?;
-        if page.next.is_none() {
-            record_migration(&transaction, LCM_CANONICAL_BODY_MIGRATION).await?;
-            record_migration(&transaction, LCM_PLACEHOLDER_SNIPPET_MIGRATION).await?;
-        }
-        transaction.commit().await?;
-        let Some(next) = page.next else {
+        let page = database
+            .transact(OPERATION, async move |transaction| {
+                if migration_recorded(transaction, LCM_CANONICAL_BODY_MIGRATION).await?
+                    && migration_recorded(transaction, LCM_PLACEHOLDER_SNIPPET_MIGRATION).await?
+                {
+                    return Ok(None);
+                }
+                let page = compact_lcm_page(transaction, after).await?;
+                if page.next.is_none() {
+                    record_migration(transaction, LCM_CANONICAL_BODY_MIGRATION).await?;
+                    record_migration(transaction, LCM_PLACEHOLDER_SNIPPET_MIGRATION).await?;
+                }
+                Ok::<_, tracedecay_domain::errors::TraceDecayError>(Some(page))
+            })
+            .await??;
+        let Some(next) = page.and_then(|page| page.next) else {
             break;
         };
         after = next;

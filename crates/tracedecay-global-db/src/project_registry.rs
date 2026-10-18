@@ -8,7 +8,9 @@ use tracing::Instrument;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, Rows, Value, params};
+use tracedecay_runtime_core::db::engine::{
+    Executor, IntoParams, QueryExecutor, Rows, Value, params,
+};
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
@@ -399,7 +401,7 @@ async fn alias_project_id(
 
 /// The registered `(canonical_root, git_common_dir)` of `project_id`.
 async fn registered_root(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &impl QueryExecutor,
     project_id: &str,
 ) -> tracedecay_domain::errors::Result<Option<(String, Option<String>)>> {
     const OPERATION: &str = "upsert code project";
@@ -992,10 +994,21 @@ impl RegisteredGlobalDb {
                     .iter()
                     .map(tracedecay_runtime_core::storage::IdentityAnchor::alias_key)
                     .collect::<Vec<_>>();
-                let transaction = self
-                    .begin_write_transaction()
-                    .await
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                // Everything the job reads or writes is owned by the closure, so
+                // the body can run again from the same inputs.
+                let job_project_id = project_id.to_owned();
+                let job_git_remote_url = git_remote_url.map(str::to_owned);
+                let job_default_branch = default_branch.map(str::to_owned);
+                let job_held_marker = held_marker;
+                let job_git_common_dir_alias = git_common_dir_alias;
+                let authority_project_id = self.transact_or(
+                    |error| global_db_operation_error(OPERATION, error),
+                    async move |transaction| {
+                let project_id = job_project_id.as_str();
+                let git_remote_url = job_git_remote_url.as_deref();
+                let default_branch = job_default_branch.as_deref();
+                let held_marker = job_held_marker.clone();
+                let git_common_dir_alias = job_git_common_dir_alias.clone();
 
                 let mut existing_authorities = BTreeSet::new();
                 let path_aliases = [
@@ -1096,11 +1109,11 @@ impl RegisteredGlobalDb {
                     last_seen_at = excluded.last_seen_at",
                             params![
                                 authority_project_id.as_str(),
-                                canonical_root,
+                                canonical_root.as_str(),
                                 native_project_path_platform(),
                                 encode_native_project_path(&canonical_project_root),
                                 now,
-                                git_common_dir_text,
+                                git_common_dir_text.as_deref(),
                                 git_remote_url,
                                 default_branch
                             ],
@@ -1118,7 +1131,7 @@ impl RegisteredGlobalDb {
                         .await
                         .map_err(|error| global_db_operation_error(OPERATION, error))?;
                 }
-                let mut aliases = vec![current_root_alias];
+                let mut aliases = vec![current_root_alias.clone()];
                 aliases.extend(git_common_dir_alias);
                 if let Some(alias) = super::git_remote_search_alias(git_remote_url) {
                     aliases.push(alias);
@@ -1138,22 +1151,22 @@ impl RegisteredGlobalDb {
                 }
                 // An anchor keeps the project that first recorded it, so a
                 // history later grafted into another repository cannot move it.
-                for alias in anchor_aliases {
+                for alias in &anchor_aliases {
                     transaction
                         .execute(
                             "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
                      VALUES (?1, ?2, ?3)
                      ON CONFLICT(alias_path) DO UPDATE SET
                         last_seen_at = excluded.last_seen_at",
-                            params![alias, authority_project_id.as_str(), now],
+                            params![alias.as_str(), authority_project_id.as_str(), now],
                         )
                         .await
                         .map_err(|error| global_db_operation_error(OPERATION, error))?;
                 }
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                Ok(authority_project_id)
+                    },
+                )
+                .await?;
                 // A committed authority that cannot be read back is a registry
                 // inconsistency, not an "unregistered project", say so rather than
                 // handing the caller an absence it would read as a clean refusal.
@@ -1207,25 +1220,25 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_domain::errors::Result<ProjectAliasRecord> {
         const OPERATION: &str = "upsert project alias";
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .execute(
-                "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(alias_path) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    last_seen_at = excluded.last_seen_at",
-                params![alias, project_id, now],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let (write_alias, write_project_id) = (alias.to_owned(), project_id.to_owned());
+        self.transact_or(
+            |error| global_db_operation_error(OPERATION, error),
+            async move |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(alias_path) DO UPDATE SET
+                            project_id = excluded.project_id,
+                            last_seen_at = excluded.last_seen_at",
+                        params![write_alias.as_str(), write_project_id.as_str(), now],
+                    )
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                Ok(())
+            },
+        )
+        .await?;
         let snapshot = self
             .read_snapshot()
             .await
@@ -1277,42 +1290,43 @@ impl RegisteredGlobalDb {
         upsert: StoreInstanceUpsert,
     ) -> tracedecay_domain::errors::Result<StoreInstanceRecord> {
         const OPERATION: &str = "upsert store instance";
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .execute(
-                "INSERT INTO store_instances
-                 (store_id, project_id, store_kind, storage_mode, store_relpath,
-                  manifest_relpath, created_at, last_verified_at, last_write_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(store_id) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    store_kind = excluded.store_kind,
-                    storage_mode = excluded.storage_mode,
-                    store_relpath = excluded.store_relpath,
-                    manifest_relpath = excluded.manifest_relpath,
-                    last_verified_at = excluded.last_verified_at,
-                    last_write_at = excluded.last_write_at",
-                params![
-                    upsert.store_id.as_str(),
-                    upsert.project_id.as_str(),
-                    upsert.store_kind.as_str(),
-                    upsert.storage_mode.as_str(),
-                    upsert.store_relpath.as_str(),
-                    upsert.manifest_relpath.as_deref(),
-                    tracedecay_runtime_core::tracedecay::current_timestamp(),
-                    upsert.last_verified_at,
-                    upsert.last_write_at
-                ],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+        let write = upsert.clone();
+        self.transact_or(
+            |error| global_db_operation_error(OPERATION, error),
+            async move |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO store_instances
+                         (store_id, project_id, store_kind, storage_mode, store_relpath,
+                          manifest_relpath, created_at, last_verified_at, last_write_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                         ON CONFLICT(store_id) DO UPDATE SET
+                            project_id = excluded.project_id,
+                            store_kind = excluded.store_kind,
+                            storage_mode = excluded.storage_mode,
+                            store_relpath = excluded.store_relpath,
+                            manifest_relpath = excluded.manifest_relpath,
+                            last_verified_at = excluded.last_verified_at,
+                            last_write_at = excluded.last_write_at",
+                        params![
+                            write.store_id.as_str(),
+                            write.project_id.as_str(),
+                            write.store_kind.as_str(),
+                            write.storage_mode.as_str(),
+                            write.store_relpath.as_str(),
+                            write.manifest_relpath.as_deref(),
+                            now,
+                            write.last_verified_at,
+                            write.last_write_at
+                        ],
+                    )
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                Ok(())
+            },
+        )
+        .await?;
         self.project_registry_context_by_id(&upsert.project_id)
             .await?
             .ok_or_else(|| {
@@ -1356,39 +1370,39 @@ impl RegisteredGlobalDb {
         upsert: GraphScopeUpsert,
     ) -> tracedecay_domain::errors::Result<GraphScopeRecord> {
         const OPERATION: &str = "upsert graph scope";
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .execute(
-                "INSERT INTO graph_scopes
-                 (graph_scope_id, project_id, store_id, branch_name,
-                  parent_scope_id, last_synced_at, writable)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(graph_scope_id) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    store_id = excluded.store_id,
-                    branch_name = excluded.branch_name,
-                    parent_scope_id = excluded.parent_scope_id,
-                    last_synced_at = excluded.last_synced_at,
-                    writable = excluded.writable",
-                params![
-                    upsert.graph_scope_id.as_str(),
-                    upsert.project_id.as_str(),
-                    upsert.store_id.as_str(),
-                    upsert.branch_name.as_str(),
-                    upsert.parent_scope_id.as_deref(),
-                    upsert.last_synced_at,
-                    i64::from(upsert.writable)
-                ],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let write = upsert.clone();
+        self.transact_or(
+            |error| global_db_operation_error(OPERATION, error),
+            async move |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO graph_scopes
+                         (graph_scope_id, project_id, store_id, branch_name,
+                          parent_scope_id, last_synced_at, writable)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                         ON CONFLICT(graph_scope_id) DO UPDATE SET
+                            project_id = excluded.project_id,
+                            store_id = excluded.store_id,
+                            branch_name = excluded.branch_name,
+                            parent_scope_id = excluded.parent_scope_id,
+                            last_synced_at = excluded.last_synced_at,
+                            writable = excluded.writable",
+                        params![
+                            write.graph_scope_id.as_str(),
+                            write.project_id.as_str(),
+                            write.store_id.as_str(),
+                            write.branch_name.as_str(),
+                            write.parent_scope_id.as_deref(),
+                            write.last_synced_at,
+                            i64::from(write.writable)
+                        ],
+                    )
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                Ok(())
+            },
+        )
+        .await?;
         self.project_registry_context_by_id(&upsert.project_id)
             .await?
             .ok_or_else(|| {
@@ -1432,34 +1446,34 @@ impl RegisteredGlobalDb {
         upsert: StoreArtifactUpsert,
     ) -> tracedecay_domain::errors::Result<StoreArtifactRecord> {
         const OPERATION: &str = "upsert store artifact";
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .execute(
-                "INSERT INTO store_artifacts
-                 (store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(store_id, artifact_kind, relpath) DO UPDATE SET
-                    size_bytes = excluded.size_bytes,
-                    schema_version = excluded.schema_version,
-                    updated_at = excluded.updated_at",
-                params![
-                    upsert.store_id.as_str(),
-                    upsert.artifact_kind.as_str(),
-                    upsert.relpath.as_str(),
-                    upsert.size_bytes,
-                    upsert.schema_version.as_deref(),
-                    upsert.updated_at
-                ],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let write = upsert.clone();
+        self.transact_or(
+            |error| global_db_operation_error(OPERATION, error),
+            async move |transaction| {
+                transaction
+                    .execute(
+                        "INSERT INTO store_artifacts
+                         (store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(store_id, artifact_kind, relpath) DO UPDATE SET
+                            size_bytes = excluded.size_bytes,
+                            schema_version = excluded.schema_version,
+                            updated_at = excluded.updated_at",
+                        params![
+                            write.store_id.as_str(),
+                            write.artifact_kind.as_str(),
+                            write.relpath.as_str(),
+                            write.size_bytes,
+                            write.schema_version.as_deref(),
+                            write.updated_at
+                        ],
+                    )
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                Ok(())
+            },
+        )
+        .await?;
         let snapshot = self
             .read_snapshot()
             .await
@@ -2105,25 +2119,24 @@ impl RegisteredGlobalDb {
         if project_ids.is_empty() {
             return Ok(0);
         }
-        let transaction = self.begin_write_transaction().await?;
-        let mut total = 0_usize;
-        for chunk in project_ids.chunks(CHUNK) {
-            let sql = format!(
-                "DELETE FROM code_projects WHERE project_id IN ({})",
-                vec!["?"; chunk.len()].join(",")
-            );
-            let values = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
-            let deleted = transaction
-                .execute(&sql, values)
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            total = total.saturating_add(deleted as usize);
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        Ok(total)
+        let project_ids = project_ids.to_vec();
+        self.transact(async move |transaction| {
+            let mut total = 0_usize;
+            for chunk in project_ids.chunks(CHUNK) {
+                let sql = format!(
+                    "DELETE FROM code_projects WHERE project_id IN ({})",
+                    vec!["?"; chunk.len()].join(",")
+                );
+                let values = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
+                let deleted = transaction
+                    .execute(&sql, values)
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                total = total.saturating_add(deleted as usize);
+            }
+            Ok::<_, tracedecay_domain::errors::TraceDecayError>(total)
+        })
+        .await?
     }
 
     /// Deletes one savings-ledger row, returning how many rows went away
@@ -2138,19 +2151,18 @@ impl RegisteredGlobalDb {
         project_path: &Path,
     ) -> tracedecay_domain::errors::Result<usize> {
         const OPERATION: &str = "delete registered project ledger row";
-        let transaction = self.begin_write_transaction().await?;
-        let deleted = transaction
-            .execute(
-                "DELETE FROM projects WHERE path = ?1",
-                params![project_path_alias_key(project_path)],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        Ok(deleted as usize)
+        let key = project_path_alias_key(project_path);
+        self.transact(async move |transaction| {
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM projects WHERE path = ?1",
+                    params![key.as_str()],
+                )
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            Ok::<_, tracedecay_domain::errors::TraceDecayError>(deleted as usize)
+        })
+        .await?
     }
 
     /// Deletes savings-ledger rows by path, returning the committed row count.
@@ -2168,28 +2180,27 @@ impl RegisteredGlobalDb {
         if project_paths.is_empty() {
             return Ok(0);
         }
-        let transaction = self.begin_write_transaction().await?;
-        let mut total = 0_usize;
-        for chunk in project_paths.chunks(CHUNK) {
-            let sql = format!(
-                "DELETE FROM projects WHERE path IN ({})",
-                vec!["?"; chunk.len()].join(",")
-            );
-            let values = chunk
-                .iter()
-                .map(|path| Value::Text(project_path_alias_key(path.as_ref())))
-                .collect::<Vec<_>>();
-            let deleted = transaction
-                .execute(&sql, values)
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            total = total.saturating_add(deleted as usize);
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        Ok(total)
+        let keys = project_paths
+            .iter()
+            .map(|path| project_path_alias_key(path.as_ref()))
+            .collect::<Vec<_>>();
+        self.transact(async move |transaction| {
+            let mut total = 0_usize;
+            for chunk in keys.chunks(CHUNK) {
+                let sql = format!(
+                    "DELETE FROM projects WHERE path IN ({})",
+                    vec!["?"; chunk.len()].join(",")
+                );
+                let values = chunk.iter().cloned().map(Value::Text).collect::<Vec<_>>();
+                let deleted = transaction
+                    .execute(&sql, values)
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                total = total.saturating_add(deleted as usize);
+            }
+            Ok::<_, tracedecay_domain::errors::TraceDecayError>(total)
+        })
+        .await?
     }
 
     /// Lists registered code-project roots from one frozen runtime snapshot.
@@ -2244,21 +2255,27 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        self.classify_registry_reap(&snapshot).await
+        Self::classify_registry_reap(self.reap_profile_root()?, &snapshot).await
     }
 
-    async fn classify_registry_reap(
-        &self,
-        snapshot: &impl QueryExecutor,
-    ) -> tracedecay_domain::errors::Result<RegistryReapPlan> {
-        const OPERATION: &str = "classify registry reap";
-        let profile_root = self
+    fn reap_profile_root(&self) -> tracedecay_domain::errors::Result<PathBuf> {
+        Ok(self
             .db_path()
             .parent()
             .ok_or_else(|| {
-                global_db_operation_message(OPERATION, "global database has no profile directory")
+                global_db_operation_message(
+                    "classify registry reap",
+                    "global database has no profile directory",
+                )
             })?
-            .to_path_buf();
+            .to_path_buf())
+    }
+
+    async fn classify_registry_reap(
+        profile_root: PathBuf,
+        snapshot: &impl QueryExecutor,
+    ) -> tracedecay_domain::errors::Result<RegistryReapPlan> {
+        const OPERATION: &str = "classify registry reap";
         let mut plan = RegistryReapPlan::default();
 
         let mut rows = snapshot
@@ -2407,37 +2424,36 @@ impl RegisteredGlobalDb {
         plan: &RegistryReapPlan,
     ) -> tracedecay_domain::errors::Result<usize> {
         const OPERATION: &str = "apply registry reap";
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut eligible: HashSet<_> = self
-            .classify_registry_reap(&transaction)
-            .await?
-            .reapable
-            .into_iter()
-            .collect();
-        let mut removed = 0;
-        for entry in &plan.reapable {
-            if !eligible.remove(entry) || Path::new(&entry.missing_path).exists() {
-                continue;
+        let profile_root = self.reap_profile_root()?;
+        let reapable = plan.reapable.clone();
+        self.transact(async move |transaction| {
+            let mut eligible: HashSet<_> =
+                Self::classify_registry_reap(profile_root.clone(), &transaction)
+                    .await?
+                    .reapable
+                    .into_iter()
+                    .collect();
+            let mut removed = 0;
+            for entry in &reapable {
+                if !eligible.remove(entry) || Path::new(&entry.missing_path).exists() {
+                    continue;
+                }
+                let statement = match entry.kind {
+                    ReapEntryKind::SavingsLedgerPath => "DELETE FROM projects WHERE path = ?1",
+                    ReapEntryKind::ProjectAlias => {
+                        "DELETE FROM project_aliases WHERE alias_path = ?1"
+                    }
+                    ReapEntryKind::CodeProject => "DELETE FROM code_projects WHERE project_id = ?1",
+                };
+                let changed_rows = transaction
+                    .execute(statement, params![entry.key.as_str()])
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                removed += usize::from(changed_rows != 0);
             }
-            let statement = match entry.kind {
-                ReapEntryKind::SavingsLedgerPath => "DELETE FROM projects WHERE path = ?1",
-                ReapEntryKind::ProjectAlias => "DELETE FROM project_aliases WHERE alias_path = ?1",
-                ReapEntryKind::CodeProject => "DELETE FROM code_projects WHERE project_id = ?1",
-            };
-            let changed_rows = transaction
-                .execute(statement, params![entry.key.as_str()])
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            removed += usize::from(changed_rows != 0);
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        Ok(removed)
+            Ok::<_, tracedecay_domain::errors::TraceDecayError>(removed)
+        })
+        .await?
     }
 }
 

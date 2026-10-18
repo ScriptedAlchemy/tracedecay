@@ -13,13 +13,14 @@ use tracedecay_store::{
 };
 
 use crate::RegisteredGlobalDb;
+use crate::registered::RegisteredGlobalDbWriteTx;
 use crate::sqlite_persist::{
-    ReplayPresence, commit_outcome, replay_if_equal, require_absent_or_equal,
-    require_inserted_or_active, require_single_cas_row,
+    ReplayPresence, replay_if_equal, require_absent_or_equal, require_inserted_or_active,
+    require_single_cas_row,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
-use super::database::{GitMutationDatabase, GitMutationReadSnapshot, GitMutationWriteTransaction};
+use super::database::{GitMutationDatabase, GitMutationReadSnapshot};
 
 /// Async canonical-store adapter for Git index transaction state.
 ///
@@ -57,13 +58,9 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         if encoded.len() > MAX_GIT_INDEX_PREVIEW_INPUT_BYTES {
             return Err(GitIndexTransactionStoreError::PreviewInputTooLarge);
         }
-        let transaction = self.begin_write().await?;
-        let outcome = insert_preview_input_if_absent(&transaction, &input, &encoded).await;
-        commit_outcome(
-            transaction,
-            outcome,
-            GitIndexTransactionStoreError::Unavailable,
-        )
+        self.transact(async move |transaction| {
+            insert_preview_input_if_absent(&transaction, &input, &encoded).await
+        })
         .await
     }
 
@@ -112,8 +109,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
                 next_expiry,
             });
         }
-        let transaction = self.begin_write().await?;
-        let outcome = async {
+        self.transact(async move |transaction| {
             let purged = transaction
                 .execute(
                     "UPDATE git_index_preview_inputs
@@ -135,13 +131,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
                 purged: purged as usize,
                 next_expiry: next_live_preview_input_expiry(&transaction).await?,
             })
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            GitIndexTransactionStoreError::Unavailable,
-        )
+        })
         .await
     }
 
@@ -155,13 +145,9 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         preview: GitIndexPreviewV1,
     ) -> GitIndexTransactionStoreResult<()> {
         preview.validate().map_err(invalid_domain)?;
-        let transaction = self.begin_write().await?;
-        let outcome = insert_preview_if_absent(&transaction, &preview).await;
-        commit_outcome(
-            transaction,
-            outcome,
-            GitIndexTransactionStoreError::Unavailable,
-        )
+        self.transact(async move |transaction| {
+            insert_preview_if_absent(&transaction, &preview).await
+        })
         .await
     }
 
@@ -195,8 +181,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         request: GitIndexTransactionBeginRequestV1,
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1> {
         request.validate().map_err(invalid_domain)?;
-        let transaction = self.begin_write().await?;
-        let outcome = async {
+        self.transact(async move |transaction| {
             if let Some(existing) =
                 read_record_from_transaction(&transaction, &request.idempotency_key).await?
             {
@@ -244,21 +229,15 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
             insert_journal(&transaction, &request.idempotency_key, &request.journal).await?;
 
             let record = GitIndexTransactionRecordV1 {
-                idempotency_key: request.idempotency_key,
-                input_digest: request.input_digest,
-                preview: request.preview,
-                journal: request.journal,
+                idempotency_key: request.idempotency_key.clone(),
+                input_digest: request.input_digest.clone(),
+                preview: request.preview.clone(),
+                journal: request.journal.clone(),
                 terminal_receipt: None,
             };
             record.validate().map_err(invalid_domain)?;
             Ok(GitIndexTransactionBeginResultV1::Started(Box::new(record)))
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            GitIndexTransactionStoreError::Unavailable,
-        )
+        })
         .await
     }
 
@@ -275,9 +254,9 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
             return Err(GitIndexTransactionStoreError::JournalConflict);
         }
 
-        let transaction = self.begin_write().await?;
-        let outcome = async {
-            let record = read_record_from_transaction(&transaction, idempotency_key)
+        let idempotency_key = idempotency_key.clone();
+        self.transact(async move |transaction| {
+            let record = read_record_from_transaction(&transaction, &idempotency_key)
                 .await?
                 .ok_or(GitIndexTransactionStoreError::JournalConflict)?;
             if record.terminal_receipt.is_some()
@@ -303,14 +282,8 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
                 .await
                 .map_err(unavailable)?;
             require_single_cas_row(updated, GitIndexTransactionStoreError::JournalConflict)?;
-            Ok(replacement)
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            GitIndexTransactionStoreError::Unavailable,
-        )
+            Ok(replacement.clone())
+        })
         .await
     }
 
@@ -328,12 +301,11 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         write: GitIndexTransactionTerminalWriteV1,
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1> {
         write.validate().map_err(invalid_domain)?;
-        let transaction = self.begin_write().await?;
-        let outcome = async {
+        self.transact(async move |transaction| {
             let record = read_record_from_transaction(&transaction, &write.idempotency_key)
                 .await?
                 .ok_or(GitIndexTransactionStoreError::ReceiptConflict)?;
-            if let Some(existing) = record.terminal_receipt {
+            if let Some(existing) = record.terminal_receipt.clone() {
                 return replay_if_equal(
                     existing,
                     &write.receipt,
@@ -405,14 +377,8 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
                 )
                 .await
                 .map_err(unavailable)?;
-            Ok(write.receipt)
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            GitIndexTransactionStoreError::Unavailable,
-        )
+            Ok(write.receipt.clone())
+        })
         .await
     }
 
@@ -481,28 +447,23 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     ) -> GitIndexTransactionStoreResult<()> {
         repository_id.validate().map_err(invalid_domain)?;
         transaction_id.validate().map_err(invalid_domain)?;
-        let transaction = self.begin_write().await?;
-        let outcome =
-            async {
-                let record = record_by_transaction_id(&transaction, transaction_id)
-                    .await?
-                    .ok_or(GitIndexTransactionStoreError::JournalConflict)?;
-                if record.journal.repository_id != *repository_id {
-                    return Err(GitIndexTransactionStoreError::JournalConflict);
-                }
-                if record.terminal_receipt.as_ref().is_some_and(|receipt| {
-                    receipt.outcome != GitIndexReceiptOutcomeV1::NeedsInspection
-                }) {
-                    return Err(GitIndexTransactionStoreError::ReceiptConflict);
-                }
-                ensure_active_quarantine(&transaction, &record.journal).await
+        let (repository_id, transaction_id) = (repository_id.clone(), transaction_id.clone());
+        self.transact(async move |transaction| {
+            let record = record_by_transaction_id(&transaction, &transaction_id)
+                .await?
+                .ok_or(GitIndexTransactionStoreError::JournalConflict)?;
+            if record.journal.repository_id != repository_id {
+                return Err(GitIndexTransactionStoreError::JournalConflict);
             }
-            .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            GitIndexTransactionStoreError::Unavailable,
-        )
+            if record
+                .terminal_receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.outcome != GitIndexReceiptOutcomeV1::NeedsInspection)
+            {
+                return Err(GitIndexTransactionStoreError::ReceiptConflict);
+            }
+            ensure_active_quarantine(&transaction, &record.journal).await
+        })
         .await
     }
 
@@ -519,12 +480,12 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
             return Err(GitIndexTransactionStoreError::ReceiptConflict);
         }
 
-        let transaction = self.begin_write().await?;
-        let outcome = async {
-            let record = record_by_transaction_id(&transaction, transaction_id)
+        let (repository_id, transaction_id) = (repository_id.clone(), transaction_id.clone());
+        self.transact(async move |transaction| {
+            let record = record_by_transaction_id(&transaction, &transaction_id)
                 .await?
                 .ok_or(GitIndexTransactionStoreError::ReceiptConflict)?;
-            if record.journal.repository_id != *repository_id {
+            if record.journal.repository_id != repository_id {
                 return Err(GitIndexTransactionStoreError::ReceiptConflict);
             }
             let Some(inspection) = record.terminal_receipt.as_ref() else {
@@ -555,18 +516,21 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
                 return Err(GitIndexTransactionStoreError::RepositoryQuarantined);
             }
             Ok(())
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            GitIndexTransactionStoreError::Unavailable,
-        )
+        })
         .await
     }
 
-    async fn begin_write(&self) -> GitIndexTransactionStoreResult<GitMutationWriteTransaction<'_>> {
-        self.db.begin_write().await.map_err(unavailable)
+    async fn transact<R>(
+        &self,
+        body: impl AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> GitIndexTransactionStoreResult<R>
+        + Send
+        + Sync
+        + 'static,
+    ) -> GitIndexTransactionStoreResult<R>
+    where
+        R: Send + 'static,
+    {
+        self.db.transact(unavailable, body).await
     }
 
     async fn read_snapshot(&self) -> GitIndexTransactionStoreResult<GitMutationReadSnapshot> {

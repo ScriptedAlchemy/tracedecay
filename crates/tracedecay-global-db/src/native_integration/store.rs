@@ -10,15 +10,13 @@ use tracedecay_store::{
 };
 
 use crate::RegisteredGlobalDb;
+use crate::registered::RegisteredGlobalDbWriteTx;
 use crate::sqlite_persist::{
-    ReplayPresence, commit_outcome, replay_if_equal, require_absent_or_equal,
-    require_single_cas_row,
+    ReplayPresence, replay_if_equal, require_absent_or_equal, require_single_cas_row,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
-use crate::git_index_transactions::database::{
-    GitMutationDatabase, GitMutationReadSnapshot, GitMutationWriteTransaction,
-};
+use crate::git_index_transactions::database::{GitMutationDatabase, GitMutationReadSnapshot};
 
 /// Async canonical-store adapter for native integration transaction state.
 ///
@@ -48,13 +46,9 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         preview: NativeIntegrationPreviewV1,
     ) -> NativeIntegrationStoreResult<()> {
         preview.validate().map_err(invalid_domain)?;
-        let transaction = self.begin_write().await?;
-        let outcome = insert_preview_if_absent(&transaction, &preview).await;
-        commit_outcome(
-            transaction,
-            outcome,
-            NativeIntegrationStoreError::Unavailable,
-        )
+        self.transact(async move |transaction| {
+            insert_preview_if_absent(&transaction, &preview).await
+        })
         .await
     }
 
@@ -92,13 +86,9 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         approval: NativeIntegrationApprovalV1,
     ) -> NativeIntegrationStoreResult<()> {
         approval.validate().map_err(invalid_domain)?;
-        let transaction = self.begin_write().await?;
-        let outcome = insert_approval_if_absent(&transaction, &approval).await;
-        commit_outcome(
-            transaction,
-            outcome,
-            NativeIntegrationStoreError::Unavailable,
-        )
+        self.transact(async move |transaction| {
+            insert_approval_if_absent(&transaction, &approval).await
+        })
         .await
     }
 
@@ -128,8 +118,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         {
             return Err(NativeIntegrationStoreError::TransactionConflict);
         }
-        let transaction = self.begin_write().await?;
-        let outcome = async {
+        self.transact(async move |transaction| {
             let transaction_id = &record.status.transaction_id;
             if let Some(existing) =
                 read_record_from_transaction(&transaction, transaction_id).await?
@@ -184,14 +173,10 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
                 )
                 .await
                 .map_err(unavailable)?;
-            Ok(NativeIntegrationBeginResultV1::Started(Box::new(record)))
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            NativeIntegrationStoreError::Unavailable,
-        )
+            Ok(NativeIntegrationBeginResultV1::Started(Box::new(
+                record.clone(),
+            )))
+        })
         .await
     }
 
@@ -251,9 +236,9 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         {
             return Err(NativeIntegrationStoreError::StatusConflict);
         }
-        let transaction = self.begin_write().await?;
-        let outcome = async {
-            let current = read_status_from_transaction(&transaction, transaction_id)
+        let transaction_id = transaction_id.clone();
+        self.transact(async move |transaction| {
+            let current = read_status_from_transaction(&transaction, &transaction_id)
                 .await?
                 .ok_or(NativeIntegrationStoreError::StatusConflict)?;
             if !status_transition_matches(&current, expected_phase_revision, &replacement) {
@@ -262,14 +247,8 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
             let updated =
                 update_status_row(&transaction, &replacement, expected_phase_revision).await?;
             require_single_cas_row(updated, NativeIntegrationStoreError::StatusConflict)?;
-            Ok(replacement)
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            NativeIntegrationStoreError::Unavailable,
-        )
+            Ok(replacement.clone())
+        })
         .await
     }
 
@@ -295,12 +274,12 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         if receipt.status.transaction_id != *transaction_id {
             return Err(NativeIntegrationStoreError::ReceiptConflict);
         }
-        let transaction = self.begin_write().await?;
-        let write = async {
-            let record = read_record_from_transaction(&transaction, transaction_id)
+        let transaction_id = transaction_id.clone();
+        self.transact(async move |transaction| {
+            let record = read_record_from_transaction(&transaction, &transaction_id)
                 .await?
                 .ok_or(NativeIntegrationStoreError::ReceiptConflict)?;
-            if let Some(existing) = record.terminal_receipt {
+            if let Some(existing) = record.terminal_receipt.clone() {
                 return replay_if_equal(
                     existing,
                     &receipt,
@@ -317,7 +296,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
                 ensure_active_quarantine(
                     &transaction,
                     &record.status.repository_id,
-                    transaction_id,
+                    &transaction_id,
                     receipt.status.updated_at.0,
                 )
                 .await?;
@@ -342,10 +321,9 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
                 )
                 .await
                 .map_err(unavailable)?;
-            Ok(receipt)
-        }
-        .await;
-        commit_outcome(transaction, write, NativeIntegrationStoreError::Unavailable).await
+            Ok(receipt.clone())
+        })
+        .await
     }
 
     /// Every transaction that has not reached its terminal receipt, oldest
@@ -440,12 +418,12 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     ) -> NativeIntegrationStoreResult<()> {
         repository_id.validate().map_err(invalid_domain)?;
         transaction_id.validate().map_err(invalid_domain)?;
-        let transaction = self.begin_write().await?;
-        let outcome = async {
-            let record = read_record_from_transaction(&transaction, transaction_id)
+        let (repository_id, transaction_id) = (repository_id.clone(), transaction_id.clone());
+        self.transact(async move |transaction| {
+            let record = read_record_from_transaction(&transaction, &transaction_id)
                 .await?
                 .ok_or(NativeIntegrationStoreError::StatusConflict)?;
-            if record.status.repository_id != *repository_id {
+            if record.status.repository_id != repository_id {
                 return Err(NativeIntegrationStoreError::StatusConflict);
             }
             if record.terminal_receipt.as_ref().is_some_and(|receipt| {
@@ -456,25 +434,26 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
             }
             ensure_active_quarantine(
                 &transaction,
-                repository_id,
-                transaction_id,
+                &repository_id,
+                &transaction_id,
                 record.status.updated_at.0,
             )
             .await
-        }
-        .await;
-        commit_outcome(
-            transaction,
-            outcome,
-            NativeIntegrationStoreError::Unavailable,
-        )
+        })
         .await
     }
 
-    pub(super) async fn begin_write(
+    pub(super) async fn transact<R>(
         &self,
-    ) -> NativeIntegrationStoreResult<GitMutationWriteTransaction<'_>> {
-        self.db.begin_write().await.map_err(unavailable)
+        body: impl AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> NativeIntegrationStoreResult<R>
+        + Send
+        + Sync
+        + 'static,
+    ) -> NativeIntegrationStoreResult<R>
+    where
+        R: Send + 'static,
+    {
+        self.db.transact(unavailable, body).await
     }
 
     pub(super) async fn read_snapshot(

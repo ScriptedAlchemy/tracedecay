@@ -1,75 +1,15 @@
-//! Shared SQLite persist / compare-and-swap / receipt machine.
+//! Shared SQLite persist / compare-and-swap / receipt decisions.
 //!
 //! Git-index, native-integration, and configuration each own their tables and
-//! conflict kinds. The commit, rollback, receipt-replay, CAS row-count, and
-//! insert-or-equal decisions used to be copied beside those tables and then
-//! dropped the engine cause, or, on rollback failure, the original outcome.
-//! One helper keeps both errors.
-
-use std::fmt;
-use std::future::Future;
-
-use tracedecay_runtime_core::db::engine::{self, Transaction};
+//! conflict kinds. The receipt-replay, CAS row-count, and insert-or-equal
+//! decisions used to be copied beside those tables. The write itself is a
+//! `RegisteredGlobalDb::transact` job that commits on `Ok` and rolls back on
+//! `Err`, so none of these decisions commit or roll back.
 
 pub(crate) use tracedecay_runtime_core::db::{
     decode_stored_json as decode_json, encode_stored_json as encode_json,
     optional_text_column as row_optional_text, text_column as row_text,
 };
-
-use crate::RegisteredGlobalDbWriteTransaction;
-
-/// Write transaction that can commit or roll back through the engine.
-pub(crate) trait PersistWriteTransaction: Sized {
-    fn commit(self) -> impl Future<Output = engine::Result<()>> + Send;
-    fn rollback(self) -> impl Future<Output = engine::Result<()>> + Send;
-}
-
-impl PersistWriteTransaction for Transaction {
-    fn commit(self) -> impl Future<Output = engine::Result<()>> + Send {
-        Transaction::commit(self)
-    }
-
-    fn rollback(self) -> impl Future<Output = engine::Result<()>> + Send {
-        Transaction::rollback(self)
-    }
-}
-
-impl PersistWriteTransaction for RegisteredGlobalDbWriteTransaction<'_> {
-    fn commit(self) -> impl Future<Output = engine::Result<()>> + Send {
-        RegisteredGlobalDbWriteTransaction::commit(self)
-    }
-
-    fn rollback(self) -> impl Future<Output = engine::Result<()>> + Send {
-        RegisteredGlobalDbWriteTransaction::rollback(self)
-    }
-}
-
-/// Commit a successful persist outcome, or roll back a failed one.
-///
-/// Rollback success returns the original error unchanged. Rollback failure
-/// returns `unavailable` with both the original error and the rollback cause.
-pub(crate) async fn commit_outcome<T, E, Tx>(
-    transaction: Tx,
-    outcome: Result<T, E>,
-    unavailable: impl Fn(String) -> E,
-) -> Result<T, E>
-where
-    Tx: PersistWriteTransaction,
-    E: fmt::Display,
-{
-    match outcome {
-        Ok(value) => match transaction.commit().await {
-            Ok(()) => Ok(value),
-            Err(error) => Err(unavailable(error.to_string())),
-        },
-        Err(source) => match transaction.rollback().await {
-            Ok(()) => Err(source),
-            Err(rollback) => Err(unavailable(format!(
-                "{source}; rollback failed: {rollback}"
-            ))),
-        },
-    }
-}
 
 /// Replay an already-published value when it is byte-equal, otherwise conflict.
 pub(crate) fn replay_if_equal<T, E>(existing: T, incoming: &T, conflict: E) -> Result<T, E>

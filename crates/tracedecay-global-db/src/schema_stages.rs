@@ -20,7 +20,7 @@ use crate::registered::RefusedAuthorityV1;
 use tracedecay_runtime_core::{
     cancellation::CancellationToken,
     db::{
-        Database, DatabaseEngineReadConnection, DatabaseWriteTransaction,
+        Database, DatabaseEngineReadConnection,
         engine::{self, Executor, IntoParams, QueryExecutor, Rows},
     },
     ports::registered_schema::{
@@ -961,17 +961,29 @@ impl SchemaInstallTransaction for RegisteredSchemaInstallationTransactionV1<'_> 
     }
 }
 
-impl SchemaInstallTransaction for DatabaseWriteTransaction<'_> {
-    async fn commit(self) -> Result<(), String> {
-        DatabaseWriteTransaction::commit(self)
-            .await
-            .map_err(|error| error.to_string())
+/// A job's borrowed transaction as the owned executor
+/// [`CancellableSchemaTransaction`] wraps.
+struct BorrowedExecutor<'a, T: ?Sized>(&'a T);
+
+impl<T: QueryExecutor + ?Sized> QueryExecutor for BorrowedExecutor<'_, T> {
+    async fn query<P>(&self, sql: &str, params: P) -> engine::Result<Rows>
+    where
+        P: IntoParams,
+    {
+        self.0.query(sql, params).await
+    }
+}
+
+impl<T: Executor + ?Sized> Executor for BorrowedExecutor<'_, T> {
+    async fn execute<P>(&self, sql: &str, params: P) -> engine::Result<u64>
+    where
+        P: IntoParams,
+    {
+        self.0.execute(sql, params).await
     }
 
-    async fn rollback(self) -> Result<(), String> {
-        DatabaseWriteTransaction::rollback(self)
-            .await
-            .map_err(|error| error.to_string())
+    async fn execute_batch(&self, sql: &str) -> engine::Result<()> {
+        self.0.execute_batch(sql).await
     }
 }
 
@@ -1379,37 +1391,59 @@ pub(crate) async fn ensure_attached_registered_schema(
     > = Box::pin(authority_invariant_triggers_intact(&read_connection));
     let force_exhaustive = !triggers_intact.await?;
     schema_install_checkpoint(cancellation, OPERATION)?;
-    let transaction = database.begin_bulk_write_transaction(OPERATION).await?;
-    let committed: Pin<
-        Box<
-            dyn Future<Output = tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>>>
-                + Send
-                + '_,
-        >,
-    > = Box::pin(install_and_commit_registered_schema(
-        CancellableSchemaTransaction {
-            transaction,
-            cancellation,
-        },
-        configuration_fresh.as_ref(),
-        temporal_admission,
-        session_features,
-        force_exhaustive,
-        "commit attached registered global schema",
-        "roll back attached registered global schema",
-    ));
-    let refused_authority = committed.await?;
+    let job_cancellation = cancellation.clone();
+    let installed = database
+        .transact_bulk(OPERATION, async move |transaction| {
+            let install = CancellableSchemaTransaction {
+                transaction: BorrowedExecutor(transaction),
+                cancellation: &job_cancellation,
+            };
+            install_registered_schema_stages(
+                &install,
+                configuration_fresh.as_ref(),
+                temporal_admission,
+                session_features,
+                force_exhaustive,
+            )
+            .await
+            .and_then(|refused_authority| {
+                schema_install_checkpoint(
+                    &job_cancellation,
+                    "commit attached registered global schema",
+                )
+                .map(|()| refused_authority)
+            })
+        })
+        .await?;
+    // A cancelled Store open reports its cancellation whatever ended the job.
+    let refused_authority = match installed {
+        Ok(refused_authority) => refused_authority,
+        Err(_) if cancellation.is_cancelled() => {
+            return Err(
+                tracedecay_domain::errors::TraceDecayError::store_open_cancelled(
+                    "roll back attached registered global schema",
+                ),
+            );
+        }
+        Err(error) => return Err(error),
+    };
     // Mirror initialization's independently durable index builds: each
     // historical-data index commits on its own so an interrupted later build
     // never rolls back an earlier completed one.
     for sql in observation_projection::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL {
-        let transaction = database
-            .begin_bulk_write_transaction("install observation projection performance index")
-            .await?;
-        transaction.execute_batch(sql).await.map_err(|error| {
-            global_db_operation_error("initialize observation projection indexes", error)
-        })?;
-        transaction.commit().await?;
+        database
+            .transact_bulk(
+                "install observation projection performance index",
+                async move |transaction| {
+                    transaction.execute_batch(sql).await.map_err(|error| {
+                        global_db_operation_error(
+                            "initialize observation projection indexes",
+                            error,
+                        )
+                    })
+                },
+            )
+            .await??;
     }
     validate_authority_schema_contract(&read_connection)
         .await
@@ -1475,25 +1509,26 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
         Box<dyn Future<Output = tracedecay_domain::errors::Result<bool>> + Send + '_>,
     > = Box::pin(authority_invariant_triggers_intact(&read_connection));
     let force_exhaustive = !triggers_intact.await?;
-    let transaction = database.begin_bulk_write_transaction(OPERATION).await?;
-    let staged: Pin<
-        Box<
-            dyn Future<Output = tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>>>
-                + Send
-                + '_,
-        >,
-    > = Box::pin(install_registered_schema_stages(
-        &transaction,
-        configuration_fresh.as_ref(),
-        temporal_admission,
-        session_features,
-        force_exhaustive,
-    ));
-    let admission = staged.await;
-    transaction
-        .rollback()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    // The job always ends in `Err`, so the install is rolled back and the store
+    // keeps its prior schema; the admission verdict rides out as that `Err`.
+    let admission = match database
+        .transact_bulk(OPERATION, async move |transaction| {
+            Err::<std::convert::Infallible, _>(
+                install_registered_schema_stages(
+                    transaction,
+                    configuration_fresh.as_ref(),
+                    temporal_admission,
+                    session_features,
+                    force_exhaustive,
+                )
+                .await,
+            )
+        })
+        .await?
+    {
+        Err(admission) => admission,
+        Ok(never) => match never {},
+    };
     match admission {
         Ok(refused) => Ok(refused.map(RefusedAuthorityV1::error)),
         Err(error) => reset_or_error(error),

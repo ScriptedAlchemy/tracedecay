@@ -21,6 +21,7 @@ use tracedecay_sessions::runtime::store_access::{
 };
 
 use crate::observation::decode_observation_json;
+use crate::registered::{JobExit, database_transact_or_rollback};
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
@@ -272,42 +273,38 @@ async fn rearm_projection_retry_batch(
     batch_rows: i64,
 ) -> ProjectionStoreResult<Option<(i64, u64)>> {
     const OPERATION: &str = "rearm queued projection retries";
-    let transaction = database
-        .begin_write_transaction(OPERATION)
-        .await
-        .map_err(|error| storage(OPERATION, error))?;
-    let Some(batch_end) = query_optional_i64(
-        &transaction,
-        "SELECT MAX(rowid) FROM (
-            SELECT rowid FROM projection_queue
-            WHERE rowid > ?1 AND rowid <= ?2 AND next_retry_at_micros > 0
-            ORDER BY rowid LIMIT ?3
-         )",
-        params![after_rowid, last_rowid, batch_rows],
+    database_transact_or_rollback(
+        database,
+        OPERATION,
+        |error| storage(OPERATION, error),
+        async move |transaction| {
+            let Some(batch_end) = query_optional_i64(
+                transaction,
+                "SELECT MAX(rowid) FROM (
+                    SELECT rowid FROM projection_queue
+                    WHERE rowid > ?1 AND rowid <= ?2 AND next_retry_at_micros > 0
+                    ORDER BY rowid LIMIT ?3
+                 )",
+                params![after_rowid, last_rowid, batch_rows],
+            )
+            .await?
+            else {
+                return Err(JobExit::Rollback(None));
+            };
+            let rows = transaction
+                .execute(
+                    "UPDATE projection_queue SET next_retry_at_micros = 0
+                     WHERE rowid > ?1 AND rowid <= ?2
+                       AND next_retry_at_micros > 0
+                       AND next_retry_at_micros < ?3",
+                    params![after_rowid, batch_end, PROJECTION_TERMINAL_RETRY_MICROS],
+                )
+                .await
+                .map_err(|error| storage(OPERATION, error))?;
+            Ok(Some((batch_end, rows)))
+        },
     )
-    .await?
-    else {
-        transaction
-            .rollback()
-            .await
-            .map_err(|error| storage(OPERATION, error))?;
-        return Ok(None);
-    };
-    let rows = transaction
-        .execute(
-            "UPDATE projection_queue SET next_retry_at_micros = 0
-             WHERE rowid > ?1 AND rowid <= ?2
-               AND next_retry_at_micros > 0
-               AND next_retry_at_micros < ?3",
-            params![after_rowid, batch_end, PROJECTION_TERMINAL_RETRY_MICROS],
-        )
-        .await
-        .map_err(|error| storage(OPERATION, error))?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage(OPERATION, error))?;
-    Ok(Some((batch_end, rows)))
+    .await
 }
 
 async fn query_optional_i64(
