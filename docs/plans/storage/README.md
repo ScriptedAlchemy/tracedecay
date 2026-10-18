@@ -830,7 +830,7 @@ changes a file that holds memory.
   - Fenced TRUNCATE on lanes, idle close, the unlink probe and `ProfileLost` are the
     next slices of this step.
   Proof: 64 attached stores add exactly N threads, all of them pool threads.
-- Step 8, repository identity (2026-10-17, branch `feat/storage-repository-identity`).
+- Step 8a, repository identity (2026-10-17, branch `feat/storage-repository-identity`).
   A second full clone, a shallow clone, and a checkout after a merge of unrelated
   histories open the project that first enrolled the repository, with no `init`.
   Anchors are rows in the existing `global.db` `project_aliases` table under the
@@ -876,8 +876,9 @@ changes a file that holds memory.
     `origin`, which adopted clones share or which is a local path that binds
     nothing, so it does not flip between clones.
   - Two clones on one branch share the `profile_graph_scope_id(store, branch)`
-    row but not graph data: the code shard id carries each checkout's worktree id
-    and repository id, so the scope id is unchanged.
+    row but not graph data: the code scope carries each checkout's worktree id
+    and repository id, so the scope id is unchanged. A test pins that two clones
+    on one branch resolve distinct code scopes.
   Open: the lifecycle and the claim count a marker as held when its shard
   directory exists, the registry when a `store_instances` row names it. After an
   upgrade, a repository's anchors belong to whichever enrolled clone registers
