@@ -25,7 +25,7 @@ import type { ActivationField } from '../../viz/graph/activation.ts';
 import { kindColor } from '../../viz/graph/kindColor.ts';
 import { CortexSceneCanvas } from './CortexSceneCanvas.tsx';
 import { kindLegend, relationLegend, type LegendEntry } from './cortex.ts';
-import { reliefPainter } from './cortexReliefField.ts';
+import { reliefPainterOffThread } from './cortexReliefOffThread.ts';
 import { kindShape, sceneFromSlice, type KindShape } from './cortexScene.ts';
 import { describeSubgraph } from './hubs.ts';
 
@@ -133,7 +133,7 @@ function ReliefField({
     <div className="flex min-h-0 flex-1 flex-col gap-1.5 p-3" data-cortex-field="ready">
       <CortexSceneCanvas
         scene={scene}
-        painter={reliefPainter}
+        painter={reliefPainterOffThread}
         selectedId={selectedId}
         inspectedId={inspectedId}
         onSelect={onSelect}
