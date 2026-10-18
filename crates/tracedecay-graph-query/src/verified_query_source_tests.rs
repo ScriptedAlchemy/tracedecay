@@ -18,7 +18,10 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use super::verified_query_test_support::{
     ImmediateAdmission, ImmediateProjection, fixture_scope, fixture_store, graph_operation,
 };
-use super::{VerifiedGraphQuery, VerifiedGraphQueryRequest, open_verified_graph_query};
+use super::{
+    CodeGraphReadError, GraphQueryError, VerifiedGraphQuery, VerifiedGraphQueryRequest,
+    open_verified_graph_query,
+};
 use crate::SourceReadContext;
 
 async fn test_database(path: &Path) -> Database {
@@ -86,12 +89,11 @@ fn fixture_query(project_id: &str) -> VerifiedGraphQuery {
     )
 }
 
-fn assert_denied(error: tracedecay_domain::errors::TraceDecayError) {
-    let (code, retryable, _) = error
-        .project_route_context()
-        .expect("typed denied source route");
-    assert_eq!(code, "code-graph-denied");
-    assert!(!retryable);
+fn assert_denied(error: GraphQueryError) {
+    assert!(
+        matches!(error, GraphQueryError::Read(CodeGraphReadError::Denied)),
+        "expected a typed denial, got {error}"
+    );
 }
 
 #[test]
@@ -126,9 +128,7 @@ async fn resolve_rejects_absolute_path_under_another_project_root() {
         .expect_err("foreign root must be denied");
     assert!(
         error.to_string().contains("escapes project root")
-            || error
-                .project_route_context()
-                .is_some_and(|(code, _, _)| code == "code-graph-denied"),
+            || matches!(error, GraphQueryError::Read(CodeGraphReadError::Denied)),
         "foreign root must fail closed, got {error}"
     );
 }

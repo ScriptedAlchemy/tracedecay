@@ -6,6 +6,7 @@ use super::*;
 use tracedecay_code_index::{is_test_file, is_test_marker};
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_graph_query::GraphQueryResult;
 
 const MAX_TEST_MAP_FILE_SYMBOLS: usize = 50_000;
 const MAX_TEST_MAP_IMPACT_SYMBOLS: usize = 20_000;
@@ -126,7 +127,7 @@ pub async fn compute_test_map(
     let touched_files = source_nodes
         .iter()
         .map(tracedecay_graph_query::test_risk::verified_test_symbol_parts)
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<GraphQueryResult<Vec<_>>>()?;
     let touched_files = unique_file_paths(touched_files.into_iter().map(|(_, file)| file));
     Ok(graph_tool_completion(
         GraphToolResultV1::TestMap(TestMapResultV1 {

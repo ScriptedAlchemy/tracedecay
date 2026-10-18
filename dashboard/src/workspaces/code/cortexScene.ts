@@ -266,7 +266,8 @@ export interface CortexPainter<L> {
   readonly name: string;
   /** Padding the Fit camera leaves, in screen px. */
   readonly fitPad: number;
-  layout(scene: CortexScene, box: { width: number; height: number }): L | Promise<L>;
+  /** `signal` aborts when the result is no longer wanted; an off-thread layout releases its worker. */
+  layout(scene: CortexScene, box: { width: number; height: number }, signal?: AbortSignal): L | Promise<L>;
   bounds(layout: L): Bounds;
   /** World position of a drawn symbol. */
   position(layout: L, id: string): { x: number; y: number } | null;

@@ -14,11 +14,11 @@ import {
   type OperationApplicationDistributionResult,
   type PrimitiveSearchFreshnessV1,
 } from "../src/operations";
-import { factStoreCurateReceiptMatches } from "../src/automation-receipt";
 import {
   OPERATION_TERMINATIONS,
   decodeCanonicalSchema,
   decodeHttpSuccessEnvelope,
+  factStoreCurateReceiptMatches,
   type HttpSuccessEnvelope,
   type PageState,
 } from "../src/types";
@@ -26,6 +26,7 @@ import {
 import {
   TraceDecayAbortError,
   TraceDecayDisconnectedError,
+  TraceDecayDeniedError,
   TraceDecayMalformedResponseError,
   TraceDecayResetRequiredError,
   TraceDecayStaleError,
@@ -117,27 +118,48 @@ function successEnvelope(payload: unknown, cursor: unknown = null) {
   };
 }
 
+async function curatorScope() {
+  return {
+    project_id: "project.sdk",
+    repository_id: "repository.sdk",
+    worktree_id: "worktree.sdk",
+    reference: null,
+    scope_digest: await canonicalDigest([
+      "tracedecay.application.scope.v1", "project.sdk", "repository.sdk", "worktree.sdk", null,
+    ]),
+  };
+}
+
 /** The `fact_store_curate` answer at admission: a pending effect receipt. */
-function curateSuccessEnvelope(payload: unknown) {
+async function curateSuccessEnvelope(payload: unknown) {
   const envelope = successEnvelope(payload);
-  envelope.value.binding_id = "binding.http.fact_store_curate.v1";
-  envelope.value.contract.schema_id = "schema.application.retained.fact-store-curate.result";
-  envelope.value.request_id = "request.sdk.curate";
-  envelope.value.outcome = {
-    outcome: "effect",
+  return {
+    ...envelope,
     value: {
-      effect_id: "effect.retained.fact_store_curate.request.sdk.curate",
-      effect_class: "administrative",
-      idempotency_key: "idempotency.retained.fact_store_curate.sdk",
-      authority: {},
-      expected_state: "sha256:" + "0".repeat(64),
-      reconciliation: "pending",
-      receipt: { outcome: "effect_unknown", committed_state: null },
-      payload,
-      execution: { ...structuredClone(RECEIPT), termination: "effect_unknown" },
+      ...envelope.value,
+      binding_id: "binding.http.fact_store_curate.v1",
+      contract: {
+        schema_id: "schema.application.retained.fact-store-curate.result",
+        schema_revision: 1,
+      },
+      request_id: "request.sdk.curate",
+      scope: await curatorScope(),
+      outcome: {
+        outcome: "effect",
+        value: {
+          effect_id: "effect.retained.fact_store_curate.request.sdk.curate",
+          effect_class: "administrative",
+          idempotency_key: "idempotency.retained.fact_store_curate.sdk",
+          authority: {},
+          expected_state: "sha256:" + "0".repeat(64),
+          reconciliation: "pending",
+          receipt: { outcome: "effect_unknown", committed_state: null },
+          payload,
+          execution: { ...structuredClone(RECEIPT), termination: "effect_unknown" },
+        },
+      },
     },
-  } as unknown as typeof envelope.value.outcome;
-  return envelope;
+  };
 }
 
 /** A retained fact-store evidence envelope for the named HTTP binding. */
@@ -1076,8 +1098,10 @@ describe("TraceDecayClient generated operation bindings", () => {
       request_digest: requestDigest,
       state: "started",
     };
+    const scope = await curatorScope();
     const envelope = (payload: unknown) => ({
       request_id: "request.sdk.curate",
+      scope,
       outcome: { outcome: "effect", value: { reconciliation: "pending", payload } },
     });
 
@@ -1105,13 +1129,11 @@ describe("TraceDecayClient generated operation bindings", () => {
     }))).resolves.toBe(false);
   });
 
-  it("returns the started receipt from the curate operation", async () => {
+  it("returns the started receipt bound to the submitted bounds and scope", async () => {
+    const bounds = { fact_review_limit: 37, min_confidence_millionths: 812_345 };
     const requestDigest = await canonicalDigest([
       "tracedecay.automation-run.request-identity.v1",
-      {
-        kind: "memory_curator",
-        options: { fact_review_limit: 24, min_confidence_millionths: 720_000 },
-      },
+      { kind: "memory_curator", options: bounds },
     ]);
     const receipt = {
       run_id: "request.sdk.curate",
@@ -1119,18 +1141,22 @@ describe("TraceDecayClient generated operation bindings", () => {
       request_digest: requestDigest,
       state: "started",
     };
+    const envelope = await curateSuccessEnvelope(receipt);
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
-      fetch: async () => new Response(JSON.stringify(curateSuccessEnvelope(receipt)), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+      fetch: async (_url, init) => {
+        expect(JSON.parse(String(init?.body))).toEqual(bounds);
+        return new Response(JSON.stringify(envelope), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
     });
 
     const response = await client.operations.application_fact_store_curate(
-      {},
+      bounds,
       { requestId: "request.sdk.curate" },
     );
     expect(response.request_id).toBe("request.sdk.curate");
@@ -1138,6 +1164,12 @@ describe("TraceDecayClient generated operation bindings", () => {
     if (response.outcome.outcome !== "effect") throw new Error("expected an effect outcome");
     expect(response.outcome.value.reconciliation).toBe("pending");
     expect(response.outcome.value.payload).toEqual(receipt);
+
+    envelope.value.scope.scope_digest = "sha256:" + "9".repeat(64);
+    await expect(client.operations.application_fact_store_curate(
+      bounds,
+      { requestId: "request.sdk.curate" },
+    )).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
   });
 
   it("fails closed on malformed typed Workflow requests before transport", async () => {
@@ -1289,6 +1321,41 @@ describe("TraceDecayClient generated operation bindings", () => {
 });
 
 describe("TraceDecayClient transport envelopes", () => {
+  it("requires concealed problems to omit identity and ordinary problems to bind it", async () => {
+    const concealed = problemEnvelope("not_found_or_not_authorized", "concealed");
+    const disclosed = problemEnvelope("not_found_or_not_authorized", "concealed", {
+      bindingId: "binding.http.workflow.list_definitions",
+    });
+    const wrongBinding = problemEnvelope("not_found_or_not_authorized", "concealed", {
+      bindingId: "binding.http.different.v1",
+    });
+    const unbound = problemEnvelope("unavailable", "service_unavailable");
+
+    await withServer(
+      [
+        (_request, response) => json(response, 404, concealed),
+        (_request, response) => json(response, 404, disclosed),
+        (_request, response) => json(response, 404, wrongBinding),
+        (_request, response) => json(response, 503, unbound),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayDeniedError,
+        );
+        for (let response = 0; response < 3; response += 1) {
+          await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+            TraceDecayMalformedResponseError,
+          );
+        }
+      },
+    );
+  });
+
   it("classifies admitted terminal problems and requires committed_receipt", async () => {
     const bindingId = "binding.http.workflow.list_definitions";
     const reset = problemEnvelope("reset_required", "store_reset_required", {

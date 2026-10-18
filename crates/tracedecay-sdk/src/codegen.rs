@@ -1076,7 +1076,8 @@ fn render_dashboard_application(
     out.push_str(
         "} as const satisfies Readonly<Record<string, ApplicationHttpBinding>>;\n\
          export type ApplicationHttpOperationId = keyof typeof APPLICATION_HTTP_BINDINGS;\n\
-         export function decodeApplicationHttpSuccess<T>(operationId: ApplicationHttpOperationId, value: unknown, decode: Decoder<T>): HttpSuccessEnvelope<T> { const binding: ApplicationHttpBinding = APPLICATION_HTTP_BINDINGS[operationId]; const answered = typeof value === \"object\" && value !== null ? (value as { binding_id?: unknown }).binding_id : undefined; const bindingId = binding.bindingIds.find((candidate) => candidate === answered) ?? binding.bindingIds[0]; return decodeHttpSuccessEnvelope(value, bindingId, binding.resultSchema.schemaId, binding.resultSchema.revision, binding.terminalStates, binding.cancellation, binding.receipt, binding.reconciliation, decode); }\n",
+         export function decodeApplicationHttpSuccess<T>(operationId: ApplicationHttpOperationId, value: unknown, decode: Decoder<T>): HttpSuccessEnvelope<T> { const binding: ApplicationHttpBinding = APPLICATION_HTTP_BINDINGS[operationId]; const answered = typeof value === \"object\" && value !== null ? (value as { binding_id?: unknown }).binding_id : undefined; const bindingId = binding.bindingIds.find((candidate) => candidate === answered) ?? binding.bindingIds[0]; return decodeHttpSuccessEnvelope(value, bindingId, binding.resultSchema.schemaId, binding.resultSchema.revision, binding.terminalStates, binding.cancellation, binding.receipt, binding.reconciliation, decode); }\n\
+         export function decodeApplicationHttpProblem(operationId: ApplicationHttpOperationId, status: number, value: unknown): HttpProblemEnvelope { const binding: ApplicationHttpBinding = APPLICATION_HTTP_BINDINGS[operationId]; if (!isHttpProblemEnvelope(value) || !applicationProblemStatusMatches(status, value.problem.kind) || !applicationProblemBindingMatches(value, binding.bindingIds) || value.contract.schema_id !== binding.resultSchema.schemaId || value.contract.schema_revision !== binding.resultSchema.revision) throw new TypeError(\"malformed canonical envelope: application problem does not match the operation\"); return value; }\n",
     );
     Ok(out)
 }
@@ -1197,6 +1198,72 @@ function isBoundedOpaqueString(value: unknown, maximumBytes: number): value is s
     UTF8_ENCODER.encode(value).byteLength <= maximumBytes &&
     !/\p{Cc}/u.test(value)
   );
+}
+
+async function canonicalSha256(value: unknown): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", UTF8_ENCODER.encode(canonicalJsonKey(value)));
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function resolvedScopeMatches(value: unknown): Promise<boolean> {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).sort().join(",") !== "project_id,reference,repository_id,scope_digest,worktree_id" ||
+    !isBoundedOpaqueString(value.project_id, MAX_REQUEST_ID_BYTES) ||
+    !isBoundedOpaqueString(value.repository_id, MAX_REQUEST_ID_BYTES) ||
+    !isBoundedOpaqueString(value.worktree_id, MAX_REQUEST_ID_BYTES) ||
+    (value.reference !== null && !isBoundedOpaqueString(value.reference, MAX_REQUEST_ID_BYTES))
+  ) return false;
+  return value.scope_digest === await canonicalSha256([
+    "tracedecay.application.scope.v1",
+    value.project_id,
+    value.repository_id,
+    value.worktree_id,
+    value.reference,
+  ]);
+}
+
+/** The admission receipt names this request's run; its terminal comes from automation_run_view. */
+export async function factStoreCurateReceiptMatches(request: unknown, envelope: unknown): Promise<boolean> {
+  if (!isRecord(request) || !isRecord(envelope) || !isRecord(envelope.outcome)) return false;
+  const outcome = envelope.outcome;
+  const receipt = isRecord(outcome.value) ? outcome.value.payload : undefined;
+  if (
+    outcome.outcome !== "effect" || !isRecord(receipt) ||
+    !isBoundedOpaqueString(envelope.request_id, MAX_REQUEST_ID_BYTES) ||
+    Object.keys(receipt).sort().join(",") !== "request_digest,run_id,state,task" ||
+    receipt.run_id !== envelope.request_id || receipt.task !== "memory_curator" ||
+    receipt.state !== "started"
+  ) return false;
+  const factReviewLimit = request.fact_review_limit ?? 24;
+  const minimumConfidence = request.min_confidence_millionths ?? 720_000;
+  if (
+    !isSafeUnsignedInteger(factReviewLimit) || factReviewLimit < 1 || factReviewLimit > 1_000 ||
+    !isSafeUnsignedInteger(minimumConfidence) || minimumConfidence > 1_000_000 ||
+    !await resolvedScopeMatches(envelope.scope)
+  ) return false;
+  return receipt.request_digest === await canonicalSha256([
+    "tracedecay.automation-run.request-identity.v1",
+    {
+      kind: "memory_curator",
+      options: {
+        fact_review_limit: factReviewLimit,
+        min_confidence_millionths: minimumConfidence,
+      },
+    },
+  ]);
+}
+
+/** A partial curator terminal must carry the committed effect for this exact scope and request. */
+export async function factStoreCurateProblemMatches(envelope: unknown): Promise<boolean> {
+  if (!isHttpProblemEnvelope(envelope)) return false;
+  const receipt = envelope.problem.committed_receipt;
+  if (envelope.problem.kind !== "partial_effect") return receipt === null;
+  return receipt !== null &&
+    receipt.operation === "use-case.application.retained.fact-store-curate" &&
+    receipt.request_id === envelope.request_id &&
+    receipt.outcome === "partial" && typeof receipt.committed_state === "string" &&
+    await resolvedScopeMatches(receipt.scope);
 }
 
 function isContract(value: unknown): boolean {
@@ -1442,6 +1509,13 @@ function isCommittedEffectReceipt(value: unknown, requestId: string): boolean {
     (typeof value.committed_state === "string" ||
       typeof value.external_proof === "string")
   );
+}
+
+/** Concealed denials omit binding identity; other problems name their expected binding. */
+export function applicationProblemBindingMatches(envelope: HttpProblemEnvelope, bindingIds: readonly string[]): boolean {
+  return envelope.problem.kind === "not_found_or_not_authorized"
+    ? envelope.binding_id === undefined
+    : bindingIds.some((bindingId) => bindingId === envelope.binding_id);
 }
 
 export function applicationProblemStatusMatches(status: number, kind: string): boolean {

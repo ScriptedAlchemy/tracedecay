@@ -32,7 +32,11 @@ pub(super) async fn collect_verified_affected_test_files(
         files,
         max_depth,
         custom_glob,
-        |paths| graph.test_annotated_logical_files(paths, 500_000, 2_000_000),
+        |paths| {
+            graph
+                .test_annotated_logical_files(paths, 500_000, 2_000_000)
+                .map_err(Into::into)
+        },
     )
     .await
 }

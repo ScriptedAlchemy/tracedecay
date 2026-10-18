@@ -9,7 +9,7 @@ use std::hash::BuildHasher;
 
 use super::queries::{GraphQueryManager, VerifiedHealthInputsV1};
 use super::scc::tarjan_scc;
-use tracedecay_domain::errors::Result;
+use crate::GraphQueryResult as Result;
 
 pub const HEALTH_DEFINITION: &str = "health.2026-09-12";
 

@@ -7,7 +7,6 @@ import {
   type ResponseFor,
   type ResultFor,
 } from "./operations";
-import { factStoreCurateReceiptMatches } from "./automation-receipt";
 import {
   applyHttpRequestControls,
   type OperationRequestOptions,
@@ -16,7 +15,9 @@ import {
 export type { OperationRequestOptions, PageOptions } from "./request-control";
 import {
   OPERATION_TERMINATIONS,
+  applicationProblemBindingMatches,
   applicationProblemStatusMatches,
+  factStoreCurateReceiptMatches,
   isHttpProblemEnvelope,
   type ApplicationProblemRecord,
   type HttpProblemEnvelope,
@@ -779,9 +780,7 @@ export class TraceDecayClient {
       }
       const validBinding =
         expectedBinding === undefined ||
-        (problemEnvelope.problem.kind === "not_found_or_not_authorized"
-          ? problemEnvelope.binding_id === undefined
-          : problemEnvelope.binding_id === expectedBinding);
+        applicationProblemBindingMatches(problemEnvelope, [expectedBinding]);
       if (
         response.ok ||
         !validBinding ||

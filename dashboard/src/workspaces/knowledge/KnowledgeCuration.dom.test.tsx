@@ -324,7 +324,10 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
         message: kind === "partial_effect"
           ? "curation committed before projection failed"
           : "the retained memory store must be reset",
-        diagnostic: null,
+        diagnostic: {
+          code: `application.retained.${kind}`,
+          message: "The retained operation could not complete.",
+        },
         detail: null,
         committed_receipt: effectReceipt,
         owning_layer: "runtime",
@@ -369,7 +372,27 @@ function curatorSuccess(run: { run_id: string }, requestId = run.run_id) {
           null,
         ]),
       },
-      outcome: { outcome: "effect", value: { payload: run } },
+      outcome: {
+        outcome: "effect",
+        value: {
+          effect_id: `effect.retained.fact_store_curate.${requestId}`,
+          effect_class: "administrative",
+          idempotency_key: `idempotency.${requestId}`,
+          authority: {},
+          expected_state: sha("0"),
+          reconciliation: "pending",
+          receipt: { outcome: "effect_unknown", committed_state: null },
+          execution: {
+            started_at: 10,
+            ended_at: 20,
+            effective_deadline: null,
+            cancellation: null,
+            budget: { units_consumed: 0, bytes_consumed: 0, elapsed_micros: 10 },
+            termination: "effect_unknown",
+          },
+          payload: run,
+        },
+      },
     },
   };
 }
