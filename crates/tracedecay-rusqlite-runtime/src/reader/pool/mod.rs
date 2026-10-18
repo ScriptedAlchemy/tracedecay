@@ -88,7 +88,6 @@ pub(crate) struct ReaderCheckpointBlockers {
     /// Active snapshots whose lease already ended: the worker's rollback
     /// outran [`SNAPSHOT_END_GRACE`] and is finishing on a return task.
     released: Arc<(Mutex<BTreeSet<u64>>, Condvar)>,
-    /// Signalled with the condvar, for the writer task's await.
     finished: Arc<asupersync::sync::Notify>,
 }
 
@@ -264,8 +263,6 @@ pub(super) struct WorkerRecord {
     lane: ReaderLane,
 }
 
-/// Waits for a shut-down worker's task to end. On a pool thread the join
-/// refuses, and the task is left to end on its own.
 pub(super) fn join_worker(record: &mut WorkerRecord) {
     if let Some(join) = record.join.take() {
         let _ = join.join();

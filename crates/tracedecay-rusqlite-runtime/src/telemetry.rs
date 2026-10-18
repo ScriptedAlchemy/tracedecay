@@ -20,7 +20,6 @@ pub(crate) use sqlite_vm::{observe_statement, take_observed_vm};
 
 pub(crate) const MAX_TRACKED_WRITER_CLIENTS: usize = 64;
 
-/// One storage-pool task's own copy of the per-thread telemetry state.
 #[derive(Default)]
 pub(crate) struct TaskTelemetry {
     lock_work: (bool, u64, u64),

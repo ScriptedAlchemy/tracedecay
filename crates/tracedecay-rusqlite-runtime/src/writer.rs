@@ -499,7 +499,6 @@ impl PersistentWriter {
         persistence: RuntimeWriterPersistence<Box<dyn StorageOperationExecutor + Send>>,
         checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
     ) -> Result<Self, WriterStartError> {
-        // The startup handshake below waits on the new task synchronously.
         if crate::storage_pool::on_pool() {
             return Err(WriterStartError::RuntimeUnavailable);
         }
@@ -832,8 +831,6 @@ impl PersistentWriter {
 
     fn join_worker(&mut self) -> Result<(), WriterActorError> {
         if let Some(join) = self.join.take() {
-            // A pool thread cannot wait; the shutdown already sent ends the
-            // detached task on its own.
             if crate::storage_pool::on_pool() {
                 return Err(WriterActorError::WaitCancelled);
             }
@@ -847,8 +844,6 @@ impl Drop for PersistentWriter {
     fn drop(&mut self) {
         self.begin_drain();
         self.request_shutdown();
-        // On a pool thread the join refuses; the shutdown already sent ends
-        // the detached task on its own.
         let _ = self.join_worker();
     }
 }

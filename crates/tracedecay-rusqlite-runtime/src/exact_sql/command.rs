@@ -195,13 +195,10 @@ pub(super) async fn begin_transaction_with_busy_retry<'connection>(
 
 /// Retries `begin` while `SQLite` reports the write lock busy, until the
 /// exact SQL clock reaches [`EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT`] or shutdown
-/// or cancellation is requested. Between attempts it waits on the storage
-/// pool's timer, so a contended begin holds no pool thread.
+/// or cancellation is requested.
 ///
 /// The deadline is checked between attempts, so it cannot shorten one
-/// `begin` call that blocks in the kernel. The connection is held by `&mut`
-/// and lent shared to each attempt, so no `&Connection` crosses an await and
-/// the future stays `Send`.
+/// `begin` call that blocks in the kernel.
 pub(super) async fn retry_busy_begin<'connection, T>(
     connection: &'connection mut Connection,
     mut begin: impl FnMut(&'connection Connection) -> rusqlite::Result<T>,
@@ -216,8 +213,6 @@ pub(super) async fn retry_busy_begin<'connection, T>(
         {
             return Err(original);
         }
-        // Settled before the pause: a `Transaction` held across the await
-        // would make the future `!Send`.
         let error = match begin(&*connection) {
             Ok(value) => {
                 if (shutdown_requested.load(Ordering::Acquire) || cancelled())
@@ -439,11 +434,6 @@ pub(crate) async fn run_writer_command(
                 // connection, which `run_writer_command` holds by `&mut`.
                 .map(|transaction| unsafe { TaskTransaction::new(transaction) });
                 match begun {
-                    // The whole writer hold of one interactive transaction,
-                    // caller think-time included. Every queued write and
-                    // command behind it waits inside this span, so it, not
-                    // SQLite execution, is what explains begin latency
-                    // elsewhere while an interactive lease is open.
                     Ok(transaction) => {
                         // The lease starts before the caller learns it holds
                         // the transaction, so no command it sends can predate

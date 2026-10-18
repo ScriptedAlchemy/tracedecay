@@ -3,10 +3,6 @@
 //! Each writer and each reader worker is a task here, not a thread of its own.
 //! A task holds a `tracedecay-store-{i}` thread only while it runs SQL, so the
 //! thread count is the configured size whatever the number of attached files.
-//!
-//! Nothing on a pool thread may wait synchronously on a store: the task it
-//! waits for may need the very thread it holds. The synchronous waits callers
-//! use check [`on_pool`] and refuse there instead of parking.
 
 use std::{
     cell::{Cell, RefCell},
@@ -45,8 +41,6 @@ thread_local! {
 
 /// How many threads the pool runs: [`STORE_THREADS_ENV`] clamped to 2..=16
 /// when it parses, else the host's available parallelism clamped to 6..=16.
-/// Fewer threads than cores caps SQL parallelism for a process with many
-/// stores opening at once.
 #[must_use]
 pub fn store_threads() -> usize {
     match std::env::var(STORE_THREADS_ENV)
@@ -71,7 +65,6 @@ fn pool() -> Result<&'static Runtime, String> {
         RuntimeBuilder::multi_thread()
             .worker_threads(store_threads())
             .thread_name_prefix(STORE_THREAD_PREFIX)
-            // No blocking pool: its threads would be storage threads beyond N.
             .blocking_threads(0, 0)
             .on_thread_start(|| ON_POOL.set(true))
             .build()
@@ -81,26 +74,18 @@ fn pool() -> Result<&'static Runtime, String> {
     .map_err(Clone::clone)
 }
 
-/// Whether the calling thread is a pool thread, where a synchronous store
-/// wait must refuse: enough of them parked would leave no thread for the
-/// tasks they wait on.
 pub(crate) fn on_pool() -> bool {
     ON_POOL.get()
 }
 
-/// A pool task panicked, the pool dropped it before it finished, or a pool
-/// thread asked to wait for it.
 #[derive(Debug)]
 pub(crate) struct TaskLost;
 
-/// The completion of one pool task. Dropping it detaches the task.
 pub(crate) struct PoolTask {
     finished: async_channel::Receiver<bool>,
 }
 
 impl PoolTask {
-    /// Waits on the calling thread until the task ends. Refused on a pool
-    /// thread, where the task is left to end on its own.
     pub(crate) fn join(self) -> Result<(), TaskLost> {
         if on_pool() {
             return Err(TaskLost);
@@ -120,7 +105,6 @@ fn completion(finished: Result<bool, async_channel::RecvError>) -> Result<(), Ta
     }
 }
 
-/// Runs `work` as a pool task, or hands it back when the pool cannot take it.
 pub(crate) fn spawn<F>(work: F) -> Result<PoolTask, F>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -155,15 +139,10 @@ where
     }
 }
 
-/// Gives `work` the pool refused to spawn to the task this pool thread is
-/// polling, which runs it to completion before finishing itself. A pool
-/// thread can neither wait for `work` nor drop it.
 pub(crate) fn adopt(work: impl Future<Output = ()> + Send + 'static) {
     ADOPTED.with_borrow_mut(|adopted| adopted.push(Box::pin(work)));
 }
 
-/// The receiving end of a pool task's command channel.
-///
 /// Dropping it discards the queued commands, as a std receiver does, so a
 /// caller waiting on the reply a queued command carries learns the task is
 /// gone instead of waiting on a channel its own sender keeps open.
@@ -186,21 +165,15 @@ impl<T> Drop for CommandReceiver<T> {
     }
 }
 
-/// `future`, or `None` once `duration` passes first. Timed on the pool's
-/// timer when polled by a pool task.
 pub(crate) async fn timeout<F: Future>(duration: Duration, future: F) -> Option<F::Output> {
     let now = Cx::current().map_or_else(asupersync::time::wall_now, |cx| cx.now());
     asupersync::time::timeout(now, duration, future).await.ok()
 }
 
-/// Waits `duration` without holding the thread, on the pool's timer when
-/// polled by a pool task.
 pub(crate) async fn sleep(duration: Duration) {
     timeout(duration, std::future::pending::<()>()).await;
 }
 
-/// Lets the other tasks queued on this thread run before the caller goes on,
-/// so a lane with a steady stream of work cannot keep a pool thread to itself.
 pub(crate) async fn yield_now() {
     let mut yielded = false;
     std::future::poll_fn(|context| {
@@ -214,9 +187,6 @@ pub(crate) async fn yield_now() {
     .await;
 }
 
-/// Polls `future` on the calling thread, parking between wakes, until it
-/// finishes or `deadline` passes. On a pool thread it polls once and gives
-/// up as if the deadline had passed.
 pub(crate) fn wait_until<F: Future>(future: F, deadline: Option<Instant>) -> Option<F::Output> {
     let deadline = if on_pool() {
         Some(Instant::now())
@@ -243,8 +213,6 @@ pub(crate) fn wait_until<F: Future>(future: F, deadline: Option<Instant>) -> Opt
     }
 }
 
-/// A transaction a pool task keeps open across its awaits.
-///
 /// A `rusqlite::Transaction` is `!Send` only because it holds a
 /// `&Connection`, and `Connection` is `!Sync`. A task is polled by one thread
 /// at a time, so a transaction on a connection only that task can reach is
@@ -290,13 +258,6 @@ impl Wake for ThreadWake {
     }
 }
 
-/// Gives each task its own copy of the thread-local state a store's worker
-/// kept while it owned a thread: lock-work and VM telemetry, and the test
-/// clock. Swapped in for each poll and out after it, even when the poll
-/// panics, so no other task inherits them.
-///
-/// It also runs the work its polls [`adopt`], and finishes only once that
-/// work and its own have both finished.
 struct TaskLocals<F> {
     work: Option<Pin<Box<F>>>,
     adopted: Vec<Adopted>,

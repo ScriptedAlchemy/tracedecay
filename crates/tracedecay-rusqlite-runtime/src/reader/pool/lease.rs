@@ -384,8 +384,6 @@ impl<E: ReaderQueryExecutor> Drop for SnapshotLease<'_, E> {
     }
 }
 
-/// The worker's snapshot-end answer if it lands within `bound`, waited for on
-/// the calling thread.
 fn end_reply_within(
     receive: &SnapshotEndReply,
     bound: Duration,
@@ -445,9 +443,6 @@ async fn finish_deferred_return<E: ReaderQueryExecutor>(
     }
 }
 
-/// Runs the return as a pool task. When the pool refuses it, this thread
-/// runs it, or on a pool thread the task polling there does, so worker
-/// capacity cannot disappear silently.
 fn spawn_or_run_deferred_return<F>(
     task: F,
     spawn: impl FnOnce(F) -> Result<crate::storage_pool::PoolTask, F>,

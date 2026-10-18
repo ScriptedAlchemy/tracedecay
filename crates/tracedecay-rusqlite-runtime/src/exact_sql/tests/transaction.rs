@@ -23,8 +23,6 @@ fn sqlite_busy(message: String) -> rusqlite::Error {
     )
 }
 
-/// Drives [`retry_busy_begin`] on this thread for a `begin` that needs no
-/// connection.
 fn retry_without_connection(
     mut begin: impl FnMut() -> rusqlite::Result<()>,
     shutdown: &AtomicBool,

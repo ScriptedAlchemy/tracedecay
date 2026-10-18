@@ -117,10 +117,6 @@ pub struct ExactSqlHandle {
 /// `block_on` caller; its blocking pool carries no runtime handle) parks that
 /// thread and every task queued on it, so each one is counted in
 /// [`native_thread_writer_waits`] and the first at each call site is logged.
-///
-/// On a storage pool thread the wait would hold a thread the writer task may
-/// need, so each synchronous entry point calls [`refuse_on_pool`] before it
-/// sends anything.
 #[track_caller]
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
@@ -1452,9 +1448,6 @@ fn prepare_read_statement<'c>(
     guard::prepare_cached(connection, sql).map_err(|error| sqlite_error(PREPARE_QUERY, error))
 }
 
-/// Runs `read` again while it fails to prepare because the WAL is still being
-/// recovered, waiting between attempts without holding the thread.
-///
 /// SQLite answers a connection that starts a read while another connection
 /// recovers the WAL with `SQLITE_BUSY_RECOVERY`, which bypasses the busy
 /// handler, so a reader started right after its writer, or a writer whose
@@ -1479,9 +1472,6 @@ pub(crate) async fn read_across_wal_recovery<T>(
     read()
 }
 
-/// Runs `run` on `request` as [`read_across_wal_recovery`] does. Only a query
-/// prepares through [`prepare_read_statement`], so only a query is cloned for
-/// another attempt.
 async fn request_across_wal_recovery<T>(
     request: SqlRequest,
     mut run: impl FnMut(SqlRequest) -> Result<T, ExactSqlError>,

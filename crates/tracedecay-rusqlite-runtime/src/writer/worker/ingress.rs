@@ -50,8 +50,6 @@ pub(super) async fn wait_for_work(
     let mut retry = deadline.map(arm);
     std::future::poll_fn(|task_cx| {
         // Writer shutdown, rather than request cancellation, owns accepted work.
-        // Every channel registers this task's waker before it yields, so
-        // ingress cannot be lost.
         let wake = cx.masked(|| {
             if shutdown_receiver.poll_recv(cx, task_cx).is_ready() {
                 return Poll::Ready(WorkerWake::Shutdown);

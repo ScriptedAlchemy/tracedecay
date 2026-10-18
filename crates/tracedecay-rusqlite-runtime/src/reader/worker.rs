@@ -212,8 +212,6 @@ enum SnapshotCommand {
     Shutdown,
 }
 
-/// The worker's answer to a snapshot end, awaited by a pool task when the
-/// caller's grace runs out.
 pub(crate) type SnapshotEndReply = async_channel::Receiver<Result<(), ReaderWorkerError>>;
 
 #[derive(Clone)]
@@ -452,7 +450,6 @@ impl WorkerClient {
         }
     }
 
-    /// Refused on a pool thread: every caller waits on the command's reply.
     fn snapshot_sender(&self) -> Result<async_channel::Sender<SnapshotCommand>, ReaderWorkerError> {
         if crate::storage_pool::on_pool() {
             return Err(ReaderWorkerError::WorkerClosed);
@@ -648,8 +645,6 @@ async fn run<E: ReaderQueryExecutor>(
     }
 }
 
-/// Wait for the next command, returning the polling thread's heap whenever
-/// the sampler asked for it while the worker idles.
 async fn next_command(
     receiver: &crate::storage_pool::CommandReceiver<WorkerCommand>,
 ) -> Option<WorkerCommand> {

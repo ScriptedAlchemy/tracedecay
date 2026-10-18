@@ -576,7 +576,6 @@ impl RepositoryRuntimePhysicalAttachment {
 
     #[tracing::instrument(name = "rusqlite.attachment.drain", level = "trace", skip_all)]
     pub fn drain(&self) -> Result<(), String> {
-        // The quiesce wait below sleeps the calling thread.
         if crate::storage_pool::on_pool() {
             return Err(
                 "repository physical attachment cannot drain on a storage pool thread".to_owned(),
@@ -943,7 +942,6 @@ mod tests {
             .count()
     }
 
-    /// This process's threads, each id with its kept name.
     #[cfg(target_os = "linux")]
     fn threads() -> std::collections::BTreeMap<String, String> {
         fs::read_dir("/proc/self/task")
@@ -977,8 +975,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Runs the calling test alone in a child process, so a process-wide
-    /// thread count sees no other test's threads. True in the child.
     #[cfg(target_os = "linux")]
     fn alone_in_child_process(test: &str) -> bool {
         const CHILD: &str = "TRACEDECAY_ATTACHMENT_TEST_CHILD";
@@ -1026,7 +1022,6 @@ mod tests {
             assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
             attachment
         };
-        // Every attach takes the native runtime, so it predates the stores.
         native_runtime();
         let before = threads();
         let attachments = (0..64).map(exercise).collect::<Vec<_>>();

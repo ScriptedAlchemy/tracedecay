@@ -43,9 +43,6 @@ pub fn handle() -> Option<RuntimeHandle> {
     native_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
 }
 
-/// The native runtime the calling thread runs on. A storage pool thread runs
-/// on an asupersync runtime too, but not this one: it has no blocking pool,
-/// and its waits are not native-thread waits.
 fn native_handle() -> Option<RuntimeHandle> {
     if crate::storage_pool::on_pool() {
         return None;
@@ -53,8 +50,6 @@ fn native_handle() -> Option<RuntimeHandle> {
     Runtime::current_handle()
 }
 
-/// Whether the calling thread is a native runtime thread, where a synchronous
-/// wait parks every task queued on it.
 pub(crate) fn on_native_thread() -> bool {
     native_handle().is_some()
 }
