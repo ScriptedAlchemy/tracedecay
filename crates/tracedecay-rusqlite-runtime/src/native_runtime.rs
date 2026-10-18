@@ -40,19 +40,32 @@ pub const NOT_INSTALLED: &str = "native execution runtime not installed";
 /// `None` when no runtime was installed or the installed one failed to start.
 #[must_use]
 pub fn handle() -> Option<RuntimeHandle> {
-    Runtime::current_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
+    native_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
+}
+
+fn native_handle() -> Option<RuntimeHandle> {
+    if crate::storage_pool::on_pool() {
+        return None;
+    }
+    Runtime::current_handle()
+}
+
+pub(crate) fn on_native_thread() -> bool {
+    native_handle().is_some()
 }
 
 /// The caller's task context, or a request context on the process runtime.
 #[must_use]
 pub fn cx() -> Option<Cx> {
-    Cx::current().or_else(|| {
-        process_runtime()
-            .ok()?
-            .handle()
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .ok()
-    })
+    Cx::current()
+        .filter(|_| !crate::storage_pool::on_pool())
+        .or_else(|| {
+            process_runtime()
+                .ok()?
+                .handle()
+                .try_request_cx_with_budget(Budget::INFINITE)
+                .ok()
+        })
 }
 
 /// Runs `future` to completion on the calling thread, with the tasks it
