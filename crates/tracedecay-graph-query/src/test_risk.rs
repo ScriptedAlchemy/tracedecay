@@ -9,7 +9,6 @@ use tracedecay_contracts::retrieval::{
     TestRiskConfidenceV1, TestRiskEntryV1, TestRiskResultV1, TestRiskSummaryV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, ComplexityAnalysisV1, RelationEdgeKindV1, SymbolOccurrenceId,
 };
@@ -522,7 +521,10 @@ pub fn verified_test_symbol_parts(
 }
 
 fn test_risk_graph_problem(detail: &str) -> GraphQueryError {
-    TraceDecayError::project_route("verified-test-evidence-unavailable", false, detail).into()
+    GraphQueryError::EvidenceUnavailable {
+        reason_code: "verified-test-evidence-unavailable",
+        detail: detail.to_owned(),
+    }
 }
 
 #[tracing::instrument(name = "graph.health.test_risk.attribution", level = "trace", skip_all)]

@@ -402,6 +402,13 @@ fn graph_query_outcome<T>(
 ) -> RetrievalPortOutcome<T> {
     match error {
         GraphQueryError::Read(read_error) => graph_read_outcome(read_error, domain, finished_at),
+        GraphQueryError::EvidenceUnavailable { detail, .. } => graph_read_outcome(
+            &CodeGraphReadError::Unavailable {
+                detail: detail.clone(),
+            },
+            domain,
+            finished_at,
+        ),
         GraphQueryError::Runtime(_) => failed(domain, finished_at),
     }
 }

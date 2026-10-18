@@ -75,3 +75,29 @@ async fn unrelated_query_route_is_failed_instead_of_graph_unavailability() {
         })
     );
 }
+
+#[tokio::test]
+async fn incomplete_test_evidence_is_unmeasured_instead_of_failed() {
+    let fixture = DashboardStateFixture::open("project.dashboard-incomplete-evidence").await;
+    let symbol = tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1 {
+        occurrence: tracedecay_domain::SymbolOccurrenceId::new("symbol.incomplete")
+            .expect("symbol occurrence"),
+        binding: None,
+        metadata: None,
+    };
+    let error = tracedecay_graph_query::test_risk::verified_test_symbol_parts(&symbol)
+        .expect_err("test evidence requires extraction metadata");
+    let (status, response) =
+        response_body(graph_query_error_response::<Value>(&fixture.state, error)).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response["domain_state"], "unknown");
+    assert_eq!(
+        response["payload"],
+        json!({
+            "status": "unmeasured",
+            "reason": "graph_authority_unavailable",
+            "detail": "verified test evidence is missing extraction metadata",
+        })
+    );
+}

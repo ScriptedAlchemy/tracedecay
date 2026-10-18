@@ -8,7 +8,6 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId,
 };
@@ -676,13 +675,10 @@ pub fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolReco
 }
 
 fn unavailable(detail: &str) -> GraphQueryError {
-    TraceDecayError::ProjectRoute {
-        reason_code: "verified-code-graph-evidence-unavailable".to_owned(),
-        retryable: false,
+    GraphQueryError::EvidenceUnavailable {
+        reason_code: "verified-code-graph-evidence-unavailable",
         detail: detail.to_owned(),
-        typed_detail: None,
     }
-    .into()
 }
 
 fn invalid_request(detail: &str) -> GraphQueryError {
@@ -712,14 +708,17 @@ mod path_scope_tests {
         CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
     };
     use tracedecay_code_index::lineage::LineageSymbolRecordV1;
+    use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_domain::{
         CanonicalRelationEdgeV1, ComplexityAnalysisV1, EdgeAuthorityV1, FileOccurrenceId,
         LanguageDescriptorRevision, RelationEdgeKindV1, SourceSpan, SymbolOccurrenceId,
     };
 
     use super::{
-        TestClassification, fold_health_aggregates, path_is_within, scoped_file_adjacency,
+        GraphQueryError, TestClassification, fold_health_aggregates, health_symbol_metadata,
+        path_is_within, scoped_file_adjacency,
     };
+    use crate::test_risk::verified_test_symbol_parts;
 
     fn digest<T>(byte: char) -> T
     where
@@ -781,6 +780,47 @@ mod path_scope_tests {
                 start_byte: 0,
                 end_byte: 1,
             },
+        }
+    }
+
+    #[test]
+    fn incomplete_health_and_test_metadata_keep_typed_unavailability() {
+        let incomplete = symbol("symbol.incomplete", "src/incomplete.rs");
+        let health_error = health_symbol_metadata(std::slice::from_ref(&incomplete))
+            .expect_err("health cannot be measured without extraction metadata");
+        let test_error = verified_test_symbol_parts(&incomplete)
+            .expect_err("test evidence requires extraction metadata");
+
+        for (error, expected_code, expected_detail) in [
+            (
+                health_error,
+                "verified-code-graph-evidence-unavailable",
+                "verified health evidence is incomplete for one or more symbols",
+            ),
+            (
+                test_error,
+                "verified-test-evidence-unavailable",
+                "verified test evidence is missing extraction metadata",
+            ),
+        ] {
+            assert!(matches!(
+                &error,
+                GraphQueryError::EvidenceUnavailable { reason_code, detail }
+                    if *reason_code == expected_code && detail == expected_detail
+            ));
+            let TraceDecayError::ProjectRoute {
+                reason_code,
+                retryable,
+                detail,
+                typed_detail,
+            } = error.into()
+            else {
+                panic!("the outbound runtime contract must remain a project-route refusal");
+            };
+            assert_eq!(reason_code, expected_code);
+            assert!(!retryable);
+            assert_eq!(detail, expected_detail);
+            assert!(typed_detail.is_none());
         }
     }
 

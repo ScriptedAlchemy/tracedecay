@@ -63,12 +63,19 @@ pub enum CodeGraphReadError {
     Corrupt { detail: String },
 }
 
-/// Read refusals remain typed until the host chooses its public outcome;
-/// other query and source failures keep their runtime cause.
+/// Read and incomplete-evidence refusals remain typed until the host chooses
+/// its public outcome; other query and source failures keep their runtime cause.
 #[derive(Debug, Error)]
 pub enum GraphQueryError {
     #[error(transparent)]
     Read(#[from] CodeGraphReadError),
+    /// A query could not establish complete evidence. Hosts classify this
+    /// variant; the reason code is retained only for the outbound runtime error.
+    #[error("{detail}")]
+    EvidenceUnavailable {
+        reason_code: &'static str,
+        detail: String,
+    },
     #[error(transparent)]
     Runtime(#[from] TraceDecayError),
 }
@@ -86,6 +93,10 @@ impl From<GraphQueryError> for TraceDecayError {
     fn from(error: GraphQueryError) -> Self {
         match error {
             GraphQueryError::Read(error) => map_code_graph_read_runtime_error(error),
+            GraphQueryError::EvidenceUnavailable {
+                reason_code,
+                detail,
+            } => Self::project_route(reason_code, false, detail),
             GraphQueryError::Runtime(error) => error,
         }
     }

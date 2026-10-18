@@ -1218,6 +1218,9 @@ fn graph_query_error_response<T: Serialize>(
 ) -> Response {
     match error {
         GraphQueryError::Read(error) => graph_error_response::<T>(state, error),
+        GraphQueryError::EvidenceUnavailable { detail, .. } => {
+            graph_error_response::<T>(state, CodeGraphReadError::Unavailable { detail })
+        }
         GraphQueryError::Runtime(error) => {
             failed_response::<T>(state, "strata_read_failed", error.to_string(), false)
         }
