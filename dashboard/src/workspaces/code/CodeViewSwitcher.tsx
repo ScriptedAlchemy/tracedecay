@@ -1,8 +1,8 @@
 import { cn } from '../../ui/cn.ts';
 import {
+  CODE_VIEWS,
   CODE_VIEW_DEFINITIONS,
   codeViewNeedsFocus,
-  codeViewsOffered,
   type CodeView,
 } from './codeView.ts';
 
@@ -39,11 +39,10 @@ export function CodeViewSwitcher({
       data-code-view={active}
     >
       <ol className="flex min-w-0 flex-wrap items-center gap-1">
-        {codeViewsOffered(active).map((view) => {
+        {CODE_VIEWS.map((view) => {
           const definition = CODE_VIEW_DEFINITIONS[view];
           const selected = view === active;
-          const disabled =
-            definition.status === 'pending' || (codeViewNeedsFocus(view) && !focusAvailable);
+          const disabled = codeViewNeedsFocus(view) && !focusAvailable;
           return (
             <li key={view}>
               <button
@@ -53,11 +52,9 @@ export function CodeViewSwitcher({
                 aria-controls={CODE_VIEW_PANEL_ID}
                 disabled={disabled}
                 title={
-                  definition.status === 'pending'
-                    ? `${definition.label} is not mounted: ${definition.note}`
-                    : disabled
-                      ? `${definition.label} needs a pinned symbol`
-                      : definition.note
+                  disabled
+                    ? `${definition.label} needs a pinned symbol`
+                    : definition.note
                 }
                 onClick={() => onSelect(view)}
                 className={cn(

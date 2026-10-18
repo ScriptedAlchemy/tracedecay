@@ -19,4 +19,5 @@ mod hook_lifecycle_lease_test;
 mod hook_replay_test;
 mod hook_spool_drain_test;
 mod hooks_test;
+mod intent_pass_journey_test;
 mod lsp_gateway_protocol_test;

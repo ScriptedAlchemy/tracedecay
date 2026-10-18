@@ -105,7 +105,7 @@ pub async fn compute_hook_runtime(
             HookRuntimeResultV1::HookV2Admit(hook_v2_admit(cg, request, session_authorities).await?)
         }
         Request::HookV2DeliveryReceipt { receipt } => HookRuntimeResultV1::HookV2DeliveryReceipt {
-            status: hook_v2_delivery_receipt(cg, receipt).await?,
+            status: hook_v2_delivery_receipt(cg, receipt, global_db.map(AsRef::as_ref)).await?,
         },
         Request::HookV2FeedbackNoticeDelivery {
             envelope,

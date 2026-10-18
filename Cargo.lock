@@ -7001,6 +7001,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "shell-words",
  "tracedecay-domain",
  "tracing",
 ]
