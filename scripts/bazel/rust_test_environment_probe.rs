@@ -39,6 +39,11 @@ fn main() {
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
     assert!(manifest_dir.is_absolute());
     assert_eq!(manifest_dir, std::env::current_dir().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(manifest_dir.join("bazel/rust_test_environment_probe.txt"))
+            .expect("fixture beneath the runtime manifest directory"),
+        "runfile probe\n",
+    );
 
     let test_tmpdir = std::env::var("TEST_TMPDIR").expect("Bazel must provide TEST_TMPDIR");
     assert_eq!(

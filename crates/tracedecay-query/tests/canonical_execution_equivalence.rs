@@ -9,7 +9,7 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, ExactFieldV1, ExactTechnicalTermKindV1, FileOccurrenceId,
     FixedPointScore, FreshnessCompatibilityV1, FusionProfile, ManifestDigest, PrincipalId,
     RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalBudgetUsage,
-    RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrievalCursorKeyId, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
     RetrievalSourceRoleV1, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
     ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SourceFreshness,
     SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark,
@@ -21,10 +21,10 @@ use tracedecay_query::retrieval::lexical::{LexicalFieldV1, LexicalLaneEvidence};
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
-    NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
-    PreparedQueryRoutingBindingsV1, PreparedQueryV1, QUERY_RANKING_REVISION_V1, QueryAuthorityV1,
-    authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
+    NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1, NativeSymbolRecordV1,
+    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
+    QUERY_RANKING_REVISION_V1, QueryAuthorityV1, authenticate_prepared_query_cursor_for_routing,
+    route_authenticated_prepared_query_cursor,
 };
 
 use tracedecay_domain::test_fixtures::id;
@@ -280,7 +280,7 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         .expect("exact translation");
     assert_eq!(
         exact,
-        NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
+        RetrieverOutcome::Complete(NativeLanePageV1 {
             generation: generation(),
             items: vec![NativeExactRecordV1 {
                 occurrence: FixtureRecords::occurrence(),
@@ -296,7 +296,7 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         field: ExactFieldV1::ToolName,
         ..exact_evidence().matched_literals[0].clone()
     };
-    let NativeLaneOutcomeV1::Complete(page) = context
+    let RetrieverOutcome::Complete(page) = context
         .exact(
             RetrieverOutcome::Complete(batch(exact_candidate, exact_evidence())),
             &[other_field],
@@ -323,7 +323,7 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         .expect("lexical translation");
     assert_eq!(
         lexical,
-        NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
+        RetrieverOutcome::Complete(NativeLanePageV1 {
             generation: generation(),
             items: vec![NativeLexicalRecordV1 {
                 occurrence: FixtureRecords::occurrence(),
@@ -351,7 +351,7 @@ fn public_execution_translates_each_canonical_lane_without_field_loss() {
         .expect("graph translation");
     assert_eq!(
         graph,
-        NativeLaneOutcomeV1::Complete(NativeLanePageV1 {
+        RetrieverOutcome::Complete(NativeLanePageV1 {
             generation: generation(),
             items: vec![NativeGraphRecordV1 {
                 symbol: FixtureRecords::symbol(&id("symbol.canonical-equivalence")),
@@ -396,7 +396,7 @@ fn a_kind_filtered_exact_hit_reports_the_literal_that_matched_that_kind() {
         )
         .expect("exact translation");
 
-    let NativeLaneOutcomeV1::Complete(page) = exact else {
+    let RetrieverOutcome::Complete(page) = exact else {
         panic!("complete page expected: {exact:?}");
     };
     let matched: Vec<_> = page
@@ -411,7 +411,60 @@ fn a_kind_filtered_exact_hit_reports_the_literal_that_matched_that_kind() {
 }
 
 #[test]
-fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
+fn public_execution_preserves_partial_reason_and_validates_filtered_evidence() {
+    let records = FixtureRecords {
+        generation: generation(),
+    };
+    let context = context(&records);
+    let reason = RetrievalFailure::CandidateSourcesPruned {
+        term_sources: vec![("common".to_owned(), 200)],
+        document_frequency_budget: 100,
+    };
+    let mut partial_batch = batch(
+        candidate(RetrieverKind::Lexical, 875_000),
+        lexical_evidence(),
+    );
+
+    assert_eq!(
+        context
+            .lexical(
+                RetrieverOutcome::Partial {
+                    value: partial_batch.clone(),
+                    reason: reason.clone(),
+                },
+                |path| path.starts_with("src/other/"),
+            )
+            .expect("partial translation"),
+        RetrieverOutcome::Partial {
+            value: NativeLanePageV1 {
+                generation: generation(),
+                items: Vec::new(),
+                total_eligible: 0,
+                coverage: RetrieverCoverage {
+                    eligible: 0,
+                    excluded: 1,
+                    ..coverage()
+                },
+            },
+            reason: reason.clone(),
+        }
+    );
+
+    partial_batch.evidence_by_occurrence.clear();
+    assert_eq!(
+        context.lexical(
+            RetrieverOutcome::Partial {
+                value: partial_batch,
+                reason,
+            },
+            |_| true,
+        ),
+        Err(tracedecay_query::retrieval::QueryExecutionContractErrorV1::InvalidLaneEvidence)
+    );
+}
+
+#[test]
+fn public_execution_preserves_terminal_outcomes() {
     let records = FixtureRecords {
         generation: generation(),
     };
@@ -429,7 +482,7 @@ fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
         context
             .lexical(RetrieverOutcome::Denied, |_| true)
             .expect("denied decision"),
-        NativeLaneOutcomeV1::Denied
+        RetrieverOutcome::Denied
     );
     assert_eq!(
         context
@@ -440,19 +493,34 @@ fn public_execution_preserves_denied_stale_cancelled_and_budget_outcomes() {
                 |_| true,
             )
             .expect("stale decision"),
-        NativeLaneOutcomeV1::Stale(stale)
+        RetrieverOutcome::Stale(stale)
     );
     assert_eq!(
         context
             .graph(RetrieverOutcome::BudgetExceeded(budget), |_| true)
             .expect("budget decision"),
-        NativeLaneOutcomeV1::BudgetExceeded(budget)
+        RetrieverOutcome::BudgetExceeded(budget)
     );
     assert_eq!(
         context
             .lexical(RetrieverOutcome::Cancelled, |_| true)
             .expect("cancelled decision"),
-        NativeLaneOutcomeV1::Cancelled
+        RetrieverOutcome::Cancelled
+    );
+    assert_eq!(
+        context
+            .lexical(RetrieverOutcome::TimedOut(budget), |_| true)
+            .expect("timeout decision"),
+        RetrieverOutcome::TimedOut(budget)
+    );
+    let unavailable = RetrievalFailure::AuthorityUnavailable {
+        detail: "native records are unavailable".to_owned(),
+    };
+    assert_eq!(
+        context
+            .lexical(RetrieverOutcome::Unavailable(unavailable.clone()), |_| true)
+            .expect("unavailable decision"),
+        RetrieverOutcome::Unavailable(unavailable)
     );
 }
 

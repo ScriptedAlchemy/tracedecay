@@ -1484,3 +1484,68 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
         "the blocker must clear once the written-off worker exits"
     );
 }
+
+#[test]
+fn a_worker_spawned_while_the_pool_closes_for_a_lost_file_exits() {
+    let store = TestStore::new();
+    let mut budget = two_reader_budget();
+    budget.max_per_hot_shard = 3;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let _held: Vec<_> = (0..2)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect();
+    let closing = pool.clone();
+    pool.run_once_after_spawn(move || closing.close_for_lost_file());
+
+    assert!(matches!(
+        pool.acquire(&read, &probe, Duration::ZERO),
+        Err(ReaderAcquireError::Interrupted {
+            reason: tracedecay_store::UnavailableReasonV1::FileLost
+        })
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pool.workers_exited() {
+        assert!(
+            Instant::now() < deadline,
+            "a worker registered after the lost-file sweep must still be shut down"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn an_acquire_blocked_when_the_file_is_lost_reports_file_lost() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let _held: Vec<_> = (0..2)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect();
+    let waiter_pool = pool.clone();
+    let waiting_read = read.clone();
+    let waiter = std::thread::spawn(move || {
+        waiter_pool.acquire(
+            &waiting_read,
+            &Probe::for_request(&waiting_read),
+            Duration::from_secs(30),
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while pool.snapshot().waiting_general == 0 {
+        assert!(Instant::now() < deadline, "the acquire never blocked");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    pool.close_for_lost_file();
+
+    assert!(matches!(
+        waiter.join().unwrap(),
+        Err(ReaderAcquireError::Interrupted {
+            reason: tracedecay_store::UnavailableReasonV1::FileLost
+        })
+    ));
+}

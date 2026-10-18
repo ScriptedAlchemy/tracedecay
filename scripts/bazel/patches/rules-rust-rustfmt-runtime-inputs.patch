@@ -1,0 +1,14 @@
+diff --git a/rust/private/rustfmt.bzl b/rust/private/rustfmt.bzl
+--- a/rust/private/rustfmt.bzl
++++ b/rust/private/rustfmt.bzl
+@@ -340,9 +340,7 @@ def _current_rustfmt_toolchain_impl(ctx):
+         toolchain,
+         toolchain.make_variables,
+         DefaultInfo(
+-            files = depset([
+-                toolchain.rustfmt,
+-            ]),
++            files = toolchain.all_files,
+             runfiles = ctx.runfiles(transitive_files = toolchain.all_files),
+         ),
+     ]
