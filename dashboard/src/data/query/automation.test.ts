@@ -143,6 +143,49 @@ describe("runAutomaticCurator", () => {
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
+  it("recognizes a concealed 404 without disclosing a binding", async () => {
+    respond(automaticProblem("not_found_or_not_authorized"), {
+      ok: false,
+      statusCode: 404,
+    });
+    expect(await runAutomaticCurator()).toEqual({
+      outcome: "denied",
+      detail: "the automatic run was not found or not authorized",
+    });
+  });
+
+  it("rejects a concealed problem that discloses any binding", async () => {
+    for (const bindingId of [
+      "binding.http.fact_store_curate.v1",
+      "binding.http.fact_store_get.v1",
+    ]) {
+      const problem = automaticProblem("not_found_or_not_authorized");
+      problem.value.binding_id = bindingId;
+      respond(problem, { ok: false, statusCode: 404 });
+      expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+    }
+  });
+
+  it("requires binding identity for ordinary problems", async () => {
+    const problem = automaticProblem("conflict");
+    delete problem.value.binding_id;
+    respond(problem, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("still validates the status and result contract of concealed problems", async () => {
+    respond(automaticProblem("not_found_or_not_authorized"), {
+      ok: false,
+      statusCode: 503,
+    });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const wrongContract = automaticProblem("not_found_or_not_authorized");
+    wrongContract.value.contract.schema_revision = 2;
+    respond(wrongContract, { ok: false, statusCode: 404 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("rejects malformed success request identity and scope digest", async () => {
     const wrongRequest = curatorSuccess(startedReceipt("request.dashboard.success"));
     wrongRequest.value.request_id = " request.dashboard.success";
@@ -159,6 +202,28 @@ describe("runAutomaticCurator", () => {
     const run = startedReceipt("request.dashboard.success");
     run.task = "session_reflector";
     respond({ run });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("requires the application effect execution receipt", async () => {
+    const body = curatorSuccess(startedReceipt("request.dashboard.success"));
+    const { execution: _execution, ...effect } = body.value.outcome.value;
+    respond({
+      ...body,
+      value: { ...body.value, outcome: { outcome: "effect", value: effect } },
+    });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("refuses receipts when browser hashing is unavailable", async () => {
+    vi.stubGlobal("crypto", undefined);
+    respond({ run: startedReceipt("request.dashboard.success") });
+    expect(await runAutomaticCurator()).toEqual({
+      outcome: "unsupported_schema",
+      detail: "the automatic curator result does not match this build",
+    });
+
+    respond(automaticProblem("partial_effect"), { ok: false, statusCode: 409 });
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
@@ -211,6 +276,28 @@ describe("runAutomaticCurator", () => {
     if (receipt === null) throw new Error("partial fixture drifted");
     receipt.operation = "use-case.application.retained.fact-store-add";
     respond(body, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("requires a committed curation state in a partial-effect receipt", async () => {
+    const body = automaticProblem("partial_effect");
+    const receipt = body.value.problem.committed_receipt;
+    if (receipt === null) throw new Error("partial fixture drifted");
+    Object.assign(receipt, { committed_state: null, external_proof: sha("8") });
+    respond(body, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("rejects application problems with inconsistent HTTP status or retry scope", async () => {
+    respond(automaticProblem("partial_effect"), { ok: false, statusCode: 503 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    respond(automaticProblem("reset_required"), { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const conflict = automaticProblem("conflict");
+    conflict.value.problem.retry_scope = null;
+    respond(conflict, { ok: false, statusCode: 409 });
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
@@ -328,14 +415,34 @@ function curatorSuccess(run: unknown) {
       },
       outcome: {
         outcome: "effect",
-        value: { payload: run },
+        value: {
+          effect_id: "effect.retained.fact_store_curate.request.dashboard.success",
+          effect_class: "administrative",
+          idempotency_key: "idempotency.dashboard.success",
+          authority: {},
+          expected_state: sha("0"),
+          reconciliation: "pending",
+          receipt: { outcome: "effect_unknown", committed_state: null },
+          execution: {
+            started_at: 10,
+            ended_at: 20,
+            effective_deadline: null,
+            cancellation: null,
+            budget: { units_consumed: 0, bytes_consumed: 0, elapsed_micros: 10 },
+            termination: "effect_unknown",
+          },
+          payload: run,
+        },
       },
     },
   };
 }
 
-function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required") {
+function automaticProblem(
+  kind: "conflict" | "partial_effect" | "reset_required" | "not_found_or_not_authorized",
+) {
   const requestId = `request.dashboard.${kind}`;
+  const concealed = kind === "not_found_or_not_authorized";
   const scope = {
     project_id: "project.dashboard",
     repository_id: "repository.dashboard",
@@ -371,7 +478,7 @@ function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required"
   return {
     kind: "problem",
     value: {
-      binding_id: "binding.http.fact_store_curate.v1",
+      ...(concealed ? {} : { binding_id: "binding.http.fact_store_curate.v1" }),
       contract: {
         schema_id: "schema.application.retained.fact-store-curate.result",
         schema_revision: 1,
@@ -380,32 +487,36 @@ function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required"
       problem: {
         revision: 1,
         kind,
-        code: `automation.memory-curator.${kind}`,
-        message: kind === "partial_effect"
+        code: concealed
+          ? "application.not_found_or_not_authorized"
+          : `automation.memory-curator.${kind}`,
+        message: concealed
+          ? "The operation was not found or not authorized."
+          : kind === "partial_effect"
           ? "curation committed before projection failed"
           : kind === "reset_required"
           ? "the retained memory store must be reset"
           : "the retained operation conflicts with current state",
-        diagnostic: kind === "conflict"
-          ? {
-              code: "application.retained.conflict",
-              message: "The retained operation conflicts with current state.",
-            }
-          : null,
+        diagnostic: concealed ? null : {
+          code: `application.retained.${kind}`,
+          message: "The retained operation could not complete.",
+        },
         detail: null,
         committed_receipt: effectReceipt,
         owning_layer: "runtime",
-        terminality: kind === "conflict" ? "pre_admission" : "admitted_terminal",
+        terminality: kind === "partial_effect" || kind === "reset_required"
+          ? "admitted_terminal"
+          : "pre_admission",
         retryable: kind === "conflict",
         retry: kind === "conflict" ? "after_revalidate" : "never",
-        retry_scope: null,
+        retry_scope: kind === "conflict" ? "fresh_request" : null,
         retry_after_millis: null,
         cancellation_stage: null,
         execution_failure_classification: null,
         request_id: requestId,
         trace_id: requestId,
         details: [],
-        legal_actions: [
+        legal_actions: concealed ? [] : [
           kind === "partial_effect"
             ? "reconcile"
             : kind === "reset_required"
