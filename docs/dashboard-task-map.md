@@ -155,7 +155,7 @@ Measured against master `334a226d60`.
 | Work production source (non-test TS/TSX) | 13,528 lines | 6,196 lines |
 | Work test source | 5,539 lines | 2,990 lines |
 | Dashboard production source | 117,597 lines | 109,280 lines (-8,317) |
-| Dashboard test source | 219 files, 2,125 tests | 215 files, 2,037 tests |
+| Dashboard vitest | 219 files, 2,125 tests | 217 files, 2,049 tests (after merging newer master, which added tests of its own) |
 | Retired paths with a redirect | none | 11 paths, plus `/`, the Agents timeline link, and every removed `/work?view=` value |
 
 What was removed, and why (evidence is in the tables above):
