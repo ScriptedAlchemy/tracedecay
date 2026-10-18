@@ -53,12 +53,14 @@ pub(super) fn reject_unauthorized(
     }
 }
 
-pub(super) fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetry) {
+pub(super) fn reject_all(
+    queue: &mut FairQueue<AcceptedRequest>,
+    telemetry: &WriterTelemetry,
+    reason: UnavailableReasonV1,
+) {
     for item in queue.drain_all() {
         let bytes = item.admission_bytes();
-        let result = Ok(RuntimeSubmitOutcomeV1::Unavailable {
-            reason: UnavailableReasonV1::Faulted,
-        });
+        let result = Ok(RuntimeSubmitOutcomeV1::Unavailable { reason });
         telemetry.released(1, bytes);
         telemetry.completed(&result);
         item.settle(result);

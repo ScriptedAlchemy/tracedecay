@@ -1095,6 +1095,77 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
 
     drop(publications);
     drop(incumbent_runtime);
+
+    // Recovery can fence this exact root while feedback construction runs
+    // outside the lock. The prepared bundle must then remain unpublished.
+    let recovering_service = DaemonInvocationService::default();
+    let (publication_ready, publication_is_ready) = tokio::sync::oneshot::channel();
+    let (continue_publication, publication_may_continue) = tokio::sync::oneshot::channel();
+    let gate = Arc::new(DaemonFeedbackPublicationTestGate::new(
+        publication_ready,
+        publication_may_continue,
+    ));
+    let registrar =
+        DaemonFeedbackRuntimeRegistrar::new(&recovering_service).with_publication_gate(gate);
+    let publisher_database = database.clone();
+    let publisher_root = project.path().to_path_buf();
+    let publisher_scope = scope.clone();
+    let publisher_access = access.clone();
+    let publisher_configuration = Arc::clone(graph.configuration_runtime());
+    let publisher = tokio::spawn(async move {
+        registrar
+            .open_and_register(
+                publisher_database,
+                publisher_root.clone(),
+                publisher_root.join("response-handles"),
+                publisher_scope.clone(),
+                publisher_access,
+                Arc::new(DaemonCallableCodeAuthorizationSource::production(
+                    publisher_root,
+                    publisher_scope,
+                    publisher_configuration,
+                )),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), publication_is_ready)
+        .await
+        .expect("feedback construction must reach its publication gate")
+        .expect("publication-ready sender");
+    assert_eq!(
+        recovering_service
+            .project_runtimes
+            .feedback_publication_state(project.path()),
+        (false, false, false)
+    );
+    let roots = std::collections::BTreeSet::from([project.path().to_path_buf()]);
+    let mut recovery = Box::pin(recovering_service.project_runtimes.quiesce_roots(&roots));
+    let first_poll = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(recovery.as_mut(), context))
+    })
+    .await;
+    assert!(
+        first_poll.is_pending(),
+        "recovery must fence the root and wait for the live feedback reservation"
+    );
+    continue_publication
+        .send(())
+        .expect("continue-publication receiver");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), publisher)
+        .await
+        .expect("fenced publication must settle")
+        .expect("feedback publisher task");
+    assert!(matches!(
+        result,
+        Err(DaemonFeedbackRuntimeRegistrationError::RegistryClosed)
+    ));
+    let quiescence = tokio::time::timeout(std::time::Duration::from_secs(2), recovery)
+        .await
+        .expect("rejected publication must release its reservation")
+        .expect("root recovery fence");
+    assert!(recovering_service.project_runtimes.is_empty());
+    drop(quiescence);
+
     let service = DaemonInvocationService::default();
     service
         .project_runtimes

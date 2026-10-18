@@ -1,8 +1,6 @@
 //! Pure protected-change planning for source bindings, restrictive policy,
 //! and topology policy. Normal scalar setting changes do not enter this path.
 
-use std::path::Path;
-
 use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, ChangePlanId, ConfigurationRevisionId,
@@ -30,18 +28,21 @@ pub const DAEMON_PROJECT_SOURCE_KIND: SourceKindV1 = SourceKindV1::Cursor;
 ///
 /// This is not path-inferred authority. Both components restate identity the
 /// caller already holds: the authority is the project's own resolved id, and
-/// the locator digest is the same project-open locator digest the daemon
-/// derives for that registered root. It grants the daemon nothing it does not
-/// already own; it only makes the daemon's own binding durable so the
-/// project-open authority check has an exact binding to verify against.
+/// the locator digest is derived from that id alone, so every checkout of the
+/// repository (linked worktree or clone) verifies against one binding. It
+/// grants the daemon nothing it does not already own; it only makes the
+/// daemon's own binding durable so the project-open authority check has an
+/// exact binding to verify against.
 pub fn daemon_owned_project_source_binding(
     project_id: &ProjectId,
-    project_root: &Path,
 ) -> Result<ScopeSourceBinding, DomainError> {
-    let locator = tracedecay_runtime_core::worktree::locator_digest_for_project(project_root)
-        .map_err(|_| DomainError::NonCanonical {
-            field: "daemon project source binding locator digest",
-        })?;
+    let locator = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.project-open.repository-locator.v3",
+        project_id.as_str(),
+    ))
+    .map_err(|_| DomainError::NonCanonical {
+        field: "daemon project source binding locator digest",
+    })?;
     ScopeSourceBinding::new(
         SourceBindingId::new(DAEMON_PROJECT_SOURCE_BINDING_ID.to_owned())?,
         DAEMON_PROJECT_SOURCE_KIND,

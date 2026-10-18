@@ -16,7 +16,7 @@ pub use concrete::{
 };
 pub use production::{
     ProductionPrimitiveCodeAuthoritiesV1, ProductionPrimitiveOpenRequestV1,
-    TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project, locator_digest_for_project,
+    TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project,
     open_production_primitive_runtime,
 };
 pub use runtime::{

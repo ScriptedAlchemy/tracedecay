@@ -152,8 +152,10 @@ impl LocalStoreRuntimeResolverV1 {
     /// Adds exactly one typed project authority.
     ///
     /// A project can carry many aliases in its one
-    /// [`LocalProjectEnrollmentAuthorityV1`], but two separately configured
-    /// authorities for the same typed project are refused rather than merged.
+    /// [`LocalProjectEnrollmentAuthorityV1`]. A later registration adds its
+    /// roots only when each new root's repository marker names the project
+    /// (another clone of the repository); any other second authority for the
+    /// same typed project is refused rather than merged.
     #[cfg(test)]
     pub(crate) fn with_project_authority(
         self,
@@ -163,35 +165,59 @@ impl LocalStoreRuntimeResolverV1 {
         Ok(self)
     }
 
+    /// Returns the roots this registration added, for
+    /// [`Self::withdraw_project_authority`].
     pub fn register_project_authority(
         &self,
         authority: LocalProjectEnrollmentAuthorityV1,
-    ) -> Result<(), LocalStoreRuntimeResolverConfigurationErrorV1> {
+    ) -> Result<LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverConfigurationErrorV1>
+    {
         let project_id = authority.project_id.clone();
         let mut project_authorities = self.project_authorities_write();
-        if project_authorities
-            .get(&project_id)
-            .is_some_and(|existing| existing == &authority)
-        {
-            return Ok(());
-        }
-        if project_authorities.contains_key(&project_id) {
+        let Some(existing) = project_authorities.get_mut(&project_id) else {
+            project_authorities.insert(project_id, authority.clone());
+            return Ok(authority);
+        };
+        let added = authority
+            .enrollment_roots
+            .into_iter()
+            .filter(|root| !existing.enrollment_roots.contains(root))
+            .collect::<Vec<_>>();
+        // Another clone of the repository joins the authority by naming the
+        // project in its own marker; any other root is a second authority.
+        let joins = |root: &PathBuf| {
+            matches!(
+                storage::read_repository_identity_marker(root),
+                Ok(Some(marker)) if marker.project_id == project_id.as_str()
+            )
+        };
+        if !added.iter().all(joins) {
             return Err(
                 LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateProjectAuthority {
                     project_id,
                 },
             );
         }
-        project_authorities.insert(project_id, authority);
-        Ok(())
+        existing.enrollment_roots.extend(added.iter().cloned());
+        existing.enrollment_roots.sort();
+        Ok(LocalProjectEnrollmentAuthorityV1 {
+            project_id,
+            enrollment_roots: added,
+        })
     }
 
-    /// Withdraws `authority` while it is still the one registered for its
-    /// project; a different registration is left in place.
-    pub(crate) fn withdraw_project_authority(&self, authority: &LocalProjectEnrollmentAuthorityV1) {
+    /// Withdraws the roots a [`Self::register_project_authority`] call added,
+    /// leaving every root another registration added in place.
+    pub(crate) fn withdraw_project_authority(&self, added: &LocalProjectEnrollmentAuthorityV1) {
         let mut project_authorities = self.project_authorities_write();
-        if project_authorities.get(&authority.project_id) == Some(authority) {
-            project_authorities.remove(&authority.project_id);
+        let Some(existing) = project_authorities.get_mut(&added.project_id) else {
+            return;
+        };
+        existing
+            .enrollment_roots
+            .retain(|root| !added.enrollment_roots.contains(root));
+        if existing.enrollment_roots.is_empty() {
+            project_authorities.remove(&added.project_id);
         }
     }
 
@@ -2074,5 +2100,114 @@ mod tests {
         .with_project_authority(via_real)
         .expect("alias spelling must not be DuplicateProjectAuthority");
         let _ = resolver;
+    }
+
+    #[test]
+    fn a_clone_whose_marker_names_the_project_joins_its_authority() {
+        let temp = tempfile::TempDir::new().expect("temporary root");
+        let project_id = id::<ProjectId>("project.second-clone");
+        let [first, clone, unmarked] = ["first", "clone", "unmarked"].map(|name| {
+            let root = temp.path().join(name);
+            fs::create_dir_all(&root).expect("enrollment root");
+            root
+        });
+        for root in [&first, &clone] {
+            storage::pin_fixture_repository_identity(root, project_id.as_str())
+                .expect("repository marker");
+        }
+        let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+            id::<BrainId>("brain.second-clone"),
+            id::<UserProfileId>("profile.second-clone"),
+            temp.path().join("profile"),
+        ))
+        .with_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+            project_id.clone(),
+            [first.clone()],
+        ))
+        .expect("first checkout")
+        .with_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+            project_id.clone(),
+            [clone.clone()],
+        ))
+        .expect("a marked clone joins the project's authority");
+
+        assert_eq!(
+            resolver
+                .project_authorities_read()
+                .get(&project_id)
+                .map(|authority| authority.enrollment_roots().to_vec()),
+            Some(vec![
+                clone.canonicalize().unwrap(),
+                first.canonicalize().unwrap()
+            ])
+        );
+        assert_eq!(
+            resolver.register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                [unmarked],
+            )),
+            Err(
+                LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateProjectAuthority {
+                    project_id
+                }
+            ),
+            "a root without the project's marker is a second authority"
+        );
+    }
+
+    #[test]
+    fn withdrawing_a_joined_root_keeps_every_root_another_registration_added() {
+        let temp = tempfile::TempDir::new().expect("temporary root");
+        let project_id = id::<ProjectId>("project.withdraw-joined");
+        let [first, clone] = ["first", "clone"].map(|name| {
+            let root = temp.path().join(name);
+            fs::create_dir_all(&root).expect("enrollment root");
+            storage::pin_fixture_repository_identity(&root, project_id.as_str())
+                .expect("repository marker");
+            root.canonicalize().unwrap()
+        });
+        let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+            id::<BrainId>("brain.withdraw-joined"),
+            id::<UserProfileId>("profile.withdraw-joined"),
+            temp.path().join("profile"),
+        ));
+        let roots = || {
+            resolver
+                .project_authorities_read()
+                .get(&project_id)
+                .map(|authority| authority.enrollment_roots().to_vec())
+        };
+        resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                [first.clone()],
+            ))
+            .expect("first checkout");
+
+        let joined = resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                [clone],
+            ))
+            .expect("a marked clone joins");
+        resolver.withdraw_project_authority(&joined);
+        assert_eq!(
+            roots(),
+            Some(vec![first.clone()]),
+            "only the joined root leaves"
+        );
+
+        let repeated = resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                [first.clone()],
+            ))
+            .expect("a repeated registration is the same authority");
+        resolver.withdraw_project_authority(&repeated);
+        assert_eq!(
+            roots(),
+            Some(vec![first]),
+            "a registration that added nothing withdraws nothing"
+        );
     }
 }

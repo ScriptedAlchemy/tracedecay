@@ -93,6 +93,12 @@ impl PoolTask {
         completion(self.finished.recv_blocking())
     }
 
+    /// Whether the task ended, which drops everything its future owned. Never
+    /// waits, so a pool task may call it.
+    pub(crate) fn is_finished(&self) -> bool {
+        self.finished.is_closed()
+    }
+
     pub(crate) async fn finished(self) -> Result<(), TaskLost> {
         completion(self.finished.recv().await)
     }

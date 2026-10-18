@@ -535,6 +535,7 @@ async fn primitive_read_with_a_saturated_configuration_store_is_unavailable_not_
         matches!(served.outcome, DaemonInvocationOutcome::Primitive { .. }),
         "the same read is served once readers free up: {served:?}"
     );
+    drop((configuration_store, server));
     engine.shutdown_all().await;
 }
 

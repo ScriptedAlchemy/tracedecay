@@ -1828,6 +1828,7 @@ async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
         !linked.join(".tracedecay").exists(),
         "linked route must not acquire working-tree project state"
     );
+    drop((primary_server, linked_server));
     engine.shutdown_all().await;
 }
 
