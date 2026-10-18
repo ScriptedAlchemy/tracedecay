@@ -140,8 +140,9 @@ async fn release_one_idle_project_server_before_open(
     let gate_for_release = Arc::clone(&capacity_gate);
     let completion =
         retirement_admission.spawn_and_track_fallible(retired_owner.clone(), async move {
-            // Teardown joins every owner-scoped store client, so the release
-            // below finds the owner's stores unleased on its only attempt.
+            // Teardown joins every owner-scoped store client and the release
+            // joins the maintenance tick's, so the release finds the owner's
+            // stores unleased on its only attempt.
             stores
                 .administration
                 .session_temporal_refresh_schedulers()
@@ -231,6 +232,11 @@ async fn release_capacity_retired_stores(stores: CapacityRetirementStores) -> Re
         project_roots,
         profile_identity,
     } = stores;
+    // Wait out the maintenance tick's telemetry pass or store unit in flight
+    // and keep new ones off until the release ends.
+    // ponytail: daemon-wide, so this also waits out a unit or telemetry pass
+    // on another project; key it by store if that delays capacity reuse.
+    let _maintenance_clients = administration.maintenance_store_clients().lock().await;
     let project_id = owner
         .project_id
         .clone()

@@ -11,14 +11,10 @@ Please do **not** open a public issue for security vulnerabilities. We aim to ac
 
 ## Supported Versions
 
-Only the current major release line is supported. All minor and patch versions within it receive security fixes.
-
-| Version | Supported |
-|---------|-----------|
-| 6.x (current) | Yes, all minor and patch releases |
-| < 6 | No |
-
-When a vulnerability is found, the fix is shipped as a new release. There are no backports to older major versions. Fixes are not applied in place to existing binaries. **If you run tracedecay in production automation (CI pipelines, scheduled agents, server-side MCP deployments), keep it updated to the latest release** so any future fix reaches you immediately via `tracedecay upgrade`.
+Security fixes ship in the latest published release. Pre-release builds are
+supported by updating to the latest pre-release; older prereleases and historical
+major versions do not receive backports. Consult the repository Releases page
+for the current version rather than assuming a pinned major line remains current.
 
 ## Security Model
 
@@ -33,9 +29,15 @@ tracedecay builds a **local** code graph stored in the active project store. Rep
 - Cross-session memory: durable facts, named entities, code-area notes, decisions, and feedback events in the holographic fact store. Those rows are local-only project data.
 - A response cache for mode-aware source reads (`read_cache` table): the rendered output served to the agent, stored as a BLOB keyed by file path, mode, and arguments. For full/line-range reads this rendered output contains source text. Rows are freshness-gated by file mtime and swept after a period of inactivity.
 
-Aside from the `read_cache`, the graph itself does **not** persist raw source code. It stores structural metadata only. The active project store is local-only. There is no cloud sync, remote database, or server-side storage.
+Sealed code-index artifacts also persist sanitized source chunks for retrieval.
+Sanitization can remove detected secrets; it does not remove proprietary source
+or guarantee that all sensitive content is recognized. Treat index artifacts,
+source-read responses, session messages, and durable facts as private data.
+Local operation is the default. Explicitly configured remote sources and remote
+authorities can exchange policy-authorized content with authenticated peers;
+these deployments require reviewing their configuration and peer trust.
 
-The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-savings counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
+The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate token-savings counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. These stores are local by default; configured remote authority operations follow their explicit admission and disclosure policy.
 
 ### Network access
 
@@ -57,11 +59,12 @@ explicitly local listeners:
 These controls limit network reachability; they do not isolate TraceDecay from
 other processes running as the same operating-system user.
 
-Outbound connections are limited to:
+Outbound capabilities include:
 
 | Destination | Purpose | Auth | Failure mode |
 |-------------|---------|------|-------------|
 | `api.github.com` | Check for releases, discover the pull request for a checkout whose `origin` is on GitHub, and read its reviews and checks | The local GitHub login (`GH_TOKEN`, `gh auth token`, or the git credential helper) when present, anonymous otherwise; optional read-only credential from the OS keyring for configured private sources | Public checks are best effort; an anonymous read GitHub refuses is reported as `denied_no_credential`; configured private access fails closed when credentials or permissions cannot be verified |
+| Configured remote sources and authorities | Policy-authorized retrieval and remote operations | Configured peer authentication and disclosure policy | Admission or authorization failures are reported; review each peer before enabling |
 | `github.com` | Download binary during `tracedecay upgrade` | None (public releases) | Error shown to user |
 | `huggingface.co` and Hugging Face artifact hosts | Download missing, revision-pinned semantic-model artifacts when semantic auto-download is enabled | None | Semantic retrieval reports model acquisition state or failure; exact, lexical, and graph retrieval remain available |
 | `tracedecay-counter.enzinol.workers.dev` | Aggregate token-savings counter | None | Silently ignored |
@@ -132,7 +135,13 @@ recursive-write primitive.
 - Replaces the running binary in place via `self-replace`
 - Re-registers agent integrations on the next launch when the version bump is minor or major
 
-**macOS / Linux:** Release artifacts are not cryptographically signed. The integrity guarantee relies on HTTPS transport security and GitHub's release infrastructure.
+**Installer provenance:** `install.sh` checks same-release SHA-256 sums and uses
+`gh attestation verify` to verify build provenance against the configured release
+workflow. Missing verification fails installation unless the operator explicitly
+opts into the documented unattested install path. Checksums alone establish
+consistency, not independent publisher authenticity. Other distribution/update
+paths have their own verification; do not assume installer checks apply to all
+paths.
 
 **Windows:** Authenticode code signing via the [SignPath.io Foundation](https://signpath.io/foundation) program is being rolled out so Windows binaries are signed as part of the release workflow (addresses the Smart App Control block reported in #79). Until that lands in a published release, Windows binaries remain unsigned.
 
@@ -142,12 +151,12 @@ tracedecay installs **no background daemon, system service, or autostart process
 
 ### Unsafe code
 
-The codebase contains minimal `unsafe`, used in two cross-platform places:
-
-- **Memory-mapped monitor ring buffer** (`src/monitor.rs`). `memmap2` maps `~/.tracedecay/monitor.mmap`, the shared buffer the `tracedecay monitor` TUI reads
-- **Tree-sitter FFI** (`crates/tracedecay-code-extraction/src/ts_provider.rs`), constructing the bundled WGSL grammar from its raw C entry point
-
-The Windows-elevation `unsafe` documented in earlier versions was removed alongside the daemon in 6.0.0.
+Unsafe Rust and FFI exist in several owners, including private filesystem
+identity/platform primitives (`crates/tracedecay-private-fs`), tree-sitter grammar
+bindings (`crates/tracedecay-code-extraction/src/ts_provider.rs`), and platform
+runtime integrations. This is not an exhaustive inventory. Review the relevant
+platform implementation and its invariants when changing those boundaries;
+an old count of unsafe sites is not a security guarantee.
 
 ## Best Practices
 

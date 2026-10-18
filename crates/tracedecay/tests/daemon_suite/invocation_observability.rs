@@ -1524,10 +1524,13 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
 
 #[tokio::test]
 async fn registered_blocked_writer_retries_settlement_only_on_mount_demand() {
+    // The shutdown budget must outlast scheduling delays before the worker's
+    // reply and the released writer's fence, so it keeps the production
+    // value. Only the persistence deadline is short, so held writes fail fast.
     assert_blocked_writer_retirement(
         ObservabilityProducerDeadlinesV1 {
             persistence: Duration::from_millis(50),
-            shutdown: Duration::from_millis(250),
+            ..ObservabilityProducerDeadlinesV1::default()
         },
         "observability_persistence_deadline",
         true,
@@ -1581,25 +1584,14 @@ async fn assert_blocked_writer_retirement(
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    if worker_settled {
-        // The worker must reply inside the shutdown budget, so the blocked
-        // batch fails before shutdown begins: a startup rollup pass may wait
-        // one deadline before the worker takes the event, whose write then
-        // waits another.
-        registered
-            .producer()
-            .try_emit(envelope(&project_id, "shutdown:blocked"))
-            .expect("enqueue blocked event");
-        tokio::time::sleep(deadlines.persistence * 6).await;
-    } else {
-        // The shutdown deadline must elapse first, so the blocked batch is
-        // still in flight when shutdown begins.
-        registered
-            .producer()
-            .try_emit(envelope(&project_id, "shutdown:blocked"))
-            .expect("enqueue blocked event");
-        tokio::task::yield_now().await;
-    }
+    registered
+        .producer()
+        .try_emit(envelope(&project_id, "shutdown:blocked"))
+        .expect("enqueue blocked event");
+    // The batch is still in flight when shutdown begins. A shutdown budget
+    // no longer than the persistence deadline therefore expires before the
+    // worker can reply.
+    tokio::task::yield_now().await;
 
     let retained = registered.producer();
     let error = registered

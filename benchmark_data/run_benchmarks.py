@@ -23,7 +23,6 @@ import argparse
 import json
 import os
 import random
-import resource
 import shutil
 import subprocess
 import sys
@@ -114,7 +113,7 @@ def benchmark_token_savior(name: str, root: Path) -> tuple[dict, list[str]]:
     indexer = ProjectIndexer(root_str)
     index = indexer.index()
     out["cold_index_seconds"] = round(time.perf_counter() - t0, 3)
-    out["cold_index_peak_memory_bytes"] = tracemalloc.get_traced_memory()[1]
+    out["cold_index_python_allocations_peak_bytes"] = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
     out["total_files"] = index.total_files
     out["total_lines"] = index.total_lines
@@ -164,23 +163,27 @@ def benchmark_token_savior(name: str, root: Path) -> tuple[dict, list[str]]:
 # ---------------------------------------------------------------------------
 
 
-def ru_maxrss_bytes() -> int:
-    """ru_maxrss is bytes on macOS, KiB on Linux."""
-    r = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    return r if sys.platform == "darwin" else r * 1024
-
-
 def run_timed(
     cmd: list[str],
     cwd: str | None = None,
     env: dict[str, str] | None = None,
-) -> tuple[float, int, subprocess.CompletedProcess]:
-    before = ru_maxrss_bytes()
-    t0 = time.perf_counter()
-    cp = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
-    dt = time.perf_counter() - t0
-    after = ru_maxrss_bytes()
-    return dt, max(0, after - before), cp
+) -> tuple[float, int | None, subprocess.CompletedProcess]:
+    # File-backed output avoids pipe deadlocks while wait4 owns child reaping.
+    with tempfile.TemporaryFile(mode="w+") as stdout, tempfile.TemporaryFile(mode="w+") as stderr:
+        t0 = time.perf_counter()
+        process = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=stdout, stderr=stderr, text=True)
+        peak_rss = None
+        if hasattr(os, "wait4"):
+            _, status, usage = os.wait4(process.pid, 0)
+            process.returncode = os.waitstatus_to_exitcode(status)
+            peak_rss = int(usage.ru_maxrss) * (1 if sys.platform == "darwin" else 1024)
+        else:
+            process.wait()
+        elapsed = time.perf_counter() - t0
+        stdout.seek(0)
+        stderr.seek(0)
+        completed = subprocess.CompletedProcess(cmd, process.returncode, stdout.read(), stderr.read())
+    return elapsed, peak_rss, completed
 
 
 class TraceDecayMcp:
@@ -292,7 +295,7 @@ def benchmark_tracedecay(name: str, root: Path, sample_symbols: list[str]) -> di
             out["error"] = cp.stderr[-2000:]
             return out
         out["cold_index_seconds"] = round(dt, 3)
-        out["cold_index_peak_memory_bytes"] = mem
+        out["cold_index_client_peak_rss_bytes"] = mem
 
         log(f"[tk] {name}: sync (warm) ...")
         dt, _, cp = run_timed([TRACEDECAY_BIN, "sync"], cwd=str(root), env=env)
@@ -432,9 +435,9 @@ def generate_report(results: list[dict], naive_sizes: dict[str, int]) -> str:
         "query timing so the find_symbol column is directly comparable.",
         "",
         "**Memory notes.** token-savior's peak memory is measured with `tracemalloc`",
-        "(Python heap only). tracedecay runs as a subprocess, so its peak is the",
-        "`ru_maxrss` delta from `getrusage(RUSAGE_CHILDREN)` (resident set size).",
-        "These are *not* identical units, treat them as order-of-magnitude.",
+        "(Python allocations only). TraceDecay reports the specific CLI child process",
+        "peak RSS from `wait4`, where supported. This excludes a separate daemon.",
+        "These measure different things and are reported in separate rows; no memory ratio is computed.",
         "",
         "**Query timing.** token-savior is called in-process (pure Python dict",
         "lookups). tracedecay is driven over MCP via `tracedecay serve --timings`",
@@ -459,7 +462,8 @@ def generate_report(results: list[dict], naive_sizes: dict[str, int]) -> str:
             "|--------|--------------|-----------|",
             f"| Cold index time | {fmt_sec(ts.get('cold_index_seconds'))} | {fmt_sec(tk.get('cold_index_seconds'))} |",
             f"| Warm reindex time | {fmt_sec(ts.get('warm_index_seconds'))} | {fmt_sec(tk.get('warm_index_seconds'))} |",
-            f"| Peak memory (cold) | {fmt_bytes(ts.get('cold_index_peak_memory_bytes'))} | {fmt_bytes(tk.get('cold_index_peak_memory_bytes'))} |",
+            f"| Python allocations peak (cold) | {fmt_bytes(ts.get('cold_index_python_allocations_peak_bytes'))} | — |",
+            f"| CLI process peak RSS (cold) | — | {fmt_bytes(tk.get('cold_index_client_peak_rss_bytes'))} |",
             f"| Cache / DB size | {fmt_bytes(ts.get('cache_size_bytes'))} | {fmt_bytes(tk.get('cache_size_bytes'))} |",
             f"| Files indexed | {fmt_int(ts.get('total_files'))} | {fmt_int(tk.get('file_count'))} |",
             f"| Symbols / nodes | {fmt_int(ts.get('symbol_table_size'))} | {fmt_int(tk.get('node_count'))} |",

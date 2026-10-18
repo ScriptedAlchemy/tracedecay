@@ -234,6 +234,7 @@ def evaluate_scenario(
     commands: list[str],
     verify_status: int | None = None,
     rep: int = 1,
+    agent_completed: bool = False,
 ) -> dict:
     anti_raw = scenario.get("anti_tools", [])
     anti = {t.lower() for t in anti_raw}
@@ -254,18 +255,18 @@ def evaluate_scenario(
         fragment for fragment in expected_cli if fragment_missing(fragment, commands)
     ]
     used_anti = sorted(
-        {n for n in native_tools if n.lower() in anti}
-        | {n for n in native_tools if any(a in n.lower() for a in anti)}
+        {n for n in native_tools if any(a in n.lower() for a in anti)}
+        | {n for n in td_tools if any(a in n.lower() for a in anti if "tracedecay" in a)}
         | {cmd for cmd in commands if any(a in cmd.lower() for a in cmd_anti)}
     )
 
     if expected_tools or expected_cli:
         passed = not missing_tools and not missing_cli and not used_anti
     else:
-        passed = bool(td_tools) and not used_anti
+        passed = (bool(anti_raw) or bool(td_tools)) and not used_anti
 
     verify_pass = None if verify_status is None else (verify_status == 0)
-    if verify_pass is False:
+    if not agent_completed or verify_pass is False:
         passed = False
 
     attempt_tool = scenario.get("attempt_tool")
@@ -289,9 +290,22 @@ def evaluate_scenario(
         "expected_tools_missing": missing_tools,
         "expected_cli_missing": missing_cli,
         "anti_tools_used": used_anti,
+        "agent_completed": agent_completed,
         "verify_pass": verify_pass,
         "pass": passed,
     }
+
+
+def agent_turn_completed(path: Path, agent: str) -> bool:
+    try:
+        text = path.read_text()
+        if agent == "claude":
+            result = json.loads(text)
+            return isinstance(result, dict) and result.get("type") == "result" and result.get("subtype") == "success" and not result.get("is_error", False)
+        events = [json.loads(line) for line in text.splitlines() if line.strip()]
+        return any(isinstance(event, dict) and event.get("type") == "turn.completed" for event in events) and not any(isinstance(event, dict) and event.get("type") in {"turn.failed", "error"} for event in events)
+    except (OSError, json.JSONDecodeError):
+        return False
 
 
 def main() -> int:
@@ -341,6 +355,7 @@ def main() -> int:
         commands,
         verify_status=args.verify_status,
         rep=args.rep,
+        agent_completed=agent_turn_completed(Path(args.claude_json if args.agent == "claude" else args.codex_jsonl), args.agent),
     )
     print(json.dumps(result))
     return 0
