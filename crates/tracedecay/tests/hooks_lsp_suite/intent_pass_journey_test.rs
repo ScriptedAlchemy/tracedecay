@@ -290,6 +290,22 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
+fn wait_for_hints(home: &Path, project: &Path, log: &Path, ready: impl Fn((i64, i64)) -> bool) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let counts = hint_counts(home, project, YES_INTENT);
+        if ready(counts) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out at (emitted, suppressed) {counts:?} after intent outcomes {:?}",
+            intent_outcomes(log)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// `(emitted, suppressed)` for one hint category, read through the analytics
 /// tool, which reads the profile `analytics_events` hint settlement reads.
 fn hint_counts(home: &Path, project: &Path, intent: ContextScoutIntentKindV1) -> (i64, i64) {
@@ -483,23 +499,25 @@ fn claude_stop_delivers_the_intent_suggestion_the_daemon_judged_at_the_tool_boun
         "the tool boundary asks the decision engine exactly once"
     );
 
-    let delivered = hook_context(&run_hook(
-        home,
-        &project,
-        "hook-stop",
-        &stop(&project, ENABLED_SESSION, &enabled_transcript),
-    ));
+    let stop_event = stop(&project, ENABLED_SESSION, &enabled_transcript);
+    let delivers = |context: &String| context.contains(&suggestion_text(YES_INTENT));
+    let mut stop_contexts = Vec::new();
+    while stop_contexts.len() < 5 && !stop_contexts.last().is_some_and(delivers) {
+        stop_contexts.push(hook_context(&run_hook(
+            home,
+            &project,
+            "hook-stop",
+            &stop_event,
+        )));
+    }
     assert!(
-        delivered.contains(&suggestion_text(YES_INTENT)),
-        "the next boundary delivers the session-recall suggestion: {delivered}"
+        stop_contexts.last().is_some_and(delivers),
+        "the stop boundary, or the host's retry of it past the admission ack budget, delivers \
+         the session-recall suggestion: {stop_contexts:?}"
     );
-    wait_for(
-        "the delivered hint_emitted row and the stop pass's withheld duplicate",
-        || {
-            let (emitted, suppressed) = hint_counts(home, &project, YES_INTENT);
-            emitted == 1 && suppressed >= 1
-        },
-    );
+    wait_for_hints(home, &project, &log, |(emitted, suppressed)| {
+        emitted == 1 && suppressed >= 1
+    });
     let after_mount = intent_outcomes(&log)[before + 1..].to_vec();
     assert!(
         !after_mount.is_empty() && after_mount.iter().all(|outcome| outcome == "suppressed"),
