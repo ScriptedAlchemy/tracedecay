@@ -1,8 +1,8 @@
 # Bazel CI on the private fleet
 
 GitHub-hosted runners remain the workflow runners. Linux x86_64 test shards
-and Clippy, plus repository gates, connect to the private NativeLink coordinator
-through the official Tailscale action. GitHub supplies checkout, analysis, local
+and Clippy, plus repository gates and the shipped CLI build, connect to the
+private NativeLink coordinator through the official Tailscale action. GitHub supplies checkout, analysis, local
 compilation, test execution, artifacts, and check reporting; Ubuntu-main and
 Omarchy supply additional Linux compilation and test capacity. The Mac worker
 serves macOS actions;

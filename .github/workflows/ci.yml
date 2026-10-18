@@ -664,6 +664,9 @@ jobs:
   # mimalloc allocator, the embedded dashboard, opt-level 3) would otherwise
   # first appear while a release is being cut.
   shipped-cli:
+    permissions:
+      contents: read
+      id-token: write
     name: Shipped CLI build (x86_64-linux)
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -679,6 +682,7 @@ jobs:
           config: release
           dest: target/x86_64-unknown-linux-gnu/release
           cache-key: release-x86_64-unknown-linux-gnu
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
 
       - name: Read immutable packaging inputs
         id: packaging
