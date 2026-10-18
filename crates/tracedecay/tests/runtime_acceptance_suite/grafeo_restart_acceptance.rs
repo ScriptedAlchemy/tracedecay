@@ -1,4 +1,4 @@
-use crate::common;
+use crate::common::{self, fixture::copy_fixture_tree};
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -17,14 +17,16 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 fn initialize_project(home: &Path, project: &Path) {
-    copy_dir(
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         project,
-    );
-    copy_dir(
+    )
+    .expect("copy writable fixture");
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/managed_run_overlay"),
         project,
-    );
+    )
+    .expect("copy writable fixture");
     // Context fail-closes without a verified generation. Sibling graph
     // journeys commit a checkout so the daemon-owned scheduler can publish one.
     git(project, &["init", "--quiet"]);
@@ -50,19 +52,6 @@ fn git(project: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn copy_dir(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).expect("fixture destination");
-    for entry in std::fs::read_dir(source).expect("fixture directory") {
-        let entry = entry.expect("fixture entry");
-        let target = destination.join(entry.file_name());
-        if entry.file_type().expect("fixture entry type").is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).expect("copy checked-in fixture");
-        }
-    }
 }
 
 fn assert_command_success(label: &str, output: &Output) {
