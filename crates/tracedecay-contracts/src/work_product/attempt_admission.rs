@@ -154,6 +154,8 @@ pub enum WorkProductAttemptAdmissionErrorV1 {
     PlacementRootConflict,
     #[error("Work product attempt authority is unavailable")]
     Unavailable,
+    #[error("Work product attempt storage failed: {0}")]
+    Storage(crate::WorkStorageFailureV1),
     #[error("Work product attempt admission was cancelled")]
     Cancelled,
     #[error("Work product attempt admission timed out")]

@@ -6858,6 +6858,7 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-store",
  "tracedecay-temporal-query",
+ "tracedecay-tokenizer",
  "tracing",
 ]
 
@@ -7185,7 +7186,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tracedecay-api",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-tool-catalog",

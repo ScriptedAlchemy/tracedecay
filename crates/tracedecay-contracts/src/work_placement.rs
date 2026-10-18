@@ -57,13 +57,20 @@ pub trait WorkPlacementStoragePort {
         identity: &WorkPlacementIdentityV1,
     ) -> Result<Option<WorkPlacementV1>, WorkPlacementStorageError>;
 
-    /// The placement that currently holds `root`, if any. A placement holds its
-    /// root while admitted or quarantined; a released one does not.
-    fn target_holder(
+    /// Whether a placement other than `identity` under `authority` holds
+    /// `root`. A placement holds its root while admitted or quarantined; a
+    /// released one does not.
+    ///
+    /// A root is a physical resource, so the answer spans every actor, policy
+    /// digest, and worktree route in the registered project and repository.
+    /// Holder identity is never returned: the caller learns only that the root
+    /// is occupied.
+    fn target_held_by_other(
         &self,
         authority: &WorkAuthority,
+        identity: &WorkPlacementIdentityV1,
         root: &str,
-    ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError>;
+    ) -> Result<bool, WorkPlacementStorageError>;
 
     /// Whether an admitted or quarantined placement holds this exact root in
     /// this registered scope, regardless of its actor or policy lineage.
@@ -247,11 +254,9 @@ where
         let Some(root) = target.root() else {
             return Ok(false);
         };
-        Ok(self
-            .storage
-            .target_holder(authority, root)
-            .map_err(ApplicationProblem::from)?
-            .is_some_and(|holder| &holder != identity))
+        self.storage
+            .target_held_by_other(authority, identity, root)
+            .map_err(ApplicationProblem::from)
     }
 }
 

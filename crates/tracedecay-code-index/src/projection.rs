@@ -1,20 +1,15 @@
 //! Projection execution and atomic publication handoff.
 //!
-//! Projectors receive one immutable [`ProjectionBatchRequestV1`] and return
-//! one complete deterministic receipt. The orchestration helper verifies the
-//! request and receipt before constructing a publication handoff; malformed,
-//! partial, failed, or skipped batches never cross that boundary. A true
-//! no-op keeps its projection key and is completed locally from the explicit
-//! reused partition; a projection-key replay always reaches the projector.
-//!
-//! This module defines contracts only. Store-owned transactions, active
-//! pointers, retries, checkpoints, and scheduling remain outside the code
-//! index.
+//! Canonical receipt construction authenticates one immutable changed-chunk
+//! request before preparing a publication handoff. Reused partitions remain
+//! compact; projection-key replays require every current chunk to be explicit.
+//! Store-owned transactions, active pointers, retries and scheduling remain
+//! outside this module.
 
 use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionReplayReasonV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1,
 };
 
 pub use super::receipts::{
@@ -27,83 +22,9 @@ use super::receipts::{
     verify_batch_receipt_verified,
 };
 
-/// A projection adapter failure before a complete receipt is available.
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum ProjectionSinkErrorV1 {
-    #[error("projection sink rejected the batch: {0}")]
-    Rejected(String),
-}
-
-/// Receipt returned by a projection sink with typed digest provenance.
-///
-/// Arbitrary receipts enter through [`Self::unverified`]. A sink that has only
-/// per-chunk decisions uses [`ProjectionReceiptBuilderV1`], whose private trust
-/// witness is issued only after the publication orchestrator verifies the
-/// request and the canonical receipt builder seals those exact decisions.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProjectionSinkReceiptV1 {
-    receipt: ProjectionBatchReceiptV1,
-    publication: PublicationDigestTrustV1,
-}
-
-impl ProjectionSinkReceiptV1 {
-    pub fn unverified(receipt: ProjectionBatchReceiptV1) -> Self {
-        Self {
-            receipt,
-            publication: PublicationDigestTrustV1::Unverified,
-        }
-    }
-
-    fn sealed(receipt: ProjectionBatchReceiptV1) -> Self {
-        Self {
-            receipt,
-            publication: PublicationDigestTrustV1::SealedInThisChain,
-        }
-    }
-
-    fn into_parts(self) -> (ProjectionBatchReceiptV1, PublicationDigestTrustV1) {
-        (self.receipt, self.publication)
-    }
-}
-
-/// Capability to seal one sink receipt against the already-verified request.
-///
-/// Fields are private so this capability can only be minted by
-/// [`project_for_publication`] after request digest and partition validation.
-#[derive(Clone, Copy)]
-pub struct ProjectionReceiptBuilderV1<'a> {
-    request: &'a ProjectionBatchRequestV1,
-    evidence: &'a ProjectionRequestEvidenceV1,
-}
-
-impl ProjectionReceiptBuilderV1<'_> {
-    pub fn build(
-        self,
-        decisions: &[ChunkProjectionDecisionV1],
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionReceiptErrorV1> {
-        Ok(ProjectionSinkReceiptV1::sealed(
-            build_batch_receipt_verified(self.request, self.evidence, decisions)?,
-        ))
-    }
-}
-
-/// The storage-neutral projector contract.
-pub trait CodeChunkProjectionSink {
-    /// Project one complete changed-chunk request. Implementations may return
-    /// failed/skipped receipts as inspectable evidence; only the validated
-    /// publication handoff decides activation eligibility.
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1>;
-}
-
 /// Why a projection batch cannot cross the atomic publication boundary.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ProjectionPublicationErrorV1 {
-    #[error(transparent)]
-    Sink(#[from] ProjectionSinkErrorV1),
     #[error(transparent)]
     Receipt(#[from] ProjectionReceiptErrorV1),
     #[error("the complete receipt contains failed or skipped projection work")]
@@ -158,45 +79,52 @@ impl ProjectionPublicationHandoffV1 {
     }
 }
 
-/// Execute projection work and prepare an atomic publication handoff.
+/// Prepare the canonical receipt for one immutable changed-chunk request.
 ///
-/// True no-op requests bypass `sink` and deterministically emit reused
-/// receipts. A projection-key change replays even an otherwise unchanged
-/// chunk set, so every other request invokes the sink exactly once. In either
-/// case the full receipt is verified before activation eligibility is checked.
+/// This records prepared evidence, not durable activation. The store must still
+/// atomically publish the returned handoff. Reused chunks are authenticated by
+/// their partition count and digest, so a true no-op needs no per-chunk rows.
+/// A projection-key replay must already expand every current chunk.
 ///
-/// The request digest and changed-chunk validation are O(chunk set) canonical
-/// hashes, so they run once here and the evidence is threaded into receipt
-/// construction and verification. What crosses a trust boundary still gets
-/// recomputed: an arbitrary receipt from `sink` remains unverified, while a
-/// receipt returned by [`ProjectionReceiptBuilderV1::build`] carries the
-/// private witness that its publication digest was sealed canonically against
-/// the verified request in this call chain. Every receipt's self-declared
-/// request digest is still compared against the recomputed expectation.
+/// The request digest and partition validation run once. The canonical builder
+/// carries that evidence through receipt construction and verification; restored
+/// receipts must recompute their publication digest at the durable boundary.
 #[tracing::instrument(
     name = "code_index.build.project_publication",
     level = "trace",
     skip_all
 )]
-pub fn project_for_publication<S: CodeChunkProjectionSink>(
-    sink: &mut S,
+pub fn project_for_publication(
     request: ProjectionBatchRequestV1,
 ) -> Result<ProjectionPublicationHandoffV1, ProjectionPublicationErrorV1> {
     let (request, request_digest) = expand_projection_key_replay(request)?;
     let evidence = ProjectionRequestEvidenceV1::recorded(request_digest, &request.changes);
-    let sink_receipt = if request_is_true_noop(&request) {
-        ProjectionSinkReceiptV1::sealed(build_batch_receipt_verified(&request, &evidence, &[])?)
-    } else {
-        sink.project_changed_chunks(
-            &request,
-            ProjectionReceiptBuilderV1 {
-                request: &request,
-                evidence: &evidence,
+    let mut decisions = request
+        .changes
+        .added_or_changed
+        .iter()
+        .chain(&request.changes.deleted)
+        .map(|change| ChunkProjectionDecisionV1 {
+            chunk_id: change.chunk_id.clone(),
+            prior_chunk_digest: change.prior_digest.clone(),
+            current_chunk_digest: change.current_digest.clone(),
+            operation: match (&change.prior_digest, &change.current_digest) {
+                (_, None) => ProjectionOperationV1::Deleted,
+                (None, Some(_)) => ProjectionOperationV1::Added,
+                (Some(_), Some(_)) => ProjectionOperationV1::Updated,
             },
-        )?
-    };
-    let (receipt, publication) = sink_receipt.into_parts();
-    verify_batch_receipt_verified(&request, &evidence, &receipt, publication)?;
+            outcome: ProjectionOutcomeV1::Applied,
+            output_digest: change.current_digest.clone(),
+        })
+        .collect::<Vec<_>>();
+    decisions.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+    let receipt = build_batch_receipt_verified(&request, &evidence, &decisions)?;
+    verify_batch_receipt_verified(
+        &request,
+        &evidence,
+        &receipt,
+        PublicationDigestTrustV1::SealedInThisChain,
+    )?;
     if !batch_can_activate(&receipt) {
         return Err(ProjectionPublicationErrorV1::NotActivatable);
     }
@@ -244,7 +172,5 @@ fn expand_projection_key_replay(
     Ok((request, expected_request))
 }
 
-fn request_is_true_noop(request: &ProjectionBatchRequestV1) -> bool {
-    changeset_is_noop(&request.changes)
-        && request.previous_projection_key.as_ref() == Some(&request.target_projection_key)
-}
+#[cfg(test)]
+mod tests;

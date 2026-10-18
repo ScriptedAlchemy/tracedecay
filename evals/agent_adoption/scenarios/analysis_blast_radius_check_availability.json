@@ -36,9 +36,23 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "reserve_stock"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states reserve_stock",
+          "pattern": "\\breserve_stock\\b"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "claims nothing else needs updating",
+          "pattern": "\\bnothing else\\b[^.\\n]{0,30}\\b(?:needs?|requires?|calls?|uses?)\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 6,
   "notes": "blast radius for check_availability; its sole caller is reserve_stock."
 }

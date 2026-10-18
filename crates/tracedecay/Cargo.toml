@@ -460,7 +460,7 @@ required-features = ["test-helpers"]
 
 [[test]]
 name = "cursor_observation_identity_fallback"
-path = "tests/cursor_observation_identity_fallback.rs"
+path = "tests/cursor_observation_identity_fallback/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]

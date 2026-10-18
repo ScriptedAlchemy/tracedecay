@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use tracedecay_contracts::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
@@ -23,122 +22,108 @@ use tracedecay_domain::{
     WorkRunControlV1,
 };
 
-// `StartAttempt` is matched and constructed across several call sites
-// (work_cli, service::invocation::work); boxing it would ripple through all
-// of them for a request/response contract type, not a hot allocation path.
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "operation", content = "request", rename_all = "snake_case")]
-pub enum WorkApplicationInvocationV1 {
-    GenerateProposal(GenerateProposalRequest),
-    Create(CreateWorkTaskRequestV1),
-    ReviewProposal(ReviewWorkProposalRequestV1),
-    AcceptProposal(AcceptWorkProposalRequestV1),
-    AdmitExecution(AdmitWorkExecutionRequestV1),
-    StartAttempt(StartWorkAttemptCommand),
-    Synthesize(AdmitWorkSynthesisCommand),
-    AttemptStatus(WorkAttemptStatusRequestV1),
-    CancelAttempt(CancelWorkAttemptCommand),
-    ResumeAttempts(ResumeWorkAttemptsCommand),
-    RetryAttempt(RetryWorkAttemptCommandV1),
-    ListAttempts(WorkAttemptListRequestV1),
-    ExecutionHistory(WorkAttemptListRequestV1),
-    HydrateArtifacts(WorkArtifactHydrationRequestV1),
-    RetrieveEvidence(WorkEvidenceRetrieveRequestV1),
-    Views(WorkGraphReadRequestV1),
-    Experience(WorkExperienceRequestV1),
-    CompareProposal(WorkProposalComparisonRequestV1),
-    PrepareGraphMutation(PrepareWorkProductMutationRequestV1),
-    MutateGraph(WorkProductMutationRequestV1),
-    Topology(WorkTopologyViewRequestV1),
-    TopologyMetrics(ExecutionTopologyMetricsRequestV1),
-    PrepareDuplicateAdjudication(PrepareWorkDuplicateAdjudicationRequestV1),
-    AdjudicateDuplicate(WorkDuplicateAdjudicationCommandV1),
-    AdjudicateLeak(AdjudicateWorkLeakCommandV1),
-    PauseRun(PauseWorkRunCommand),
-    ResumeRun(ResumeWorkRunCommand),
-    RunControl(WorkRunControlRequestV1),
-    PlacementPreflight(WorkPlacementPreflightRequestV1),
-    AdmitPlacement(AdmitWorkPlacementCommand),
-    PlacementStatus(WorkPlacementStatusRequestV1),
-    ReleasePlacement(ReleaseWorkPlacementCommand),
-    AdvanceJob(AdvanceWorkJobRequestV1),
-}
+application_operation_family! {
+    #[allow(clippy::large_enum_variant)]
+    invocation WorkApplicationInvocationV1;
+    outcome WorkApplicationOutcomeV1;
 
-impl WorkApplicationInvocationV1 {
-    pub const fn operation_key(&self) -> &'static str {
-        match self {
-            Self::GenerateProposal(_) => "generate_proposal",
-            Self::Create(_) => "create",
-            Self::ReviewProposal(_) => "review_proposal",
-            Self::AcceptProposal(_) => "accept_proposal",
-            Self::AdmitExecution(_) => "admit_execution",
-            Self::StartAttempt(_) => "start_attempt",
-            Self::Synthesize(_) => "synthesize",
-            Self::AttemptStatus(_) => "attempt_status",
-            Self::CancelAttempt(_) => "cancel_attempt",
-            Self::ResumeAttempts(_) => "resume_attempts",
-            Self::RetryAttempt(_) => "retry_attempt",
-            Self::ListAttempts(_) => "list_attempts",
-            Self::ExecutionHistory(_) => "execution_history",
-            Self::HydrateArtifacts(_) => "hydrate_artifacts",
-            Self::RetrieveEvidence(_) => "retrieve_evidence",
-            Self::Views(_) => "views",
-            Self::Experience(_) => "experience",
-            Self::CompareProposal(_) => "compare_proposal",
-            Self::PrepareGraphMutation(_) => "prepare_graph_mutation",
-            Self::MutateGraph(_) => "mutate_graph",
-            Self::Topology(_) => "topology",
-            Self::TopologyMetrics(_) => "topology_metrics",
-            Self::PrepareDuplicateAdjudication(_) => "prepare_duplicate_adjudication",
-            Self::AdjudicateDuplicate(_) => "adjudicate_duplicate",
-            Self::AdjudicateLeak(_) => "adjudicate_leak",
-            Self::PauseRun(_) => "pause_run",
-            Self::ResumeRun(_) => "resume_run",
-            Self::RunControl(_) => "run_control",
-            Self::PlacementPreflight(_) => "placement_preflight",
-            Self::AdmitPlacement(_) => "admit_placement",
-            Self::PlacementStatus(_) => "placement_status",
-            Self::ReleasePlacement(_) => "release_placement",
-            Self::AdvanceJob(_) => "advance_job",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
-pub enum WorkApplicationOutcomeV1 {
-    GenerateProposal(ApplicationOutcome<GeneratedWorkProposal>),
-    Create(ApplicationOutcome<WorkProductMutationReceiptV1>),
-    ReviewProposal(ApplicationOutcome<WorkProductMutationReceiptV1>),
-    AcceptProposal(ApplicationOutcome<WorkProductMutationReceiptV1>),
-    AdmitExecution(ApplicationOutcome<AdmittedWorkExecutionV1>),
-    StartAttempt(ApplicationOutcome<WorkAttemptV1>),
-    Synthesize(ApplicationOutcome<WorkSynthesisAttemptV1>),
-    AttemptStatus(ApplicationOutcome<WorkAttemptV1>),
-    CancelAttempt(ApplicationOutcome<WorkAttemptV1>),
-    ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
-    RetryAttempt(Box<ApplicationOutcome<tracedecay_contracts::WorkRetryAttemptOutcomeV1>>),
-    ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
-    ExecutionHistory(ApplicationOutcome<WorkExecutionHistoryV1>),
-    HydrateArtifacts(ApplicationOutcome<WorkArtifactHydrationV1>),
-    RetrieveEvidence(ApplicationOutcome<WorkEvidenceRetrievalV1>),
-    Views(ApplicationOutcome<WorkGraphReadV1>),
-    Experience(ApplicationOutcome<WorkExperienceV1>),
-    CompareProposal(ApplicationOutcome<WorkProposalComparisonV1>),
-    PrepareGraphMutation(ApplicationOutcome<WorkProductMutationRequestV1>),
-    MutateGraph(ApplicationOutcome<WorkProductMutationReceiptV1>),
-    Topology(ApplicationOutcome<ExecutionTopologyViewV1>),
-    TopologyMetrics(ApplicationOutcome<ExecutionTopologyMetricsV1>),
-    PrepareDuplicateAdjudication(ApplicationOutcome<WorkDuplicateAdjudicationCommandV1>),
-    AdjudicateDuplicate(ApplicationOutcome<WorkDuplicateAdjudicationAppendOutcomeV1>),
-    AdjudicateLeak(ApplicationOutcome<WorkLeakAdjudicationOutcomeV1>),
-    PauseRun(ApplicationOutcome<WorkRunControlV1>),
-    ResumeRun(ApplicationOutcome<WorkRunControlV1>),
-    RunControl(ApplicationOutcome<WorkRunControlReadingV1>),
-    PlacementPreflight(ApplicationOutcome<WorkPlacementPreflightV1>),
-    AdmitPlacement(ApplicationOutcome<WorkPlacementV1>),
-    PlacementStatus(ApplicationOutcome<WorkPlacementReadingV1>),
-    ReleasePlacement(ApplicationOutcome<WorkPlacementV1>),
-    AdvanceJob(ApplicationOutcome<AdvanceWorkJobResultV1>),
+    GenerateProposal: "generate_proposal" =>
+        GenerateProposalRequest,
+        ApplicationOutcome<GeneratedWorkProposal>;
+    Create: "create" =>
+        CreateWorkTaskRequestV1,
+        ApplicationOutcome<WorkProductMutationReceiptV1>;
+    ReviewProposal: "review_proposal" =>
+        ReviewWorkProposalRequestV1,
+        ApplicationOutcome<WorkProductMutationReceiptV1>;
+    AcceptProposal: "accept_proposal" =>
+        AcceptWorkProposalRequestV1,
+        ApplicationOutcome<WorkProductMutationReceiptV1>;
+    AdmitExecution: "admit_execution" =>
+        AdmitWorkExecutionRequestV1,
+        ApplicationOutcome<AdmittedWorkExecutionV1>;
+    StartAttempt: "start_attempt" =>
+        StartWorkAttemptCommand,
+        ApplicationOutcome<WorkAttemptV1>;
+    Synthesize: "synthesize" =>
+        AdmitWorkSynthesisCommand,
+        ApplicationOutcome<WorkSynthesisAttemptV1>;
+    AttemptStatus: "attempt_status" =>
+        WorkAttemptStatusRequestV1,
+        ApplicationOutcome<WorkAttemptV1>;
+    CancelAttempt: "cancel_attempt" =>
+        CancelWorkAttemptCommand,
+        ApplicationOutcome<WorkAttemptV1>;
+    ResumeAttempts: "resume_attempts" =>
+        ResumeWorkAttemptsCommand,
+        ApplicationOutcome<WorkAttemptRecoveryReportV1>;
+    RetryAttempt: "retry_attempt" =>
+        RetryWorkAttemptCommandV1,
+        Box<ApplicationOutcome<tracedecay_contracts::WorkRetryAttemptOutcomeV1>>;
+    ListAttempts: "list_attempts" =>
+        WorkAttemptListRequestV1,
+        ApplicationOutcome<WorkAttemptListV1>;
+    ExecutionHistory: "execution_history" =>
+        WorkAttemptListRequestV1,
+        ApplicationOutcome<WorkExecutionHistoryV1>;
+    HydrateArtifacts: "hydrate_artifacts" =>
+        WorkArtifactHydrationRequestV1,
+        ApplicationOutcome<WorkArtifactHydrationV1>;
+    RetrieveEvidence: "retrieve_evidence" =>
+        WorkEvidenceRetrieveRequestV1,
+        ApplicationOutcome<WorkEvidenceRetrievalV1>;
+    Views: "views" =>
+        WorkGraphReadRequestV1,
+        ApplicationOutcome<WorkGraphReadV1>;
+    Experience: "experience" =>
+        WorkExperienceRequestV1,
+        ApplicationOutcome<WorkExperienceV1>;
+    CompareProposal: "compare_proposal" =>
+        WorkProposalComparisonRequestV1,
+        ApplicationOutcome<WorkProposalComparisonV1>;
+    PrepareGraphMutation: "prepare_graph_mutation" =>
+        PrepareWorkProductMutationRequestV1,
+        ApplicationOutcome<WorkProductMutationRequestV1>;
+    MutateGraph: "mutate_graph" =>
+        WorkProductMutationRequestV1,
+        ApplicationOutcome<WorkProductMutationReceiptV1>;
+    Topology: "topology" =>
+        WorkTopologyViewRequestV1,
+        ApplicationOutcome<ExecutionTopologyViewV1>;
+    TopologyMetrics: "topology_metrics" =>
+        ExecutionTopologyMetricsRequestV1,
+        ApplicationOutcome<ExecutionTopologyMetricsV1>;
+    PrepareDuplicateAdjudication: "prepare_duplicate_adjudication" =>
+        PrepareWorkDuplicateAdjudicationRequestV1,
+        ApplicationOutcome<WorkDuplicateAdjudicationCommandV1>;
+    AdjudicateDuplicate: "adjudicate_duplicate" =>
+        WorkDuplicateAdjudicationCommandV1,
+        ApplicationOutcome<WorkDuplicateAdjudicationAppendOutcomeV1>;
+    AdjudicateLeak: "adjudicate_leak" =>
+        AdjudicateWorkLeakCommandV1,
+        ApplicationOutcome<WorkLeakAdjudicationOutcomeV1>;
+    PauseRun: "pause_run" =>
+        PauseWorkRunCommand,
+        ApplicationOutcome<WorkRunControlV1>;
+    ResumeRun: "resume_run" =>
+        ResumeWorkRunCommand,
+        ApplicationOutcome<WorkRunControlV1>;
+    RunControl: "run_control" =>
+        WorkRunControlRequestV1,
+        ApplicationOutcome<WorkRunControlReadingV1>;
+    PlacementPreflight: "placement_preflight" =>
+        WorkPlacementPreflightRequestV1,
+        ApplicationOutcome<WorkPlacementPreflightV1>;
+    AdmitPlacement: "admit_placement" =>
+        AdmitWorkPlacementCommand,
+        ApplicationOutcome<WorkPlacementV1>;
+    PlacementStatus: "placement_status" =>
+        WorkPlacementStatusRequestV1,
+        ApplicationOutcome<WorkPlacementReadingV1>;
+    ReleasePlacement: "release_placement" =>
+        ReleaseWorkPlacementCommand,
+        ApplicationOutcome<WorkPlacementV1>;
+    AdvanceJob: "advance_job" =>
+        AdvanceWorkJobRequestV1,
+        ApplicationOutcome<AdvanceWorkJobResultV1>;
 }

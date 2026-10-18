@@ -25,6 +25,7 @@ tracedecay-privacy = { path = "../tracedecay-privacy" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
+tracedecay-tokenizer = { path = "../tracedecay-tokenizer" }
 
 [dev-dependencies]
 asupersync.workspace = true

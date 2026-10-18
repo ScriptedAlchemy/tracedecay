@@ -37,9 +37,17 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "place_order"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 6,
   "repeated_query_class": "repeated_verification",
   "notes": "Repeated verification without an edit: the prompt asks for an identical second lookup, whose unchanged answer the heuristic counts as a loop. The hint fires by design here; it should not change the answer or add calls."

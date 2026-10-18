@@ -36,9 +36,29 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "30"
-  ],
+  "outcome": {
+    "kind": "effect",
+    "files": {
+      "src/discount.rs": {
+        "required": [
+          {
+            "id": "code applies a cap of 30",
+            "pattern": "^(?![ \\t]*//).*\\b30\\b"
+          },
+          {
+            "id": "signature kept",
+            "pattern": "pub fn apply_discount\\(\\s*total:\\s*u64,\\s*percent:\\s*u8\\s*\\)\\s*->\\s*u64"
+          }
+        ],
+        "forbidden": [
+          {
+            "id": "code still caps at 25",
+            "pattern": "^(?![ \\t]*//).*\\b25\\b"
+          }
+        ]
+      }
+    }
+  },
   "max_tool_calls": 6,
-  "notes": "replace-this-helper-body; targets apply_discount's 25->30 cap. Live runs mutate the throwaway fixture copy, which is fine."
+  "notes": "replace-this-helper-body; targets apply_discount's 25->30 cap. Correctness is the resulting src/discount.rs: signature kept, a code line capping at 30, no code line still capping at 25 (comments ignored). run.sh snapshots src/ after the run and restores it."
 }

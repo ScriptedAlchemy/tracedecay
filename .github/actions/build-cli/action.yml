@@ -17,6 +17,9 @@ inputs:
   cache-key:
     description: Disk-cache name (see the setup-bazel action).
     required: true
+  tailscale-client-id:
+    description: Restricted OIDC client for compatible trusted CI builds.
+    default: ""
 
 outputs:
   path:
@@ -30,6 +33,7 @@ runs:
       id: bazel
       with:
         cache-key: ${{ inputs.cache-key }}
+        tailscale-client-id: ${{ inputs.tailscale-client-id }}
 
     - name: Build and stage the binary
       id: stage

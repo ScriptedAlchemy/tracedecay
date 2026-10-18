@@ -97,7 +97,7 @@ def condition_rows(root):
         rows.append(
             {
                 "scenario": result["id"],
-                "outcome": result["subscores"]["outcome"],
+                "correctness": result["correctness"]["score"],
                 "input_tokens": cost.get("input_tokens"),
                 "uncached_input_tokens": (cost.get("input_tokens") or 0) - cached,
                 "output_tokens": cost.get("output_tokens"),

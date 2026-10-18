@@ -21,6 +21,13 @@ single_version_override(
     patch_strip = 1,
 )
 bazel_dep(name = "aspect_rules_js", version = "3.5.1")
+# Apply npm_import's directory traversal normalization to extraction actions
+# too, before a remote worker uploads the package TreeArtifact.
+single_version_override(
+    module_name = "aspect_rules_js",
+    patches = ["//scripts:bazel/patches/rules-js-extraction-directory-modes.patch"],
+    patch_strip = 1,
+)
 bazel_dep(name = "rules_nodejs", version = "6.7.6")
 bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
 
@@ -42,8 +49,13 @@ rust.toolchain(
     },
     versions = ["nightly/2026-10-18"],
     rustfmt_version = "nightly/2026-10-18",
+    rust_analyzer_version = "nightly/2026-10-18",
 )
-use_repo(rust, "rust_toolchains")
+use_repo(
+    rust,
+    "rust_toolchains",
+    rust_analyzer_tools = "rust_analyzer_nightly-2026-10-18_tools",
+)
 register_toolchains("@rust_toolchains//:all")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")

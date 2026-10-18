@@ -61,11 +61,11 @@ pub use retained::{retained_invalid_request_response, retained_route_path};
 pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
-    work_application_router, work_dashboard_router, work_invalid_request_response,
+    work_application_router, work_dashboard_router, work_invalid_request,
 };
 pub use workflow::{
     WorkflowApplicationOwner, WorkflowHttpRequest, WorkflowInvocationFuture, WorkflowOperation,
-    workflow_application_router, workflow_invalid_request_response,
+    workflow_application_router, workflow_invalid_request,
 };
 
 /// A resolved canonical invocation result ready for HTTP presentation.
@@ -105,6 +105,15 @@ impl<T> CanonicalInvocationResult<T> {
 pub enum HttpJsonEnvelope<T> {
     Success(Box<HttpSuccessEnvelope<T>>),
     Problem(Box<HttpProblemEnvelope>),
+}
+
+impl<T> From<ApplicationProblemEnvelope> for HttpJsonEnvelope<T> {
+    fn from(application: ApplicationProblemEnvelope) -> Self {
+        Self::Problem(Box::new(HttpProblemEnvelope {
+            binding_id: None,
+            application,
+        }))
+    }
 }
 
 /// HTTP success preserves the application contract, request identity, scope,
@@ -249,9 +258,14 @@ impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
     }
 }
 
-/// SSE framing failures. Application failures remain canonical terminal events.
+/// Failures constructing or encoding an adapter envelope. Application
+/// failures remain canonical problems or terminal events.
 #[derive(Debug, Error)]
 pub enum HttpAdapterError {
+    #[error("application response violated its canonical contract: {0}")]
+    Contract(#[from] tracedecay_contracts::ApplicationContractError),
+    #[error("application response payload could not be encoded: {0}")]
+    ResultEncoding(#[from] serde_json::Error),
     #[error("canonical SSE event could not be encoded")]
     EventEncoding,
     #[error("canonical SSE stream ended before its terminal event")]
