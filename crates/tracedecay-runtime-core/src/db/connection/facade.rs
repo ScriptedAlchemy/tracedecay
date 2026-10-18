@@ -454,82 +454,7 @@ impl DatabaseWriteTransaction<'_> {
             _client_guard,
             ..
         } = self;
-        let tracks_graph_generation = {
-            let mut rows = transaction
-                .query(
-                    "SELECT 1 FROM pragma_table_list('metadata')
-                     WHERE schema = 'main' AND type = 'table'",
-                    (),
-                )
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to inspect graph generation authority: {error}"),
-                    operation: "commit write transaction".to_owned(),
-                })?;
-            rows.next()
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to read graph generation authority: {error}"),
-                    operation: "commit write transaction".to_owned(),
-                })?
-                .is_some()
-        };
-        if tracks_graph_generation {
-            let next_generation = {
-                let mut rows = transaction
-                    .query(
-                        "SELECT value FROM metadata
-                         WHERE key = 'graph_transaction_generation'",
-                        (),
-                    )
-                    .await
-                    .map_err(|error| TraceDecayError::Database {
-                        message: format!("failed to query graph transaction generation: {error}"),
-                        operation: "commit write transaction".to_owned(),
-                    })?;
-                match rows
-                    .next()
-                    .await
-                    .map_err(|error| TraceDecayError::Database {
-                        message: format!("failed to read graph transaction generation: {error}"),
-                        operation: "commit write transaction".to_owned(),
-                    })? {
-                    Some(row) => {
-                        let raw: String =
-                            row.get(0).map_err(|error| TraceDecayError::Database {
-                                message: format!(
-                                    "failed to decode graph transaction generation: {error}"
-                                ),
-                                operation: "commit write transaction".to_owned(),
-                            })?;
-                        raw.parse::<u64>()
-                            .map_err(|error| TraceDecayError::Database {
-                                message: format!(
-                                    "invalid graph transaction generation '{raw}': {error}"
-                                ),
-                                operation: "commit write transaction".to_owned(),
-                            })?
-                            .checked_add(1)
-                            .ok_or_else(|| TraceDecayError::Database {
-                                message: "graph transaction generation overflowed".to_owned(),
-                                operation: "commit write transaction".to_owned(),
-                            })?
-                    }
-                    None => 1,
-                }
-            };
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO metadata (key, value)
-                     VALUES ('graph_transaction_generation', ?1)",
-                    (next_generation.to_string(),),
-                )
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to advance graph transaction generation: {error}"),
-                    operation: "commit write transaction".to_owned(),
-                })?;
-        }
+        advance_graph_transaction_generation(&transaction).await?;
         let transaction = transaction.commit().await;
         drop(guard);
         drop(_client_guard);
@@ -580,4 +505,85 @@ impl crate::db::engine::Executor for DatabaseWriteTransaction<'_> {
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.execute_batch_engine(sql).await
     }
+}
+
+/// Advances `graph_transaction_generation` inside the committing write, on
+/// stores that keep a `metadata` table.
+pub(super) async fn advance_graph_transaction_generation(
+    transaction: &impl crate::db::engine::Executor,
+) -> Result<()> {
+    let tracks_graph_generation = {
+        let mut rows = transaction
+            .query(
+                "SELECT 1 FROM pragma_table_list('metadata')
+                 WHERE schema = 'main' AND type = 'table'",
+                (),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to inspect graph generation authority: {error}"),
+                operation: "commit write transaction".to_owned(),
+            })?;
+        rows.next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read graph generation authority: {error}"),
+                operation: "commit write transaction".to_owned(),
+            })?
+            .is_some()
+    };
+    if tracks_graph_generation {
+        let next_generation = {
+            let mut rows = transaction
+                .query(
+                    "SELECT value FROM metadata
+                     WHERE key = 'graph_transaction_generation'",
+                    (),
+                )
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to query graph transaction generation: {error}"),
+                    operation: "commit write transaction".to_owned(),
+                })?;
+            match rows
+                .next()
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to read graph transaction generation: {error}"),
+                    operation: "commit write transaction".to_owned(),
+                })? {
+                Some(row) => {
+                    let raw: String = row.get(0).map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to decode graph transaction generation: {error}"),
+                        operation: "commit write transaction".to_owned(),
+                    })?;
+                    raw.parse::<u64>()
+                        .map_err(|error| TraceDecayError::Database {
+                            message: format!(
+                                "invalid graph transaction generation '{raw}': {error}"
+                            ),
+                            operation: "commit write transaction".to_owned(),
+                        })?
+                        .checked_add(1)
+                        .ok_or_else(|| TraceDecayError::Database {
+                            message: "graph transaction generation overflowed".to_owned(),
+                            operation: "commit write transaction".to_owned(),
+                        })?
+                }
+                None => 1,
+            }
+        };
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO metadata (key, value)
+                 VALUES ('graph_transaction_generation', ?1)",
+                (next_generation.to_string(),),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to advance graph transaction generation: {error}"),
+                operation: "commit write transaction".to_owned(),
+            })?;
+    }
+    Ok(())
 }
