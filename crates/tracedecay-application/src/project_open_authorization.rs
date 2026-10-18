@@ -68,7 +68,7 @@ impl ProjectSourceAccessSnapshotPort for ProjectOpenSourceAccessAuthorityV1 {
     fn source_access_at(
         &self,
         scope: &ResolvedScope,
-        project_root: &Path,
+        _project_root: &Path,
         configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
         observed_at: UtcMicros,
     ) -> Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
@@ -79,7 +79,6 @@ impl ProjectSourceAccessSnapshotPort for ProjectOpenSourceAccessAuthorityV1 {
         );
         project_open_source_access_at(
             scope,
-            project_root,
             configuration,
             self.requester.clone(),
             self.granted_capabilities.clone(),
@@ -91,7 +90,6 @@ impl ProjectSourceAccessSnapshotPort for ProjectOpenSourceAccessAuthorityV1 {
 
 fn project_open_source_access_at(
     scope: &ResolvedScope,
-    project_root: &Path,
     configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     requester: ActorId,
     granted_capabilities: BTreeSet<CapabilityId>,
@@ -117,7 +115,6 @@ fn project_open_source_access_at(
     let expected_binding =
         tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
             &scope.project_id,
-            project_root,
         )
         .map_err(|_| ApplicationContractError::Inconsistent {
             field: "project-open source binding",

@@ -22,7 +22,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationRevisionId, ConfigurationValueV1,
     ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
-    ContextScoutConfiguredModelPathV1, SettingKey,
+    ContextScoutConfiguredModelPathV1, ContextScoutIntentSettingsV1, SettingKey,
 };
 use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackDiagnosticProducerV1, FeedbackFindingLifecycleV1,
@@ -37,8 +37,8 @@ use tracedecay_hooks::{HookEventEnvelopeV2, HookScopeBindingV1};
 
 use super::{
     ContextScoutControlV1, ContextScoutDeliverySelectionInputV1, ContextScoutEvidenceEnvelopeExt,
-    ContextScoutLimitsV1, ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1,
-    ContextScoutServiceStateV1, select_context_scout_delivery_window,
+    ContextScoutIntentControlV1, ContextScoutLimitsV1, ContextScoutRuntimeModeV1,
+    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, select_context_scout_delivery_window,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
@@ -80,7 +80,35 @@ impl ContextScoutLifecycleAddressV1 {
     fn session_key(&self) -> (&ProjectId, &WorktreeId, &SessionId) {
         (&self.project_id, &self.worktree_id, &self.session_id)
     }
+
+    /// The session-scoped address every intent-pass suggestion of this
+    /// routed session shares. It keeps the session key (so the registry binds
+    /// it beside the session's native lifecycles without conflict) and
+    /// replaces the per-turn identities with fixed intent identities, so a
+    /// rebind returns the same address and a newer pass supersedes the older
+    /// one by generation instead of accumulating one address per turn.
+    pub fn intent_scoped(&self) -> Option<Self> {
+        Some(Self {
+            profile_id: self.profile_id.clone(),
+            provider_id: self.provider_id.clone(),
+            project_id: self.project_id.clone(),
+            worktree_id: self.worktree_id.clone(),
+            session_id: self.session_id.clone(),
+            thread_id: ThreadId::new(INTENT_LIFECYCLE_IDENTITY).ok()?,
+            turn_id: TurnId::new(INTENT_LIFECYCLE_IDENTITY).ok()?,
+            agent_id: AgentInstanceId::new(INTENT_LIFECYCLE_IDENTITY).ok()?,
+            logical_message_id: MessageId::new(INTENT_LIFECYCLE_IDENTITY).ok()?,
+        })
+    }
+
+    /// Whether this is a session's intent-scoped lifecycle.
+    pub fn is_intent_scoped(&self) -> bool {
+        self.intent_scoped().is_some_and(|scoped| scoped == *self)
+    }
 }
+
+/// Per-turn identity of every intent-scoped lifecycle.
+const INTENT_LIFECYCLE_IDENTITY: &str = "tracedecay.context-scout.intent";
 
 /// Hook envelope whose exact daemon-issued binding has already been checked.
 #[derive(Clone, Debug)]
@@ -106,6 +134,8 @@ pub struct ContextScoutConfigurationPinV1 {
     revision_id: ConfigurationRevisionId,
     configuration_digest: ManifestDigest,
     control: ContextScoutControlV1,
+    /// The intent-pass settings `control.intent` digests.
+    intent: Option<ContextScoutIntentSettingsV1>,
 }
 
 impl ContextScoutConfigurationPinV1 {
@@ -145,6 +175,13 @@ impl ContextScoutConfigurationPinV1 {
                 ContextScoutModelBackendV1::CodexAppServer
             }
         });
+        let intent = match &settings.intent {
+            Some(intent) => Some(ContextScoutIntentControlV1 {
+                enabled: intent.enabled,
+                settings_digest: digest_bytes(&intent.settings_digest().ok()?)?,
+            }),
+            None => None,
+        };
         let configuration_digest = current.snapshot.effective_behavior_digest.clone();
         let control = ContextScoutControlV1 {
             configuration_revision: digest_bytes(&configuration_digest)?,
@@ -152,11 +189,13 @@ impl ContextScoutConfigurationPinV1 {
             mode,
             model_path,
             limits,
+            intent,
         };
         Some(Self {
             revision_id: current.revision_id.clone(),
             configuration_digest,
             control,
+            intent: settings.intent.clone(),
         })
     }
 
@@ -170,6 +209,11 @@ impl ContextScoutConfigurationPinV1 {
 
     pub const fn control(&self) -> ContextScoutControlV1 {
         self.control
+    }
+
+    /// The pinned intent-pass settings, absent when none are configured.
+    pub fn intent_settings(&self) -> Option<&ContextScoutIntentSettingsV1> {
+        self.intent.as_ref()
     }
 
     /// Revalidates this pin against the authoritative current configuration.
@@ -1009,7 +1053,7 @@ pub fn context_scout_candidates_from_publication(
                 category,
                 relevance_score: u16::MAX,
                 suggestion_text: text,
-                evidence,
+                evidence: evidence.into(),
                 expires_at: UtcMicros(observed_at.0.saturating_add(CANDIDATE_TTL_MICROS_V1)),
             })
         })
@@ -1255,6 +1299,33 @@ mod tests {
             model_path: Some(ContextScoutConfiguredModelPathV1::CodexAppServer),
             model_id: Some("gpt-5.6-mini".to_owned()),
             model_timeout_secs: Some(60),
+            intent: None,
+        };
+        let with_intent = ContextScoutSettingsV1 {
+            intent: Some(tracedecay_domain::configuration::ContextScoutIntentSettingsV1 {
+                enabled: true,
+                engine: tracedecay_domain::configuration::DecisionEngineSettingsV1 {
+                    base_url: "http://127.0.0.1:8088".to_owned(),
+                    model: None,
+                    timeout_ms: 250,
+                    max_concurrent: 2,
+                    max_state_bytes: 64 * 1024,
+                },
+                window: tracedecay_domain::configuration::IntentWindowSettingsV1 {
+                    max_user_turns: 3,
+                    max_messages: 12,
+                    max_bytes: 16 * 1024,
+                    max_age_secs: 1_800,
+                    freshen_budget_ms: 150,
+                },
+                questions:
+                    tracedecay_domain::configuration::ContextScoutIntentSettingsV1::reference_questions(),
+                action_fact_score_permille: 700,
+                ttl_secs: 600,
+                min_delivery_gap_secs: 30,
+                prompt_lookup_deadline_ms: 200,
+            }),
+            ..configured.clone()
         };
         let configured = ContextScoutConfigurationPinV1::from_current(&configuration(
             "revision.scout.model",
@@ -1264,6 +1335,30 @@ mod tests {
         assert_eq!(
             configured.control().model_path,
             Some(ContextScoutModelBackendV1::CodexAppServer)
+        );
+        assert_eq!(configured.control().intent, None);
+
+        let expected_digest = with_intent
+            .intent
+            .as_ref()
+            .unwrap()
+            .settings_digest()
+            .unwrap();
+        let with_intent = ContextScoutConfigurationPinV1::from_current(&configuration(
+            "revision.scout.intent",
+            with_intent,
+        ))
+        .unwrap();
+        assert_eq!(
+            with_intent.control().intent,
+            Some(ContextScoutIntentControlV1 {
+                enabled: true,
+                settings_digest: digest_bytes(&expected_digest).unwrap(),
+            })
+        );
+        assert_ne!(
+            with_intent.control().configuration_revision,
+            configured.control().configuration_revision
         );
     }
 

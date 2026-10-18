@@ -56,6 +56,11 @@ py_test(
 exports_files(
     [
         "bazel/rust_test.bzl",
+        "test-build-mcpb.py",
+        "test-package-release-archive.py",
+        "test-plan-release-recovery.py",
+        "test-check-release-artifacts.py",
+        "test-update-release-checksums.py",
         "bazel/gen_builds.py",
         "bazel/rust_test_environment_probe.txt",
         "check-dashboard-bundle.py",

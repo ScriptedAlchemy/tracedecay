@@ -1,0 +1,163 @@
+{
+ "request": {
+  "state": "Earlier in the conversation:\nUser: the celery worker keeps OOMing on the nightly export\nAssistant: Memory climbs in export_rows; it materializes the whole queryset.\nTool call: Bash: rg -n 'iterator\\(' app/exports\n\nUser's latest message: didn't we already hit this a couple weeks back and settle on chunking with a server-side cursor? dig up what we decided",
+  "questions": {
+   "session_recall": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask to look up, recover or reuse something from an earlier conversation, a previous session, or another agent's transcript?"
+   },
+   "memory_store": {
+    "type": "noul",
+    "instructions": "Does the user's latest message state or confirm a lasting preference, convention or fact that the assistant should remember and apply in future sessions?"
+   },
+   "call_graph": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask which functions call some code, what some code calls, or how execution flows through the code?"
+   },
+   "impact": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask what would break, or which code and tests would be affected, if something is changed?"
+   },
+   "refactor_edit": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask for the same mechanical edit to be applied in many places, such as a rename, moving code, or repeating a change across files?"
+   },
+   "review_changes": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask to review a diff, staged changes, recent commits or a pull request?"
+   },
+   "type_orientation": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask which types implement an interface, about a class hierarchy, where objects are constructed, where a field is read or written, or about duplicated logic?"
+   },
+   "project_context": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask about code in another repository or a sibling project?"
+   },
+   "unexpected_changes": {
+    "type": "noul",
+    "instructions": "Does the user's latest message ask about commits or file edits that neither the user nor the assistant made?"
+   }
+  }
+ },
+ "response": {
+  "answers": {
+   "session_recall": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.0017007224960252643,
+     "yes": 0.9982993006706238
+    },
+    "confidence": 0.9982993006706238,
+    "noul": 0.9982993006706238,
+    "source": "local",
+    "decision": "yes"
+   },
+   "memory_store": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.16451646387577057,
+     "yes": 0.8354835510253906
+    },
+    "confidence": 0.8354835510253906,
+    "noul": 0.8354835510253906,
+    "source": "local",
+    "decision": "yes"
+   },
+   "call_graph": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.9669140577316284,
+     "yes": 0.03308597952127457
+    },
+    "confidence": 0.9669140577316284,
+    "noul": 0.03308597952127457,
+    "source": "local",
+    "decision": "no"
+   },
+   "impact": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.977022647857666,
+     "yes": 0.022977370768785477
+    },
+    "confidence": 0.977022647857666,
+    "noul": 0.022977370768785477,
+    "source": "local",
+    "decision": "no"
+   },
+   "refactor_edit": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.970687747001648,
+     "yes": 0.02931223064661026
+    },
+    "confidence": 0.970687747001648,
+    "noul": 0.02931223064661026,
+    "source": "local",
+    "decision": "no"
+   },
+   "review_changes": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.9324532747268677,
+     "yes": 0.06754668802022934
+    },
+    "confidence": 0.9324532747268677,
+    "noul": 0.06754668802022934,
+    "source": "local",
+    "decision": "no"
+   },
+   "type_orientation": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.9046505093574524,
+     "yes": 0.09534946084022522
+    },
+    "confidence": 0.9046505093574524,
+    "noul": 0.09534946084022522,
+    "source": "local",
+    "decision": "no"
+   },
+   "project_context": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.9859364032745361,
+     "yes": 0.014063626527786255
+    },
+    "confidence": 0.9859364032745361,
+    "noul": 0.014063626527786255,
+    "source": "local",
+    "decision": "no"
+   },
+   "unexpected_changes": {
+    "type": "noul",
+    "probabilities": {
+     "no": 0.957912266254425,
+     "yes": 0.04208773002028465
+    },
+    "confidence": 0.957912266254425,
+    "noul": 0.04208773002028465,
+    "source": "local",
+    "decision": "no"
+   }
+  },
+  "usage": {
+   "input_tokens": 926,
+   "output_tokens": 9,
+   "decision_count": 9
+  },
+  "timing": {
+   "inference_ms": 38534.09,
+   "queue_ms": 0.14,
+   "server_ms": 38539.37
+  },
+  "model": "intern-decision",
+  "request_id": "f642defa4862727bee47b57f45ca19e3",
+  "thinking": {
+   "enabled": false,
+   "confidence_threshold": 0.7,
+   "tasks": []
+  }
+ }
+}

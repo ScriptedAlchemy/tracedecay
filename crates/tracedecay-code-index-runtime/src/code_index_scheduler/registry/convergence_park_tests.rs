@@ -948,6 +948,91 @@ async fn a_seat_wait_answers_a_parked_worker_with_its_park() {
     fixture.registry.shutdown().await;
 }
 
+/// A worker re-woken as fast as it parks is never between passes when the
+/// wait looks: the successor pass is already running by then. The park a pass
+/// rewrote after the wait began still answers it once that pass has settled
+/// (#4238).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_seat_wait_answers_a_rewritten_park_while_the_next_pass_is_already_running() {
+    let fixture =
+        Fixture::mount_with_poisoned_artifacts_root("project.seat-wait-busy", |_| {}).await;
+    fixture
+        .wait_for_seated_generation()
+        .await
+        .expect("a healthy worktree seats its generation");
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    let deadline = (tokio::time::Instant::now() + CONVERGENCE_DEADLINE).into_std();
+    while !fixture
+        .registry
+        .subscribe_owner_activity(&fixture.project)
+        .await
+        .is_some_and(|activity| activity.pass_finished() && !activity.wake_pending())
+    {
+        signals.changed_before(deadline).await;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never went idle"
+        );
+    }
+    let (park_slot, passes) = {
+        let canonical = canonical_existing_identity(&fixture.project).expect("canonical project");
+        let mounted = fixture.registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        (
+            std::sync::Arc::clone(&worktree.convergence_park),
+            std::sync::Arc::clone(&worktree.reconcile_in_progress),
+        )
+    };
+    let park = || {
+        super::park_convergence(
+            &park_slot,
+            "injected contract violation".to_owned(),
+            "restore the violated contract",
+            None,
+            true,
+        );
+    };
+    park();
+
+    let waiting = std::sync::Arc::new(tokio::sync::Notify::new());
+    let wait = tokio::spawn({
+        let registry = fixture.registry.clone();
+        let project = fixture.project.clone();
+        let waiting = std::sync::Arc::clone(&waiting);
+        async move {
+            registry
+                .wait_for_seat(
+                    &project,
+                    std::time::Instant::now() + CONVERGENCE_DEADLINE,
+                    |_| {
+                        waiting.notify_one();
+                        async {
+                            Ok::<Option<CodeIndexSeatWaitV1<()>>, std::convert::Infallible>(None)
+                        }
+                    },
+                )
+                .await
+        }
+    });
+    waiting.notified().await;
+
+    let rewriting_pass = super::super::ReconcilePassGuard::enter(&passes);
+    park();
+    drop(rewriting_pass);
+    let _next_pass = super::super::ReconcilePassGuard::enter(&passes);
+
+    let waited = tokio::time::timeout(CONVERGENCE_DEADLINE, wait)
+        .await
+        .expect("a rewritten park ends the wait although the next pass is running")
+        .expect("wait task")
+        .expect("infallible probe");
+    let CodeIndexSeatWaitV1::Parked(CodeIndexSeatParkV1::Convergence(park)) = waited else {
+        panic!("the wait must answer with the rewritten park: {waited:?}");
+    };
+    assert_eq!(park.observed_passes, 2);
+    fixture.registry.shutdown().await;
+}
+
 /// A worker that panics outside its per-step guard is gone, so no pass will
 /// install the seat a read waits for. The worktree reports the panic as a
 /// terminal park on its freshness, and a readiness wait answers with that

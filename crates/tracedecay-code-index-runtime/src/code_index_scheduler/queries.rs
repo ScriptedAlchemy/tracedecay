@@ -38,9 +38,9 @@ use tracedecay_domain::{
     ComponentRevision, CursorBindingMismatchV1, CursorBindingV1, ExactAdmissionRuleRevision,
     ExactFieldV1, FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind, PrincipalId,
     QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget, RetrievalBudgetUsage,
-    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, SanitizedCodeSnapshotV1,
-    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1,
-    UtcMicros, VectorWatermark, canonical_sha256,
+    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverOutcome,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
+    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
 };
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_tool_catalog::SortContractId;
@@ -65,9 +65,9 @@ use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, RetrievalExecutionControl, RetrievalPortError,
 };
 use tracedecay_query::retrieval::{
-    AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeLaneOutcomeV1,
-    NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1, NativeSymbolRecordV1,
-    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
+    AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeLanePageV1,
+    NativeLexicalRecordV1, NativeRecordReadPortV1, NativeSymbolRecordV1, PreparedQueryBindingsV1,
+    PreparedQueryErrorV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
     QueryExecutionContractErrorV1, route_authenticated_prepared_query_cursor,
 };
 
@@ -2597,7 +2597,7 @@ fn finish_native_lane_query<T, N>(
     operation: &'static str,
     query_binding: CursorBindingV1,
     requested_page: &tracedecay_contracts::PageRequest,
-    outcome: NativeLaneOutcomeV1<N>,
+    outcome: RetrieverOutcome<NativeLanePageV1<N>>,
     mut map: impl FnMut(N) -> T,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>>
 where
@@ -2605,7 +2605,7 @@ where
 {
     let finished_at = query_finished_at();
     match outcome {
-        NativeLaneOutcomeV1::Complete(page) => finish_native_lane_page(
+        RetrieverOutcome::Complete(page) => finish_native_lane_page(
             prepared,
             context,
             operation,
@@ -2614,7 +2614,10 @@ where
             page,
             &mut map,
         ),
-        NativeLaneOutcomeV1::Partial { page, reason } => {
+        RetrieverOutcome::Partial {
+            value: page,
+            reason,
+        } => {
             let coverage = page.coverage;
             let omission = retrieval_failure_omission(&reason);
             let outcome = finish_native_lane_page(
@@ -2628,7 +2631,7 @@ where
             );
             mark_lane_partial(outcome, coverage, omission)
         }
-        NativeLaneOutcomeV1::Unavailable(reason) => {
+        RetrieverOutcome::Unavailable(reason) => {
             let omission = retrieval_failure_omission(&reason);
             let evidence =
                 terminal_lane_evidence(finished_at, prepared.generation().clone(), omission);
@@ -2644,17 +2647,17 @@ where
                 | RetrievalFailure::StaleSource => RetrievalPortOutcome::Unavailable(evidence),
             }
         }
-        NativeLaneOutcomeV1::Denied => RetrievalPortOutcome::Unavailable(terminal_lane_evidence(
+        RetrieverOutcome::Denied => RetrievalPortOutcome::Unavailable(terminal_lane_evidence(
             finished_at,
             prepared.generation().clone(),
             OmissionReason::Unavailable,
         )),
-        NativeLaneOutcomeV1::Stale(_) => RetrievalPortOutcome::Unavailable(terminal_lane_evidence(
+        RetrieverOutcome::Stale(_) => RetrievalPortOutcome::Unavailable(terminal_lane_evidence(
             finished_at,
             prepared.generation().clone(),
             OmissionReason::Stale,
         )),
-        NativeLaneOutcomeV1::BudgetExceeded(usage) => {
+        RetrieverOutcome::BudgetExceeded(usage) => {
             let mut evidence = terminal_lane_evidence(
                 finished_at,
                 prepared.generation().clone(),
@@ -2663,7 +2666,7 @@ where
             evidence.budget = application_budget_usage(usage);
             RetrievalPortOutcome::Partial(evidence)
         }
-        NativeLaneOutcomeV1::TimedOut(usage) => {
+        RetrieverOutcome::TimedOut(usage) => {
             let mut evidence = terminal_lane_evidence(
                 finished_at,
                 prepared.generation().clone(),
@@ -2672,7 +2675,7 @@ where
             evidence.budget = application_budget_usage(usage);
             RetrievalPortOutcome::TimedOut(evidence)
         }
-        NativeLaneOutcomeV1::Cancelled => {
+        RetrieverOutcome::Cancelled => {
             let mut evidence = terminal_lane_evidence(
                 finished_at,
                 prepared.generation().clone(),
@@ -2759,19 +2762,17 @@ fn execute_prepared_exact_query(
                 return unavailable(finished_at);
             };
             match outcome {
-                NativeLaneOutcomeV1::Complete(page) if definitions_only => {
-                    NativeLaneOutcomeV1::Partial {
-                        page,
-                        reason: RetrievalFailure::IncompatibleProjection {
-                            detail: "exact projection indexes identifier definitions, not uses"
-                                .to_owned(),
-                        },
-                    }
-                }
+                RetrieverOutcome::Complete(page) if definitions_only => RetrieverOutcome::Partial {
+                    value: page,
+                    reason: RetrievalFailure::IncompatibleProjection {
+                        detail: "exact projection indexes identifier definitions, not uses"
+                            .to_owned(),
+                    },
+                },
                 outcome => outcome,
             }
         }
-        Err(RetrievalPortError::Cancelled) => NativeLaneOutcomeV1::Cancelled,
+        Err(RetrievalPortError::Cancelled) => RetrieverOutcome::Cancelled,
         Err(_) => return unavailable(finished_at),
     };
     finish_native_lane_query(
@@ -2905,7 +2906,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     };
                     outcome
                 }
-                Err(RetrievalPortError::Cancelled) => NativeLaneOutcomeV1::Cancelled,
+                Err(RetrievalPortError::Cancelled) => RetrieverOutcome::Cancelled,
                 Err(_) => return unavailable(finished_at),
             };
             finish_native_lane_query(
