@@ -84,13 +84,37 @@ pub(super) async fn advance_job(
     request: AdvanceWorkJobRequestV1,
 ) -> Result<AdvanceWorkJobResultV1, ApplicationProblem> {
     let job = WorkJobV1::parse(request)?;
+    let services = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
+        &host.registered.database,
+    )
+    .map_err(|_| step_unavailable())?;
     let mut performed = Vec::new();
     let mut contention = 0_u8;
     let state = loop {
         if host.deadline.expires_at.0.saturating_sub(now_micros().0) < YIELD_FLOOR_MICROS {
             break WorkJobStateV1::Advancing;
         }
-        let seen = observe(host, context, capability, use_case, &job)?;
+        let seen = {
+            let (registered, context, capability, use_case, job) = (
+                host.registered.clone(),
+                context.clone(),
+                capability.to_owned(),
+                use_case.clone(),
+                job.clone(),
+            );
+            services
+                .read(move |services| {
+                    observe(
+                        &registered,
+                        services,
+                        &context,
+                        &capability,
+                        &use_case,
+                        &job,
+                    )
+                })
+                .await?
+        };
         let step = match next_work_job_step(&job, &seen) {
             WorkJobNextV1::Act(step) => step,
             WorkJobNextV1::Wait(on) => break WorkJobStateV1::Waiting { on },
@@ -141,17 +165,13 @@ fn problem_record(
 
 /// Reads every object the job owns, directly from the registered services.
 fn observe(
-    host: &WorkJobHost,
+    registered: &super::RegisteredWorkRuntime,
+    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     capability: &str,
     use_case: &UseCaseId,
     job: &WorkJobV1,
 ) -> Result<WorkJobObservationV1, ApplicationProblem> {
-    let registered = &host.registered;
-    let services = tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
-        &registered.database,
-    )
-    .map_err(|_| step_unavailable())?;
     let graph = match preparation::read_repository_graph(
         registered,
         context,
@@ -180,11 +200,11 @@ fn observe(
         if let WorkPlacementReadingV1::Placed { placement } = reading {
             placements.insert(task.key.clone(), placement);
         }
-        if let Some(attempt) = attempt_status(&services, context, &task.source)? {
+        if let Some(attempt) = attempt_status(services, context, &task.source)? {
             sources.insert(task.key.clone(), attempt);
         }
     }
-    let synthesis = attempt_status(&services, context, &job.synthesis().identity)?;
+    let synthesis = attempt_status(services, context, &job.synthesis().identity)?;
     Ok(WorkJobObservationV1 {
         graph,
         placements,

@@ -8,6 +8,7 @@ use tracedecay_contracts::{
     AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline,
     RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryWorkAttemptCommandV1,
     SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkSynthesisAttemptV1,
+    WorkflowArtifactStorePort,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1, WorkAttemptV1};
 use tracedecay_rusqlite_runtime::work_run_control::WorkSqliteJobStorage;
@@ -44,7 +45,7 @@ fn synthesis_source_context(
         let mut payloads = Vec::with_capacity(attempt.artifacts().len());
         for artifact in attempt.artifacts() {
             consume_synthesis_bytes(&mut remaining, artifact.byte_length())?;
-            let payload = artifacts.load_workflow_artifact(artifact).map_err(|_| {
+            let payload = WorkflowArtifactStorePort::load(artifacts, artifact).map_err(|_| {
                 ApplicationProblem::unavailable(SafeDiagnostic {
                     code: "application.work-synthesis.artifact-body-unavailable".to_owned(),
                     message: "An admitted synthesis source payload is absent or invalid."
@@ -235,7 +236,7 @@ pub(super) async fn synthesize(
 
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "daemon.service.work.attempt_status", level = "trace", skip_all)]
-pub(super) fn attempt_status(
+pub(super) async fn attempt_status(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
     request_id: String,
@@ -248,6 +249,10 @@ pub(super) fn attempt_status(
     deadline: Deadline,
     request: WorkAttemptStatusRequestV1,
 ) -> DaemonInvocationResponse {
+    let read_context = context.clone();
+    let status = services
+        .read(move |services| services.attempts().status(&read_context, &request))
+        .await;
     complete_work_read(
         registered,
         request_id,
@@ -256,7 +261,7 @@ pub(super) fn attempt_status(
         operation_key,
         use_case,
         input_digest,
-        services.attempts().status(context, &request),
+        status,
         observed_at,
         deadline,
         WorkApplicationOutcomeV1::AttemptStatus,
@@ -324,11 +329,19 @@ pub(super) async fn retry_attempt(
             message: "The Work retry runtime owner is unavailable.".to_owned(),
         }))
     } else {
-        attach_product(registered, &binding).and_then(|product| {
-            let revisions = preparation::current_work_product_revision_pins(registered)?;
-            let workflow_rebind = workflow_retry_rebind(registered, &command.original_attempt)?;
-            Ok((product, revisions, workflow_rebind))
-        })
+        match attach_product(registered, &binding).and_then(|product| {
+            Ok((
+                product,
+                preparation::current_work_product_revision_pins(registered)?,
+            ))
+        }) {
+            Ok((product, revisions)) => {
+                workflow_retry_rebind(registered, &command.original_attempt)
+                    .await
+                    .map(|workflow_rebind| (product, revisions, workflow_rebind))
+            }
+            Err(problem) => Err(problem),
+        }
     };
     let retried = match prepared {
         Ok((product, revisions, workflow_rebind)) => {
@@ -383,46 +396,52 @@ pub(super) async fn retry_attempt(
     )
 }
 
-fn workflow_retry_rebind(
+async fn workflow_retry_rebind(
     registered: &RegisteredWorkRuntime,
     original: &tracedecay_domain::WorkAttemptIdentityV1,
 ) -> Result<Option<tracedecay_contracts::WorkflowFanOutRetryRebindV1>, ApplicationProblem> {
     let workflows = tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
         &registered.database,
     )
+    .await
     .map_err(|_| {
         ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.work-retry.workflow-authority-unavailable".to_owned(),
             message: "The workflow retry binding authority is unavailable.".to_owned(),
         })
     })?;
-    let binding = tracedecay_contracts::WorkflowRunStoragePort::fan_out_binding(
-        workflows.effects(),
-        original,
-    )
-    .map_err(|_| {
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "application.work-retry.workflow-binding-unavailable".to_owned(),
-            message: "The workflow retry binding could not be verified.".to_owned(),
+    let original = original.clone();
+    workflows
+        .read(move |workflows| {
+            let binding = tracedecay_contracts::WorkflowRunReadPort::fan_out_binding(
+                workflows.effects(),
+                &original,
+            )
+            .map_err(|_| {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "application.work-retry.workflow-binding-unavailable".to_owned(),
+                    message: "The workflow retry binding could not be verified.".to_owned(),
+                })
+            })?;
+            let Some(binding) = binding else {
+                return Ok(None);
+            };
+            let projection = tracedecay_contracts::WorkflowRunReadPort::projection(
+                workflows.effects(),
+                &binding.run_id,
+            )
+            .map_err(|_| {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "application.work-retry.workflow-projection-unavailable".to_owned(),
+                    message: "The workflow retry projection could not be verified.".to_owned(),
+                })
+            })?;
+            Ok(Some(tracedecay_contracts::WorkflowFanOutRetryRebindV1 {
+                projection,
+                binding,
+            }))
         })
-    })?;
-    let Some(binding) = binding else {
-        return Ok(None);
-    };
-    let projection = tracedecay_contracts::WorkflowRunStoragePort::projection(
-        workflows.effects(),
-        &binding.run_id,
-    )
-    .map_err(|_| {
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "application.work-retry.workflow-projection-unavailable".to_owned(),
-            message: "The workflow retry projection could not be verified.".to_owned(),
-        })
-    })?;
-    Ok(Some(tracedecay_contracts::WorkflowFanOutRetryRebindV1 {
-        projection,
-        binding,
-    }))
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -471,7 +490,9 @@ pub(super) async fn resume_attempts(
             Arc::clone(attempt_processes),
             project_root,
             observability_producer.cloned(),
-        ) {
+        )
+        .await
+        {
             return DaemonInvocationResponse::application_problem(request_id, problem);
         }
     }

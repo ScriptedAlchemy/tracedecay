@@ -646,9 +646,12 @@ impl ProjectOpenTasks {
         let task_cancellation = cancellation.clone();
         let (task_completion, completion) = tokio::sync::watch::channel(false);
         let failure_route = route.clone();
+        // An aborted open abandons its blocking waits, not their effects:
+        // completion fires once the task and the blocking work it owns end.
+        let completion_owner: Arc<dyn Send + Sync> =
+            Arc::new(ProjectOpenTaskCompletionFinalizer(task_completion));
         let task = runtime.spawn(tracing::Instrument::instrument(
-            async move {
-                let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
+            native_runtime::BLOCKING_WORK_OWNER.scope(completion_owner, async move {
                 let state = match open(task_cancellation).await {
                     Ok(()) => ProjectOpenTaskState::Ready,
                     Err(error) => ProjectOpenTaskState::Failed(
@@ -656,7 +659,7 @@ impl ProjectOpenTasks {
                     ),
                 };
                 updates.send_replace(state);
-            },
+            }),
             tracing::trace_span!("daemon.project.admit.task"),
         ));
         registry.routes.insert(

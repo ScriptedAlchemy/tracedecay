@@ -99,10 +99,22 @@ impl WorkSqliteStorage {
         &self,
         read: impl FnOnce(&Self) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 + Send + 'static,
     ) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 {
+        self.read(read).await.unwrap_or_default()
+    }
+
+    /// Runs the synchronous Work read `read` on the blocking pool, so the
+    /// awaiting task parks no runtime thread.
+    pub async fn read<R>(
+        &self,
+        read: impl FnOnce(&Self) -> R + Send + 'static,
+    ) -> Result<R, ExactSqlError>
+    where
+        R: Send + 'static,
+    {
         let storage = self.clone();
         crate::native_runtime::spawn_blocking(move || read(&storage))
             .await
-            .unwrap_or_default()
+            .map_err(ExactSqlError::ReaderUnavailable)
     }
 }
 
@@ -175,70 +187,6 @@ impl WorkRunControlTransitionPort for WorkSqliteJobStorage<'_> {
             next,
             blocked_intervals,
         )
-    }
-}
-
-impl WorkRunControlTransitionPort for WorkSqliteStorage {
-    fn run_control_frontier(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunControlFrontierV1>, WorkRunControlStorageError> {
-        {
-            let _span = tracing::trace_span!("rusqlite.work_run_control.txn.frontier").entered();
-            {
-                let transaction = self
-                    .handle()
-                    .begin_immediate()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                let frontier = run_control_frontier_from(&transaction, authority, task_id, run_id);
-                let _ = transaction.rollback();
-                frontier
-            }
-        }
-    }
-
-    fn workflow_bound_live_attempts(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Vec<WorkRunLiveAttemptV1>, WorkRunControlStorageError> {
-        workflow_bound_live_attempts_from(self.handle(), authority, task_id, run_id)
-    }
-
-    fn publish_run_control_at_frontier(
-        &self,
-        authority: &WorkAuthority,
-        expected: &WorkRunControlFrontierV1,
-        next: &WorkRunControlV1,
-        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
-    ) -> Result<(), WorkRunControlStorageError> {
-        {
-            let _span =
-                tracing::trace_span!("rusqlite.work_run_control.txn.publish_at_frontier").entered();
-            {
-                let transaction = self
-                    .handle()
-                    .begin_immediate()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                if let Err(error) = publish_run_control_at_frontier_tx(
-                    &transaction,
-                    authority,
-                    expected,
-                    next,
-                    blocked_intervals,
-                ) {
-                    let _ = transaction.rollback();
-                    return Err(error);
-                }
-                transaction
-                    .commit()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                Ok(())
-            }
-        }
     }
 }
 
