@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useScope } from "../../data/scope/store.ts";
@@ -13,20 +14,15 @@ afterEach(() => {
 });
 
 describe("curation console", () => {
-  it("shows canonical automatic runs and their post-activation outcomes", async () => {
+  it("shows post-activation outcomes and sends run history to the Automations ledger", async () => {
     const fetchMock = stubRoutes();
     renderConsole();
 
-    await screen.findByText("memory_curator");
-    fireEvent.click(screen.getByRole("button", { name: /memory_curator/ }));
-    expect(await screen.findByText(/chain integrity: verified/)).toBeTruthy();
-    fireEvent.click(
-      await screen.findByRole("button", { name: /inspect traces/i }),
-    );
-    expect(
-      (await screen.findByLabelText("traces artifact payload")).textContent,
-    ).toContain("rejected_ops");
     expect(await screen.findByText(/recalled and helpful/)).toBeTruthy();
+    // One run ledger: the console links to Automations instead of drawing a copy.
+    expect(
+      screen.getByRole("link", { name: "Open the Automations run ledger" }).getAttribute("href"),
+    ).toBe("/operations/automations");
     expect(
       screen.queryByRole("button", {
         name: /^(approve|reject|apply|submit|review|plan|config)\b/i,
@@ -218,7 +214,9 @@ function renderConsole() {
   });
   render(
     <QueryClientProvider client={client}>
-      <CurationConsole />
+      <MemoryRouter>
+        <CurationConsole />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

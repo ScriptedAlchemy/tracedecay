@@ -2,13 +2,15 @@
 import type { AutomationOutcomesPayloadV1, AutomationRunsPayloadV1 } from "../../contracts/generated.ts";
 import type { PayloadResult } from "../../data/query/payload.ts";
 import { useAutomaticCurator, useAutomationOutcomes, useAutomationRuns, type AutomaticCuratorReceipt, type AutomaticCuratorResult } from "../../data/query/automation.ts";
+import { Link } from "react-router";
+import { scopedWorkspacePath, useScope } from "../../data/scope/store.ts";
 import { PayloadBoundary } from "../../ui/ReadSection.tsx";
 import { Panel, Readout } from "../../ui/instrument.tsx";
-import { RunHistory } from "../automations/RunHistory.tsx";
 
 export function CurationConsole() {
   const curator = useAutomaticCurator();
   const outcomes = useAutomationOutcomes();
+  const scope = useScope((state) => state.scope);
 
   return (
     <div
@@ -26,7 +28,15 @@ export function CurationConsole() {
         />
       </Panel>
       <Panel legend="Automatic run history" elevation="well">
-        <RunHistory />
+        <p className="text-2xs leading-relaxed text-text-muted">
+          Runs, their receipts and artifacts are one ledger, owned by Automations.{" "}
+          <Link
+            to={scopedWorkspacePath(scope, "operations/automations")}
+            className="inline-flex min-h-[var(--touch-target-min)] items-center text-accent hover:underline"
+          >
+            Open the Automations run ledger
+          </Link>
+        </p>
       </Panel>
       <Panel legend="Post-activation outcomes" elevation="well">
         <PayloadBoundary
