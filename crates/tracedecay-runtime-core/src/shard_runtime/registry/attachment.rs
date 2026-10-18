@@ -91,6 +91,12 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
         false
     }
 
+    /// Whether a lost file has no open connection left. A registry must not
+    /// publish a successor runtime for the key while this is false.
+    fn lost_file_closed(&self) -> bool {
+        true
+    }
+
     /// Stops admission and drains writer/read work. Returning success promises
     /// that a following snapshot has no writer, readers, or queued work.
     fn drain(&self) -> Result<(), String>;

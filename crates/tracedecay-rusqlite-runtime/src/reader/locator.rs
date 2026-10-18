@@ -55,6 +55,12 @@ impl ExistingReaderLocator {
         self.opened_database = Some(Arc::new(opened_database));
         self
     }
+    /// Closes the pinned descriptor for this locator and every clone of it.
+    pub(crate) fn release_opened_database(&self) {
+        if let Some(opened) = &self.opened_database {
+            opened.release();
+        }
+    }
     pub(crate) fn expected_file_identity(&self) -> Option<u64> {
         self.opened_database
             .as_deref()

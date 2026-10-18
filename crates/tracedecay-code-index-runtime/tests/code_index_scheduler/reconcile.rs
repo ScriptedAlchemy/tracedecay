@@ -2483,6 +2483,62 @@ fn observed_change_during_capture_retries_before_publication() {
     );
 }
 
+/// A source that is superseded faster than a capture lasts must still seal:
+/// the attempt after the bounded retries runs to completion, and the epoch
+/// that superseded it stays owed to the follow-up pass (#4238).
+#[test]
+fn a_capture_superseded_on_every_attempt_still_seals_its_final_attempt() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn always_superseded() -> u32 { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish initial source"));
+    let mut capture_attempts = 0_u32;
+
+    let outcome = scheduler
+        .reconcile_now_with_capture(|scheduler, control| {
+            capture_attempts += 1;
+            let captured = scheduler.capture_authoritative_snapshot(Some(control))?;
+            fixture.edit(
+                "src/lib.rs",
+                &format!("pub fn always_superseded() -> u32 {{ {capture_attempts} }}\n"),
+            );
+            scheduler.notify_overflow();
+            Ok(captured)
+        })
+        .expect("the final attempt seals although the source moved again");
+    let sealed = published(outcome);
+
+    assert!(
+        capture_attempts > 1,
+        "earlier attempts must have been superseded first"
+    );
+    assert_ne!(
+        sealed.snapshot_content_identity,
+        scheduler
+            .capture_authoritative_snapshot(None)
+            .expect("capture current source")
+            .snapshot
+            .content_identity,
+        "the sealed generation describes the source its attempt captured, not the latest edit"
+    );
+    assert!(
+        scheduler
+            .hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .overflow,
+        "the arrival that superseded the final attempt must stay pending for the follow-up pass"
+    );
+    assert!(
+        scheduler.source_change_pending_for_test(),
+        "a seal past a newer epoch must not prove the source current"
+    );
+}
+
 #[test]
 fn same_daemon_scheduler_retire_remount_mints_new_progress_producer() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn producer_epoch() {}\n")]);
@@ -10967,6 +11023,46 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     assert!(
         reopened.verified_against_source(),
         "successful text-only capture establishes current source truth"
+    );
+}
+
+/// A hint that lands while a retained reconcile verifies the sealed bytes is
+/// not covered by that verification. The proof it records is stamped with the
+/// epoch the verification began under, so the seat keeps reporting the source
+/// as moved until the follow-up pass instead of absorbing the hint (#4238).
+#[test]
+fn a_hint_landing_during_retained_verification_keeps_the_source_pending() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed retained generation"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let epoch = Arc::clone(&scheduler.epoch);
+    scheduler.install_after_retained_source_check_for_test(Arc::new(move || {
+        tracedecay_application::code_index::DaemonCodeIndexControlV1::advance(&epoch);
+    }));
+
+    let outcome = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("retained reconcile")
+        .expect("unchanged sealed bytes are accepted");
+
+    assert!(
+        matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_)),
+        "the sealed bytes still match: {outcome:?}"
+    );
+    assert!(
+        scheduler.source_change_pending_for_test(),
+        "a hint that landed during the verification must stay pending"
     );
 }
 

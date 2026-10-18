@@ -6,6 +6,7 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
@@ -64,7 +65,8 @@ const RETAINED_WAL_BYTES: i64 = WAL_SOFT_LIMIT_BYTES as i64;
 /// pathname stat.
 #[derive(Debug)]
 pub(crate) struct OpenedDatabaseFile {
-    file: File,
+    /// `None` once [`Self::release`] closed the descriptor of a lost file.
+    file: Mutex<Option<File>>,
     identity: u64,
 }
 
@@ -88,19 +90,42 @@ impl OpenedDatabaseFile {
             return Err(OpenedDatabaseFileError::NotFile);
         }
         let identity = opened_file_identity(&file)?;
-        Ok(Self { file, identity })
+        Ok(Self {
+            file: Mutex::new(Some(file)),
+            identity,
+        })
+    }
+
+    /// Closes the pinned descriptor of a file that was unlinked or replaced,
+    /// for every holder of this handle at once. The identity stays readable;
+    /// anything that needs the descriptor afterwards reports `Replaced`.
+    pub(crate) fn release(&self) {
+        self.file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
     }
 
+    fn with_file<T>(
+        &self,
+        use_file: impl FnOnce(&File) -> T,
+    ) -> Result<T, OpenedDatabaseFileError> {
+        self.file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(use_file)
+            .ok_or(OpenedDatabaseFileError::Replaced)
+    }
+
     pub(crate) fn try_clone(&self) -> Result<Self, OpenedDatabaseFileError> {
+        let file = self.with_file(|file| file.try_clone())?;
         Ok(Self {
-            file: self
-                .file
-                .try_clone()
-                .map_err(|_| OpenedDatabaseFileError::Open)?,
+            file: Mutex::new(Some(file.map_err(|_| OpenedDatabaseFileError::Open)?)),
             identity: self.identity,
         })
     }
@@ -112,10 +137,8 @@ impl OpenedDatabaseFile {
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
         use std::os::unix::io::AsRawFd;
 
-        Ok(PathBuf::from(format!(
-            "/proc/self/fd/{}",
-            self.file.as_raw_fd()
-        )))
+        let descriptor = self.with_file(|file| file.as_raw_fd())?;
+        Ok(PathBuf::from(format!("/proc/self/fd/{descriptor}")))
     }
 
     /// Selects the pathname used by a writer connection.
@@ -182,7 +205,6 @@ impl OpenedDatabaseFile {
         if opened_file_identity(&current)? != self.identity {
             return Err(OpenedDatabaseFileError::Replaced);
         }
-        let _ = &self.file;
         Ok(())
     }
 
@@ -192,7 +214,10 @@ impl OpenedDatabaseFile {
     pub(crate) fn is_lost(&self, path: &Path) -> bool {
         use std::os::unix::fs::MetadataExt;
 
-        if self.file.metadata().is_ok_and(|pinned| pinned.nlink() == 0) {
+        let unlinked = self
+            .with_file(|file| file.metadata().is_ok_and(|pinned| pinned.nlink() == 0))
+            .unwrap_or(true);
+        if unlinked {
             return true;
         }
         match std::fs::metadata(path) {
