@@ -2,16 +2,24 @@
 //!
 //! Storage, shard lifecycle, and session-memory paths spawn their settlement
 //! work on an Asupersync runtime so accepted work outlives a cancelled request.
-//! Callers that already run on a native runtime use it. Every other caller
-//! (the daemon's Tokio sites, CLI commands, and tests) shares one process
-//! runtime: the one the host [`install`]s at startup. Without an install every
-//! helper here refuses with [`NOT_INSTALLED`]; the `test-runtime` feature
-//! instead starts a default runtime on first use, for tests. Callers only
-//! await native join handles and channel receivers, which wake through
-//! ordinary `Waker`s, so a foreign executor never blocks on the native runtime.
+//! Callers that already run on a native runtime thread, worker or blocking
+//! pool, use it. The one runtime is the one the host [`install`]s at startup.
+//! Without an install every helper here refuses with [`NOT_INSTALLED`]; the
+//! `test-runtime` feature instead starts a default runtime on first use, for
+//! tests.
+//!
+//! A thread outside the runtime reaches it only as a Tokio thread (the
+//! daemon's project-open, shutdown and HTTP adapters, which still run on
+//! Tokio) or a storage-pool thread. Each admission is counted in
+//! [`foreign_thread_counts`]. A bare thread is refused with an error log and a
+//! count, on an installed runtime; dedicated threads enter through
+//! [`block_on`]. Callers only await native join handles and channel receivers,
+//! which wake through ordinary `Waker`s, so a foreign executor never blocks on
+//! the native runtime.
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -30,17 +38,48 @@ use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, a
 /// use. The value matches Tokio's `max_blocking_threads` default.
 pub const MAX_BLOCKING_THREADS: usize = 512;
 
-static PROCESS_RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
+static INSTALLED_RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
+
+/// Set by [`install`]. A runtime a test started lazily admits bare threads,
+/// because every test body is one.
+static STRICT_ADMISSION: AtomicBool = AtomicBool::new(false);
 
 /// Why a helper refused when the host never called [`install`].
 pub const NOT_INSTALLED: &str = "native execution runtime not installed";
 
-/// The runtime the caller runs on, or the process runtime.
+static TOKIO_ADMISSIONS: AtomicU64 = AtomicU64::new(0);
+static STORAGE_POOL_ADMISSIONS: AtomicU64 = AtomicU64::new(0);
+static BARE_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+/// How often [`handle`] and [`cx`] served each kind of foreign caller in this
+/// process, and how many bare-thread callers they refused. `tokio` counts
+/// threads with a Tokio runtime entered (the daemon's project-open, retirement,
+/// shutdown, advisory and HTTP adapters); `storage_pool` counts workers of the
+/// separate storage runtime.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ForeignThreadCounts {
+    pub tokio: u64,
+    pub storage_pool: u64,
+    pub refused_bare: u64,
+}
+
+#[must_use]
+pub fn foreign_thread_counts() -> ForeignThreadCounts {
+    ForeignThreadCounts {
+        tokio: TOKIO_ADMISSIONS.load(Ordering::Relaxed),
+        storage_pool: STORAGE_POOL_ADMISSIONS.load(Ordering::Relaxed),
+        refused_bare: BARE_REFUSALS.load(Ordering::Relaxed),
+    }
+}
+
+/// The runtime the caller runs on: a native worker, a blocking-pool thread, or
+/// a Tokio or storage-pool thread reaching the installed runtime.
 ///
-/// `None` when no runtime was installed or the installed one failed to start.
+/// `None` when no runtime was installed, the installed one failed to start, or
+/// the caller is a bare thread on an installed runtime.
 #[must_use]
 pub fn handle() -> Option<RuntimeHandle> {
-    native_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
+    native_handle().or_else(|| admitted_runtime("handle").map(Runtime::handle))
 }
 
 fn native_handle() -> Option<RuntimeHandle> {
@@ -54,29 +93,56 @@ pub(crate) fn on_native_thread() -> bool {
     native_handle().is_some()
 }
 
-/// The caller's task context, or a request context on the process runtime.
+/// The caller's task context, or a request context on the installed runtime.
 #[must_use]
 pub fn cx() -> Option<Cx> {
     Cx::current()
         .filter(|_| !crate::storage_pool::on_pool())
         .or_else(|| {
-            process_runtime()
-                .ok()?
+            admitted_runtime("cx")?
                 .handle()
                 .try_request_cx_with_budget(Budget::INFINITE)
                 .ok()
         })
 }
 
+/// The installed runtime for a caller that is not a native worker, or `None`
+/// for a bare thread on an installed runtime.
+fn admitted_runtime(entry: &'static str) -> Option<&'static Runtime> {
+    let runtime = installed_runtime().ok()?;
+    let admitted = if ON_BLOCKING_POOL.get() {
+        // The runtime's own blocking thread.
+        true
+    } else if crate::storage_pool::on_pool() {
+        STORAGE_POOL_ADMISSIONS.fetch_add(1, Ordering::Relaxed);
+        true
+    } else if tokio::runtime::Handle::try_current().is_ok() {
+        TOKIO_ADMISSIONS.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        !STRICT_ADMISSION.load(Ordering::Relaxed)
+    };
+    if !admitted {
+        BARE_REFUSALS.fetch_add(1, Ordering::Relaxed);
+        tracing::error!(
+            entry,
+            thread = std::thread::current().name().unwrap_or("unnamed"),
+            "native runtime refused a caller on a bare thread; \
+             enter it through native_runtime::block_on or a native task"
+        );
+    }
+    admitted.then_some(runtime)
+}
+
 /// Runs `future` to completion on the calling thread, with the tasks it
-/// spawns running on the process runtime's workers. For dedicated threads
+/// spawns running on the installed runtime's workers. For dedicated threads
 /// outside any native runtime: from a native thread it returns an error rather
 /// than park a worker.
 pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
     if Runtime::current_handle().is_some() {
         return Err("native block_on called from a native runtime thread".to_owned());
     }
-    Ok(process_runtime()?.block_on(future))
+    Ok(installed_runtime()?.block_on(future))
 }
 
 /// Queues `work` on the runtime's blocking pool now, at the call, and returns
@@ -88,7 +154,7 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
 /// be cancelled with that region before it starts, which would strand anything
 /// the caller had already queued for it.
 ///
-/// Called on a blocking-pool thread that already runs work queued here (an
+/// Called on a thread of the runtime's blocking pool (inside an
 /// [`off_native_thread`] handler, say), it runs `work` inline at the call:
 /// queuing would hold this pool thread while waiting for another, and a full
 /// pool would deadlock on that wait.
@@ -201,7 +267,6 @@ where
     let (sender, receiver) = asupersync::channel::oneshot::channel();
     runtime
         .spawn_blocking(move || {
-            ON_BLOCKING_POOL.set(true);
             let _ = sender.send_blocking(work());
         })
         .ok_or("native blocking pool unavailable")?;
@@ -209,9 +274,8 @@ where
 }
 
 thread_local! {
-    /// Set for good once a blocking-pool thread runs work [`queue_blocking`]
-    /// or [`NativeTask::spawn_off_native_thread`] queued; such a thread serves
-    /// the pool for its whole life.
+    /// Set at start on every thread of the native runtime's blocking pool,
+    /// whoever queued the work it runs.
     static ON_BLOCKING_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -575,7 +639,6 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         handle()
             .ok_or("native execution runtime unavailable")?
             .spawn_blocking(move || {
-                ON_BLOCKING_POOL.set(true);
                 let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     poll_on_current_thread(work)
                 }));
@@ -702,17 +765,19 @@ pub enum InstallError {
     StartFailed(String),
 }
 
-/// Builds `builder` and makes it the process runtime every helper here uses.
-/// A host installs it at startup, before any native helper runs.
+/// Builds `builder` and makes it the runtime every helper here uses. A host
+/// installs it at startup, before any native helper runs. The runtime's
+/// thread-start hook is replaced, and bare threads are refused from here on.
 pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError> {
     let mut installed = false;
-    let runtime = PROCESS_RUNTIME.get_or_init(|| {
+    let runtime = INSTALLED_RUNTIME.get_or_init(|| {
         installed = true;
         start(builder)
     });
     if !installed {
         return Err(InstallError::AlreadyStarted);
     }
+    STRICT_ADMISSION.store(true, Ordering::Relaxed);
     runtime
         .as_ref()
         .map_err(|message| InstallError::StartFailed(message.clone()))
@@ -843,11 +908,11 @@ pub fn default_builder() -> RuntimeBuilder {
         .blocking_threads(1, MAX_BLOCKING_THREADS)
 }
 
-fn process_runtime() -> Result<&'static Runtime, String> {
+fn installed_runtime() -> Result<&'static Runtime, String> {
     #[cfg(feature = "test-runtime")]
-    let runtime = Some(PROCESS_RUNTIME.get_or_init(|| start(default_builder())));
+    let runtime = Some(INSTALLED_RUNTIME.get_or_init(|| start(default_builder())));
     #[cfg(not(feature = "test-runtime"))]
-    let runtime = PROCESS_RUNTIME.get();
+    let runtime = INSTALLED_RUNTIME.get();
     runtime
         .ok_or_else(|| NOT_INSTALLED.to_owned())?
         .as_ref()
@@ -855,11 +920,19 @@ fn process_runtime() -> Result<&'static Runtime, String> {
 }
 
 fn start(builder: RuntimeBuilder) -> Result<Runtime, String> {
-    builder.build().map_err(|error| {
-        let message = format!("native execution runtime failed to start: {error}");
-        tracing::error!(%message);
-        message
-    })
+    builder
+        .on_thread_start(|| {
+            // Workers have their runtime entered before this hook runs.
+            if Runtime::current_handle().is_none() {
+                ON_BLOCKING_POOL.set(true);
+            }
+        })
+        .build()
+        .map_err(|error| {
+            let message = format!("native execution runtime failed to start: {error}");
+            tracing::error!(%message);
+            message
+        })
 }
 
 #[cfg(test)]
@@ -1608,11 +1681,12 @@ mod tests {
     /// A fresh one-thread pool, so the thread has run no other queued work.
     #[test]
     fn blocking_work_from_a_task_spawned_off_native_threads_runs_on_its_thread() {
-        let runtime = RuntimeBuilder::multi_thread()
-            .worker_threads(1)
-            .blocking_threads(1, 1)
-            .build()
-            .expect("test runtime");
+        let runtime = start(
+            RuntimeBuilder::multi_thread()
+                .worker_threads(1)
+                .blocking_threads(1, 1),
+        )
+        .expect("test runtime");
         let outcome = runtime.block_on(async {
             NativeTask::spawn_off_native_thread(async {
                 spawn_blocking(|| std::thread::current().id()).now_or_never()

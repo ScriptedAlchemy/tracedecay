@@ -65,6 +65,12 @@ fn main() -> ExitCode {
     ) {
         return invalid("runtime", error);
     }
+    // Native helpers refuse a bare main thread; the command enters the runtime.
+    tracedecay_runtime_core::native_runtime::block_on(async { dispatch(command) })
+        .unwrap_or_else(|error| invalid("runtime", error))
+}
+
+fn dispatch(command: Command) -> ExitCode {
     match command {
         Command::Validate {
             repo_root,

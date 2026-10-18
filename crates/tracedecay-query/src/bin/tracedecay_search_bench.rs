@@ -141,7 +141,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    match run(&options) {
+    // Native helpers refuse a bare main thread; the run enters the runtime.
+    let ran = tracedecay_runtime_core::native_runtime::block_on(async { run(&options) })
+        .and_then(|summary| summary);
+    match ran {
         Ok(summary) => {
             println!("{summary}");
             ExitCode::SUCCESS
