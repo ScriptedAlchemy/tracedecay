@@ -628,6 +628,13 @@ impl PersistentWriter {
     pub fn opened_file_identity(&self) -> Option<u64> {
         self.opened_file_identity
     }
+    /// Whether the worker task ended, which drops its SQLite connection.
+    /// Never waits, so a pool task may call it.
+    pub(crate) fn worker_exited(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_none_or(crate::storage_pool::PoolTask::is_finished)
+    }
     pub fn state(&self) -> WriterState {
         WriterState::load(&self.state)
     }

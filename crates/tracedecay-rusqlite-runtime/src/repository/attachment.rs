@@ -93,6 +93,9 @@ impl RepositoryPhysicalAttachmentFactory {
                 closed: false,
                 file_lost: false,
                 lost_readers: None,
+                lost_writer: None,
+                #[cfg(test)]
+                after_lost_notice: None,
                 close_failure: None,
             })),
             drain_serial: Mutex::new(()),
@@ -305,6 +308,9 @@ impl RepositoryPhysicalAttachmentFactory {
             closed: false,
             file_lost: false,
             lost_readers: None,
+            lost_writer: None,
+            #[cfg(test)]
+            after_lost_notice: None,
             close_failure: None,
         }));
         let _ = lost_state.set(Arc::downgrade(&state));
@@ -383,29 +389,41 @@ struct RepositoryRuntimePhysicalState {
     /// The reader pool of a lost file, kept until its workers have exited so
     /// the registry can tell when no connection to the old file remains.
     lost_readers: Option<ReaderPool<RepositoryRuntimeReadExecutor>>,
+    /// The writer of a lost file. Its task is still returning when the notice
+    /// runs, and its connection closes only then, so it is kept until the task
+    /// has finished.
+    lost_writer: Option<Arc<PersistentWriter>>,
+    /// Test-only: runs on the writer task after the notice, holding its
+    /// connection open for as long as it blocks.
+    #[cfg(test)]
+    after_lost_notice: Option<Box<dyn FnOnce() + Send>>,
     close_failure: Option<String>,
 }
 
 /// Runs on the writer's pool task once its probe finds the file unlinked or
 /// replaced: the writer already stopped, so this releases the readers and the
-/// attachment's handles without waiting on any of them.
+/// attachment's handles without waiting on any of them. The handles move into
+/// the lost slots under the same lock that marks the file lost, so
+/// `lost_file_closed` never sees a lost file with nothing left to wait on.
 fn close_lost_file(state: &Mutex<RepositoryRuntimePhysicalState>) {
-    let (writer, readers) = {
-        let mut state = state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.file_lost = true;
-        state.admission_open = false;
-        (state.writer.take(), state.readers.take())
-    };
-    if let Some(readers) = &readers {
-        readers.close_for_lost_file();
-    }
-    state
+    let mut guard = state
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .lost_readers = readers;
-    drop(writer);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.file_lost = true;
+    guard.admission_open = false;
+    if let Some(readers) = guard.readers.take() {
+        readers.close_for_lost_file();
+        guard.lost_readers = Some(readers);
+    }
+    guard.lost_writer = guard.writer.take();
+    #[cfg(test)]
+    {
+        let hook = guard.after_lost_notice.take();
+        drop(guard);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 }
 
 impl RepositoryRuntimePhysicalAttachment {
@@ -415,18 +433,24 @@ impl RepositoryRuntimePhysicalAttachment {
         self.lock_state().file_lost
     }
 
-    /// Whether a lost file has no open connection left: every reader worker
-    /// exited. Also true for an attachment whose file was never lost.
+    /// Whether a lost file has no open connection left: the writer task
+    /// finished and every reader worker exited. Also true for an attachment
+    /// whose file was never lost.
     pub fn lost_file_closed(&self) -> bool {
         let mut state = self.lock_state();
         if state
             .lost_readers
             .as_ref()
             .is_some_and(|readers| !readers.workers_exited())
+            || state
+                .lost_writer
+                .as_ref()
+                .is_some_and(|writer| !writer.worker_exited())
         {
             return false;
         }
         state.lost_readers = None;
+        state.lost_writer = None;
         true
     }
 
@@ -1217,6 +1241,56 @@ mod tests {
         attachment.close_and_join().unwrap();
         donor.drain().unwrap();
         donor.close_and_join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lost_file_is_not_closed_while_the_lost_writer_still_holds_its_connection() {
+        let directory = TempDir::new().unwrap();
+        let attachment = Arc::new(attach_seeded_store(directory.path(), &binding(), 0));
+        let (hold, held) = mpsc::channel::<()>();
+        attachment.lock_state().after_lost_notice = Some(Box::new(move || {
+            let _ = held.recv();
+        }));
+        fs::remove_file(directory.path().join("store-0.sqlite3")).unwrap();
+
+        let deadline =
+            std::time::Instant::now() + crate::FILE_PROBE_INTERVAL + Duration::from_secs(10);
+        while !attachment
+            .lock_state()
+            .lost_readers
+            .as_ref()
+            .is_some_and(ReaderPool::workers_exited)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lost file's readers never exited"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(attachment.file_lost());
+        let (answer, answered) = mpsc::channel();
+        let asking = Arc::clone(&attachment);
+        thread::spawn(move || {
+            let _ = answer.send(asking.lost_file_closed());
+        });
+        assert_eq!(
+            answered.recv_timeout(Duration::from_secs(5)),
+            Ok(false),
+            "the writer task is still running, so its connection is still open"
+        );
+
+        hold.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !attachment.lost_file_closed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the file stayed unclosed after the writer task returned"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
     }
 
     #[cfg(unix)]
