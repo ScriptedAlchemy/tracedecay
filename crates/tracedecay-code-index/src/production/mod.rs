@@ -42,8 +42,8 @@ use super::{
     languages::{LanguageRegistry, StaticLanguageRegistry},
     lineage::{GenerationSymbolIndexV1, LineageResolutionErrorV1, SymbolLineageResolver},
     projection::{
-        CodeChunkProjectionSink, ProjectionPublicationErrorV1, ProjectionPublicationHandoffV1,
-        expected_request_digest, project_for_publication,
+        ProjectionPublicationErrorV1, ProjectionPublicationHandoffV1, expected_request_digest,
+        project_for_publication,
     },
     provider::{
         GenerationProviderCoverageV1, GenerationProviderReadV1,
@@ -1868,29 +1868,25 @@ struct ActiveGenerationLookupV1 {
 }
 
 /// Production owner for one repository and one atomic publication authority.
-pub struct CodeIndexProductionOwnerV1<P, S> {
+pub struct CodeIndexProductionOwnerV1<P> {
     config: CodeIndexProductionConfigV1,
     publication: P,
-    projection: S,
     physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
     retained_parses: SharedRetainedParsePool,
 }
 
-impl<P, S> CodeIndexProductionOwnerV1<P, S>
+impl<P> CodeIndexProductionOwnerV1<P>
 where
     P: CodeIndexAtomicPublicationPort,
-    S: CodeChunkProjectionSink,
 {
     pub fn new(
         config: CodeIndexProductionConfigV1,
         publication: P,
-        projection: S,
     ) -> Result<Self, CodeIndexProductionOpenErrorV1> {
         config.validate()?;
         Ok(Self {
             config,
             publication,
-            projection,
             physical_artifacts: SharedPhysicalCodeArtifactPoolV1::default(),
             retained_parses: SharedRetainedParsePool::default(),
         })
@@ -2124,13 +2120,7 @@ where
                     target_projection_key: &request.target_projection_key,
                     control,
                 }
-                .build(
-                    &mut self.projection,
-                    parent,
-                    plan,
-                    manifest.clone(),
-                    &validated.snapshot,
-                )?;
+                .build(parent, plan, manifest.clone(), &validated.snapshot)?;
                 match sparse {
                     Ok(sparse) => {
                         crate::observe::record_rebuild_state("increment");
@@ -2215,10 +2205,11 @@ where
                         .map_err(CodeIndexProductionErrorV1::Capability)
                     }
                 }?;
-                let projection = project_for_publication(
-                    &mut self.projection,
-                    projection_request(None, target_projection_key, changes)?,
-                )
+                let projection = project_for_publication(projection_request(
+                    None,
+                    target_projection_key,
+                    changes,
+                )?)
                 .map_err(CodeIndexProductionErrorV1::Projection)?;
                 lexical_page_source::checkpoint(control)?;
                 let imports = {
