@@ -212,7 +212,7 @@ async fn release_capacity_unless_re_served(
         .keys()
         .any(|key| key.owner.project_id == stores.owner.project_id);
     if !re_served {
-        release_capacity_retired_stores(stores).await?;
+        Box::pin(release_capacity_retired_stores(stores)).await?;
     }
     drop(capacity_admission);
     Ok(())
