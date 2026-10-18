@@ -85,6 +85,12 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
         Err("physical runtime has no opened SQLite file identity".to_owned())
     }
 
+    /// Whether the file was unlinked or replaced under this attachment, which
+    /// then closed every handle on it.
+    fn file_lost(&self) -> bool {
+        false
+    }
+
     /// Stops admission and drains writer/read work. Returning success promises
     /// that a following snapshot has no writer, readers, or queued work.
     fn drain(&self) -> Result<(), String>;
