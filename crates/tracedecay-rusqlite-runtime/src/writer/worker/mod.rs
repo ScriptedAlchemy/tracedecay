@@ -24,7 +24,7 @@ use futures_util::FutureExt;
 use rusqlite::TransactionBehavior;
 use tracedecay_store::{
     AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
-    RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1,
+    RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1, UnavailableReasonV1,
 };
 use tracing::Instrument;
 
@@ -333,7 +333,35 @@ pub(super) struct Worker {
     pub(super) checkpoint_status: watch::Sender<CheckpointStatus>,
     pub(super) checkpoint_pressure: watch::Sender<CheckpointPressure>,
     pub(super) checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
+    pub(super) on_file_lost: Option<super::FileLossNotice>,
     pub(super) started: SyncSender<Result<Option<u64>, WriterStartError>>,
+}
+
+/// How often the writer checks that its pinned file is still the store's
+/// file, between batches and while idle.
+pub const FILE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
+struct FileProbe {
+    file: Arc<OpenedDatabaseFile>,
+    path: PathBuf,
+    due: Instant,
+}
+
+impl FileProbe {
+    fn lost(&mut self, now: Instant) -> bool {
+        if now < self.due {
+            return false;
+        }
+        self.due = now + FILE_PROBE_INTERVAL;
+        self.file.is_lost(&self.path)
+    }
+}
+
+fn earliest(deadline: Option<Instant>, probe: Option<&FileProbe>) -> Option<Instant> {
+    match (deadline, probe.map(|probe| probe.due)) {
+        (Some(deadline), Some(due)) => Some(deadline.min(due)),
+        (deadline, due) => deadline.or(due),
+    }
 }
 
 impl Worker {
@@ -495,7 +523,24 @@ impl Worker {
         let mut prefer_auxiliary = true;
         let mut next_auxiliary = AuxiliaryWork::IncrementalVacuum;
         let mut hard_checkpoint_retry_due = None;
+        #[cfg(unix)]
+        let probe_path = self.canonical_path.clone();
+        #[cfg(not(unix))]
+        let probe_path = self.path.clone();
+        let mut probe = self._opened_database.clone().map(|file| FileProbe {
+            file,
+            path: probe_path,
+            due: Instant::now() + FILE_PROBE_INTERVAL,
+        });
         loop {
+            // The state flips before ingress drains, so work sent before
+            // admission saw the flip is still collected and failed below.
+            let lost = probe
+                .as_mut()
+                .is_some_and(|probe| probe.lost(Instant::now()));
+            if lost {
+                self.state.store(WriterState::Lost as u8, Ordering::Release);
+            }
             {
                 let _span = tracing::trace_span!("rusqlite.writer.drain_ingress").entered();
                 {
@@ -523,6 +568,22 @@ impl Worker {
                     );
                 }
             };
+            if lost {
+                reject_all(&mut queue, &self.telemetry, UnavailableReasonV1::FileLost);
+                reject_all_exact_sql(&mut exact_sql_queue);
+                reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
+                checkpoint_queue.clear();
+                if let Some(probe) = &probe {
+                    tracing::warn!(
+                        path = %probe.path.display(),
+                        "store file was unlinked or replaced; its writer stopped"
+                    );
+                }
+                if let Some(notice) = self.on_file_lost.take() {
+                    notice();
+                }
+                return;
+            }
             if self.shutdown_requested.load(Ordering::Acquire)
                 && queue.is_empty()
                 && exact_sql_queue.is_empty()
@@ -532,7 +593,7 @@ impl Worker {
                 break;
             }
             if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
-                reject_all(&mut queue, &self.telemetry);
+                reject_all(&mut queue, &self.telemetry, UnavailableReasonV1::Faulted);
                 reject_all_exact_sql(&mut exact_sql_queue);
                 reject_all_incremental_vacuum(&mut incremental_vacuum_queue);
                 checkpoint_queue.clear();
@@ -554,7 +615,7 @@ impl Worker {
                     exact_sql_closed,
                     incremental_vacuum_closed,
                     checkpoint_closed,
-                    None,
+                    earliest(None, probe.as_ref()),
                 )
                 .await;
                 apply_wake(
@@ -600,14 +661,10 @@ impl Worker {
                     exact_sql_closed,
                     incremental_vacuum_closed,
                     checkpoint_closed,
-                    Some(*retry_due),
+                    earliest(Some(*retry_due), probe.as_ref()),
                 )
                 .await;
-                if matches!(wake, WorkerWake::CheckpointRetry) {
-                    self.telemetry.checkpoint_hard_retry();
-                    self.run_scheduled_checkpoint(&mut checkpoint);
-                    hard_checkpoint_retry_due = drain_retry_due(&checkpoint);
-                } else {
+                if !matches!(wake, WorkerWake::CheckpointRetry) {
                     apply_wake(
                         wake,
                         &mut queue,
@@ -699,6 +756,7 @@ impl Worker {
                 }
                 // An expired fence keeps retrying with backoff even while no
                 // write arrives to run the checkpoint after its batch.
+                let checkpoint_retry = checkpoint.retry_due(Instant::now());
                 let wake = wait_for_work(
                     &self.cx,
                     &mut self.receiver,
@@ -710,11 +768,13 @@ impl Worker {
                     exact_sql_closed,
                     incremental_vacuum_closed,
                     checkpoint_closed,
-                    checkpoint.retry_due(Instant::now()),
+                    earliest(checkpoint_retry, probe.as_ref()),
                 )
                 .await;
                 if matches!(wake, WorkerWake::CheckpointRetry) {
-                    self.run_scheduled_checkpoint(&mut checkpoint);
+                    if checkpoint_retry.is_some_and(|due| Instant::now() >= due) {
+                        self.run_scheduled_checkpoint(&mut checkpoint);
+                    }
                     continue;
                 }
                 apply_wake(

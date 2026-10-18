@@ -485,12 +485,11 @@ async fn open_runtime_configuration_from_store(
         match check {
             SourceBindingCheck::Verified => break,
             // Exactly one daemon-owned binding for this registry-verified
-            // project whose only drift is the path-derived locator digest:
-            // the checkout moved or was renamed. The registry owns identity,
-            // not the path, and has already resolved this exact
-            // registered project for the current root, so republish the
-            // binding with the new derived digest under compare-and-swap
-            // instead of demanding a reset.
+            // project whose only drift is the locator digest: a binding
+            // published under the retired root-derived digest. The registry
+            // owns identity and has already resolved this exact registered
+            // project, so republish the binding with the project digest under
+            // compare-and-swap instead of demanding a reset.
             SourceBindingCheck::LocatorDigestDrift if !rebind_attempted => {
                 rebind_attempted = true;
                 // A concurrent open may have won the swap; adopt what it
@@ -678,7 +677,6 @@ fn daemon_project_source_binding(
 ) -> Result<ScopeSourceBinding> {
     tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
         &target.project_id,
-        &target.project_root,
     )
     .map_err(|error| {
         config_error(format!(

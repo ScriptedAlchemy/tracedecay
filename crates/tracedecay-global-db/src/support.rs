@@ -176,19 +176,4 @@ pub(crate) fn git_remote_search_alias(remote: Option<&str>) -> Option<String> {
     Some(format!("git-remote-name:{}", name.to_ascii_lowercase()))
 }
 
-pub(crate) fn normalize_git_remote_url(remote: &str) -> Option<String> {
-    let remote = remote.trim();
-    if remote.is_empty() {
-        return None;
-    }
-    let mut normalized = remote.trim_end_matches('/').to_string();
-    if let Some(rest) = normalized.strip_prefix("git@")
-        && let Some((host, path)) = rest.split_once(':')
-    {
-        normalized = format!("https://{host}/{path}");
-    }
-    if let Some(stripped) = normalized.strip_suffix(".git") {
-        normalized = stripped.to_string();
-    }
-    Some(normalized.to_ascii_lowercase())
-}
+pub(crate) use tracedecay_runtime_core::git::normalize_git_remote_url;

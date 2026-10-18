@@ -183,6 +183,15 @@ impl CodeIndexOwnerSignalsV1 {
             .is_some_and(CodeIndexOwnerActivityV1::pass_finished)
     }
 
+    /// Owner passes this worktree has finished. The count only grows, so a
+    /// reader that looks late still sees a pass that began and ended between
+    /// two of its looks.
+    fn passes_settled(&self) -> u64 {
+        self.activity
+            .as_ref()
+            .map_or(0, |activity| activity.passes().settled)
+    }
+
     /// Consume publications until a scheduler turn passes without one.
     async fn settle_burst(&mut self) {
         loop {
@@ -238,7 +247,9 @@ impl CodeIndexSchedulerRegistryV1 {
     /// parked worker installs no seat, so its park is the answer once the
     /// worker is back at a wait. A park the worker re-checks on every wake
     /// answers only after a pass since the wait began observed it again (each
-    /// observation rewrites it). An unmounted root is waited through; the
+    /// observation rewrites it) and some pass has settled since, even when the
+    /// worker is re-woken before the wait can catch it between passes. An
+    /// unmounted root is waited through; the
     /// probe decides whether that ends the wait. Dropping the future cancels
     /// the wait.
     pub(crate) async fn wait_for_seat<T, E, Probe>(
@@ -252,12 +263,18 @@ impl CodeIndexSchedulerRegistryV1 {
     {
         let mut signals = CodeIndexOwnerSignalsV1::subscribe(self, project_root).await;
         let park_at_start = self.convergence_park(project_root).await;
+        let settled_at_start = signals.passes_settled();
         loop {
             if let Some(ended) = probe(signals.owner_settled()).await? {
                 return Ok(ended);
             }
             if let Some(ended) = self
-                .seat_worker_end(project_root, &signals, park_at_start.as_ref())
+                .seat_worker_end(
+                    project_root,
+                    &signals,
+                    park_at_start.as_ref(),
+                    settled_at_start,
+                )
                 .await
             {
                 return Ok(ended);
@@ -279,6 +296,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         signals: &CodeIndexOwnerSignalsV1,
         park_at_start: Option<&CodeIndexConvergenceParkedV1>,
+        settled_at_start: u64,
     ) -> Option<CodeIndexSeatWaitV1<T>> {
         let canonical = canonical_existing_identity(project_root).ok()?;
         let (park, shutting_down) = {
@@ -297,8 +315,16 @@ impl CodeIndexSchedulerRegistryV1 {
             return Some(CodeIndexSeatWaitV1::Cancelled);
         }
         let parked = park?;
-        (signals.owner_settled() && (!parked.retries_on_wake || park_at_start != Some(&parked)))
-            .then(|| CodeIndexSeatWaitV1::Parked(CodeIndexSeatParkV1::Convergence(parked)))
+        // A worker re-woken as fast as it parks is never seen between passes,
+        // so a rewritten park ends the wait once any pass has settled since
+        // the wait began, not only at the instant the worker is back at a wait.
+        let ended = if parked.retries_on_wake {
+            park_at_start != Some(&parked)
+                && (signals.owner_settled() || signals.passes_settled() > settled_at_start)
+        } else {
+            signals.owner_settled()
+        };
+        ended.then(|| CodeIndexSeatWaitV1::Parked(CodeIndexSeatParkV1::Convergence(parked)))
     }
 
     /// Sweep the source witness now and post a wake for any proven change,

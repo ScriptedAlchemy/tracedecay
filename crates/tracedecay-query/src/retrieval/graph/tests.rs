@@ -24,8 +24,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
-    RetrievalExecutionControl,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1, RetrievalExecutionControl,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,

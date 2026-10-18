@@ -132,6 +132,13 @@ TEST_DATA = {
     ("tracedecay-code-index", "unit_test"): [
         "crates/tracedecay-code-extraction/fixtures/sample.astro",
     ],
+    ("tracedecay-code-index", "code_index_chunks"): [
+        "benchmark_data/query-code-index/workload-v1.json",
+        "//tests:fixtures",
+    ],
+    ("tracedecay-code-index", "partitioned_codec"): [
+        "//benchmark_data:index-bench",
+    ],
     ("tracedecay-query", "index_bench_workload"): [
         "benchmark_data/index-bench/README.md",
     ],
