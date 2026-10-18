@@ -55,6 +55,8 @@ struct FakeAttachment {
 struct FakeAttachmentControl {
     snapshot: Mutex<PhysicalRuntimeSnapshot>,
     fail_drain: AtomicBool,
+    file_lost: AtomicBool,
+    lost_file_closed: AtomicBool,
     retain_work_after_drain: AtomicBool,
     drain_calls: AtomicUsize,
     close_calls: AtomicUsize,
@@ -80,6 +82,8 @@ impl FakeAttachmentControl {
                 memory_estimate_bytes: Some(8_192),
             }),
             fail_drain: AtomicBool::new(false),
+            file_lost: AtomicBool::new(false),
+            lost_file_closed: AtomicBool::new(true),
             retain_work_after_drain: AtomicBool::new(false),
             drain_calls: AtomicUsize::new(0),
             close_calls: AtomicUsize::new(0),
@@ -97,6 +101,14 @@ impl PhysicalRuntimeAttachment for FakeAttachment {
 
     fn opened_file_identity(&self) -> Result<u64, String> {
         Ok(1)
+    }
+
+    fn file_lost(&self) -> bool {
+        self.control.file_lost.load(Ordering::SeqCst)
+    }
+
+    fn lost_file_closed(&self) -> bool {
+        self.control.lost_file_closed.load(Ordering::SeqCst)
     }
 
     fn drain(&self) -> Result<(), String> {
@@ -244,6 +256,42 @@ async fn publication_and_aliases_share_and_retain_one_physical_attachment() {
         physical.upgrade().is_some(),
         "registry retains physical lifetime"
     );
+}
+
+#[asupersync::test]
+async fn a_lost_runtime_stays_mapped_until_its_connections_close() {
+    let (registry, publisher) = attachment_registry();
+    let pin = profile_pin(&registry).await;
+    let request = code_request("worktree.lost-file", &pin);
+    let lost = open_published(&registry, request.clone()).await;
+    let control = publisher.control(1);
+    let published = publisher.calls.load(Ordering::SeqCst);
+    control.lost_file_closed.store(false, Ordering::SeqCst);
+    control.file_lost.store(true, Ordering::SeqCst);
+
+    assert!(matches!(
+        registry.lookup(lost.binding()),
+        StoreRuntimeLookup::Evicting { .. }
+    ));
+    assert!(matches!(
+        registry.open(request.clone()).await,
+        StoreRuntimeOpenResult::Failed(
+            StoreRuntimeRegistryFailure::RuntimeEvictionInProgress { .. }
+        )
+    ));
+    assert_eq!(
+        publisher.calls.load(Ordering::SeqCst),
+        published,
+        "no successor may publish beside connections still open on the lost file"
+    );
+
+    control.lost_file_closed.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        registry.lookup(lost.binding()),
+        StoreRuntimeLookup::Missing { .. }
+    ));
+    open_published(&registry, request).await;
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), published + 1);
 }
 
 #[asupersync::test]

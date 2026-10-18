@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -12,6 +12,7 @@ use tracedecay_contracts::context_scout::{
     ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1, ContextScoutLeaseV1,
     ContextScoutModelBackendV1, ContextScoutModelOutcomeV1, ContextScoutWorkV1,
 };
+use tracedecay_domain::configuration::{ContextScoutIntentKindV1, ContextScoutIntentSettingsV1};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookLifecyclePhaseV1, HookReadyGuidanceV1,
@@ -23,6 +24,9 @@ use super::address_registry::{
     ContextScoutConfigurationPinV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
 };
+use super::decision_engine::{
+    DecisionEngineClientV1, DecisionEngineConfigV1, DecisionEnginePortV1,
+};
 use super::model::{ContextScoutModelConfig, context_scout_model_assistant_from_project_config};
 use super::{
     ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1, ContextScoutControlV1,
@@ -32,9 +36,9 @@ use super::{
     ContextScoutModelExecutionV1, ContextScoutModelFuture, ContextScoutModelRequestV1,
     ContextScoutMutationBindingV1, ContextScoutMutationResultV1,
     ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
-    ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1,
-    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
-    ProjectContextScoutDurableStoreV1,
+    ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRouteV1,
+    ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
+    ContextScoutStatusV1, ContextScoutSuppressionV1, ProjectContextScoutDurableStoreV1,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -83,6 +87,30 @@ pub struct ProjectContextScoutOwnerV1 {
     next_inflight_id: AtomicU64,
     startup: ContextScoutDurableStartupOutcomeV1,
     claim_authorities: RwLock<Vec<MountedContextScoutClaimV1>>,
+    intent_engine: StdMutex<Option<InstalledIntentEngineV1>>,
+}
+
+/// The decision engine built from one installed intent configuration. It is
+/// rebuilt only when the pinned settings digest changes, so its concurrency
+/// bound spans every pass of that configuration.
+#[derive(Clone)]
+struct InstalledIntentEngineV1 {
+    settings_digest: [u8; 32],
+    engine: Arc<dyn DecisionEnginePortV1>,
+}
+
+/// What the session's Scout state says about one intent pass. Read across
+/// every address of the session, unlike the single-address reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextScoutIntentSessionStateV1 {
+    /// Another address of the session holds a suggestion still pending.
+    pub pending_sibling: bool,
+    /// A suggestion was delivered to the session within the configured
+    /// minimum delivery gap.
+    pub delivered_within_gap: bool,
+    pub delivered_dedupe_keys: BTreeSet<[u8; 32]>,
+    /// Intents an intent-pass suggestion already delivered this session.
+    pub delivered_intents: BTreeSet<ContextScoutIntentKindV1>,
 }
 
 fn registered_context_scout_owners() -> &'static StdMutex<ProjectContextScoutOwnerRegistry> {
@@ -174,6 +202,7 @@ impl ProjectContextScoutOwnerV1 {
             next_inflight_id: AtomicU64::new(1),
             startup,
             claim_authorities: RwLock::new(Vec::new()),
+            intent_engine: StdMutex::new(None),
         });
         let mut owners = registered_context_scout_owners().lock().ok()?;
         if let Some(existing) = owners.get(&project_id).and_then(Weak::upgrade)
@@ -297,7 +326,7 @@ impl ProjectContextScoutOwnerV1 {
         let authorities = self.claim_authorities.read().await;
         let mut matches = authorities
             .iter()
-            .filter(|mounted| same_routed_session(&mounted.lifecycle, lifecycle));
+            .filter(|mounted| same_routed_native_session(&mounted.lifecycle, lifecycle));
         let mounted = matches.next()?;
         matches.next().is_none().then(|| mounted.pin.clone())
     }
@@ -317,7 +346,7 @@ impl ProjectContextScoutOwnerV1 {
             let authorities = self.claim_authorities.read().await;
             let mut matches = authorities
                 .iter()
-                .filter(|mounted| same_routed_session(&mounted.lifecycle, lifecycle));
+                .filter(|mounted| same_routed_native_session(&mounted.lifecycle, lifecycle));
             let mounted = matches.next()?.clone();
             if matches.next().is_some() {
                 return None;
@@ -639,8 +668,125 @@ impl ProjectContextScoutOwnerV1 {
         let mut runtime = self.runtime.lock().await;
         runtime.status(control)?;
         runtime.replace_model(model);
+        self.refresh_intent_engine(&pin);
         *configuration = Some(pin);
         Ok(())
+    }
+
+    /// Keeps the installed decision engine when the pinned intent settings
+    /// are unchanged, builds one when they changed, and drops it when the
+    /// pass is disabled or absent. A configuration the client refuses leaves
+    /// no engine, which the pass reports as an unavailable engine.
+    fn refresh_intent_engine(&self, pin: &ContextScoutConfigurationPinV1) {
+        let Ok(mut installed) = self.intent_engine.lock() else {
+            return;
+        };
+        let (Some(control), Some(settings)) = (pin.control().intent, pin.intent_settings()) else {
+            *installed = None;
+            return;
+        };
+        if !control.enabled {
+            *installed = None;
+            return;
+        }
+        if installed
+            .as_ref()
+            .is_some_and(|current| current.settings_digest == control.settings_digest)
+        {
+            return;
+        }
+        *installed = intent_engine_client(settings).map(|engine| InstalledIntentEngineV1 {
+            settings_digest: control.settings_digest,
+            engine,
+        });
+    }
+
+    /// The decision engine of the currently installed intent configuration.
+    pub async fn intent_engine(&self) -> Option<Arc<dyn DecisionEnginePortV1>> {
+        let digest = self
+            .configuration
+            .read()
+            .await
+            .as_ref()?
+            .control()
+            .intent
+            .filter(|intent| intent.enabled)?
+            .settings_digest;
+        self.intent_engine
+            .lock()
+            .ok()?
+            .as_ref()
+            .filter(|installed| installed.settings_digest == digest)
+            .map(|installed| Arc::clone(&installed.engine))
+    }
+
+    /// Reads the session's Scout state for one intent pass whose suggestions
+    /// live at `intent_address`. Pending work at that address is the pass's
+    /// own superseded generation, never a sibling.
+    pub async fn intent_session_state(
+        &self,
+        intent_address: ContextScoutAddressV1,
+        now: UtcMicros,
+        min_delivery_gap_micros: i64,
+    ) -> Result<ContextScoutIntentSessionStateV1, ContextScoutErrorV1> {
+        let configuration = self.configuration.read().await;
+        let control = configuration
+            .as_ref()
+            .ok_or(ContextScoutErrorV1::ConfigurationUnavailable)?
+            .control();
+        let recent = match self
+            .store
+            .recent_for_protected_session(
+                intent_address.protected_session_id,
+                control.configuration_revision,
+                now,
+                STARTUP_RECOVERY_LIMIT,
+            )
+            .await
+        {
+            ContextScoutRecentReadOutcomeV1::Ready(recent) => recent,
+            ContextScoutRecentReadOutcomeV1::Unavailable => {
+                return Err(ContextScoutErrorV1::ConfigurationUnavailable);
+            }
+        };
+        Ok(intent_session_state(
+            &recent,
+            intent_address,
+            now,
+            min_delivery_gap_micros,
+        ))
+    }
+
+    /// Prepares one intent-pass selection. A suggestion pending at another
+    /// address of the same session is suppressed as `PendingSibling`: the
+    /// hook claim path refuses a session with more than one pending entry.
+    pub async fn prepare_intent(
+        &self,
+        input: &ContextScoutSelectionInputV1,
+        deadline: MonotonicDeadline,
+        cancellation: CancellationToken,
+    ) -> Result<ContextScoutRuntimeOutcomeV1, ContextScoutErrorV1> {
+        let state = self
+            .intent_session_state(input.address, input.now, 0)
+            .await?;
+        if state.pending_sibling {
+            let mut runtime = self.runtime.lock().await;
+            runtime.last_route = Some(ContextScoutRouteV1::DecisionEngine);
+            runtime.last_suppression = Some(ContextScoutSuppressionV1::PendingSibling);
+            return Ok(ContextScoutRuntimeOutcomeV1::Suppressed {
+                reason: ContextScoutSuppressionV1::PendingSibling,
+            });
+        }
+        self.prepare_configured(input, deadline, cancellation).await
+    }
+
+    /// Records an intent pass that ended before selection (no candidate, or
+    /// an engine failure with no action fact). The model slot describes the
+    /// configured model and is left untouched.
+    pub async fn record_intent_outcome(&self, suppression: ContextScoutSuppressionV1) {
+        let mut runtime = self.runtime.lock().await;
+        runtime.last_route = Some(ContextScoutRouteV1::DecisionEngine);
+        runtime.last_suppression = Some(suppression);
     }
 
     /// Installs only an admitted active/paused control transition while
@@ -936,15 +1082,69 @@ impl ProjectContextScoutOwnerV1 {
     }
 }
 
-fn same_routed_session(
-    left: &ContextScoutLifecycleAddressV1,
-    right: &ContextScoutLifecycleAddressV1,
+/// A producer mounted for a native lifecycle of the same routed session. The
+/// session's intent-scoped mount is resolved by its own exact address, so it
+/// never makes the native producer ambiguous.
+fn same_routed_native_session(
+    mounted: &ContextScoutLifecycleAddressV1,
+    requested: &ContextScoutLifecycleAddressV1,
 ) -> bool {
-    left.profile_id == right.profile_id
-        && left.provider_id == right.provider_id
-        && left.project_id == right.project_id
-        && left.worktree_id == right.worktree_id
-        && left.session_id == right.session_id
+    mounted.profile_id == requested.profile_id
+        && mounted.provider_id == requested.provider_id
+        && mounted.project_id == requested.project_id
+        && mounted.worktree_id == requested.worktree_id
+        && mounted.session_id == requested.session_id
+        && !mounted.is_intent_scoped()
+}
+
+fn intent_engine_client(
+    settings: &ContextScoutIntentSettingsV1,
+) -> Option<Arc<dyn DecisionEnginePortV1>> {
+    let client = DecisionEngineClientV1::new(DecisionEngineConfigV1 {
+        base_url: settings.engine.base_url.clone(),
+        model: settings.engine.model.clone(),
+        timeout: std::time::Duration::from_millis(u64::from(settings.engine.timeout_ms)),
+        max_concurrent: usize::from(settings.engine.max_concurrent),
+        max_state_bytes: usize::try_from(settings.engine.max_state_bytes).ok()?,
+    });
+    match client {
+        Ok(client) => Some(Arc::new(client)),
+        Err(error) => {
+            tracing::warn!(%error, "Context Scout decision engine configuration refused");
+            None
+        }
+    }
+}
+
+fn intent_session_state(
+    recent: &ContextScoutRecentStateV1,
+    intent_address: ContextScoutAddressV1,
+    now: UtcMicros,
+    min_delivery_gap_micros: i64,
+) -> ContextScoutIntentSessionStateV1 {
+    let gap_start = now.0.saturating_sub(min_delivery_gap_micros);
+    ContextScoutIntentSessionStateV1 {
+        pending_sibling: recent
+            .pending
+            .iter()
+            .any(|entry| entry.work.address != intent_address),
+        delivered_within_gap: min_delivery_gap_micros > 0
+            && recent
+                .deliveries
+                .iter()
+                .any(|delivery| delivery.receipt.delivered_at.0 > gap_start),
+        delivered_dedupe_keys: recent
+            .deliveries
+            .iter()
+            .map(|delivery| delivery.entry.envelope.candidate.dedupe_key)
+            .collect(),
+        delivered_intents: recent
+            .deliveries
+            .iter()
+            .filter_map(|delivery| delivery.entry.envelope.candidate.evidence.as_session())
+            .map(|evidence| evidence.decision.selected)
+            .collect(),
+    }
 }
 
 fn context_scout_state_transition_is_exact(
@@ -955,6 +1155,7 @@ fn context_scout_state_transition_is_exact(
         && current.mode == next.mode
         && current.model_path == next.model_path
         && current.limits == next.limits
+        && current.intent == next.intent
         && matches!(
             (current.state, next.state),
             (
@@ -1014,17 +1215,25 @@ fn status_with_recent(
     recent: &ContextScoutRecentStateV1,
 ) -> ContextScoutStatusV1 {
     status.active_suggestions = recent.pending.len();
-    let Some(entry) = recent
-        .pending
-        .iter()
-        .chain(recent.deliveries.iter().map(|delivery| &delivery.entry))
-        .max_by_key(|entry| entry.envelope.candidate.expires_at)
-    else {
+    let entries = || {
+        recent
+            .pending
+            .iter()
+            .chain(recent.deliveries.iter().map(|delivery| &delivery.entry))
+    };
+    let Some(entry) = entries().max_by_key(|entry| entry.envelope.candidate.expires_at) else {
         return status;
     };
     status.last_route = Some(entry.route);
-    status.last_model_outcome = Some(entry.model_outcome);
-    status.last_model_receipt.clone_from(&entry.model_receipt);
+    if let Some(model_entry) = entries()
+        .filter(|entry| entry.route != ContextScoutRouteV1::DecisionEngine)
+        .max_by_key(|entry| entry.envelope.candidate.expires_at)
+    {
+        status.last_model_outcome = Some(model_entry.model_outcome);
+        status
+            .last_model_receipt
+            .clone_from(&model_entry.model_receipt);
+    }
     if let Some(delivered) = recent
         .deliveries
         .iter()
@@ -1096,6 +1305,9 @@ mod tests {
     use super::super::address_registry::ContextScoutAddressBindOutcomeV1;
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
+    use tracedecay_contracts::context_scout::{
+        ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutModelReceiptV1,
+    };
     use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
@@ -1105,7 +1317,9 @@ mod tests {
     use tracedecay_domain::configuration::{
         CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CandidateDispositionV1, ConfigurationCandidateV1,
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
-        ConfigurationValueV1, ContextScoutSettingsV1, SettingKey,
+        ConfigurationValueV1, ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
+        ContextScoutConfiguredModelPathV1, ContextScoutSettingsV1, DecisionEngineSettingsV1,
+        IntentWindowSettingsV1, SettingKey,
     };
     use tracedecay_domain::feedback::FeedbackScopeV1;
     use tracedecay_domain::{ActorId, RepositoryId, WorktreeId};
@@ -1124,6 +1338,7 @@ mod tests {
             mode: super::super::ContextScoutRuntimeModeV1::ConfiguredModel,
             model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
             limits: super::super::ContextScoutLimitsV1::bounded_defaults(),
+            intent: None,
         };
         let paused = ContextScoutControlV1 {
             configuration_revision: [2; 32],
@@ -1151,6 +1366,18 @@ mod tests {
         assert!(!context_scout_state_transition_is_exact(
             current,
             changed_limits
+        ));
+
+        let changed_intent = ContextScoutControlV1 {
+            intent: Some(super::super::ContextScoutIntentControlV1 {
+                enabled: true,
+                settings_digest: [9; 32],
+            }),
+            ..paused
+        };
+        assert!(!context_scout_state_transition_is_exact(
+            current,
+            changed_intent
         ));
     }
 
@@ -1213,6 +1440,46 @@ mod tests {
             ContextScoutDeliveryWindowV1::IdleWindow,
             &session_end,
         ));
+
+        // An intent-pass suggestion is claimable at the first later boundary
+        // of any kind, including the phase-two prompt lookup, unless quiet
+        // mode or a delivery inside the spacing gap withholds it from hooks.
+        let intent_window = |quiet_mode, has_recent_delivery| {
+            super::super::select_context_scout_delivery_window(
+                &super::super::ContextScoutDeliverySelectionInputV1 {
+                    trigger: super::super::ContextScoutTriggerV1::IntentBoundary,
+                    quiet_mode,
+                    has_recent_delivery,
+                    has_unresolved_interaction: false,
+                    critical_safety_evidence: false,
+                    delivered_dedupe_keys: BTreeSet::new(),
+                },
+            )
+        };
+        assert_eq!(
+            intent_window(false, false),
+            ContextScoutDeliveryWindowV1::Immediate
+        );
+        for boundary in [&prompt_boundary, &tool_completed, &session_end] {
+            assert!(delivery_window_admitted_at_hook(
+                intent_window(false, false),
+                boundary,
+            ));
+        }
+        assert_eq!(
+            intent_window(true, false),
+            ContextScoutDeliveryWindowV1::Suppressed
+        );
+        assert_eq!(
+            intent_window(false, true),
+            ContextScoutDeliveryWindowV1::IdleWindow
+        );
+        for boundary in [&prompt_boundary, &tool_completed, &session_end] {
+            assert!(!delivery_window_admitted_at_hook(
+                intent_window(false, true),
+                boundary,
+            ));
+        }
     }
 
     #[test]
@@ -1614,6 +1881,62 @@ mod tests {
             Some((producer_address, [1; 32]))
         );
 
+        // The session's intent-scoped lifecycle is one address for every
+        // turn: it binds beside the native lifecycle, rebinds to the same
+        // address, and resolves only by its own exact lifecycle, so it never
+        // makes the native producer ambiguous.
+        let intent_lifecycle = later_lifecycle.intent_scoped().expect("intent lifecycle");
+        assert!(intent_lifecycle.is_intent_scoped());
+        assert!(!later_lifecycle.is_intent_scoped());
+        assert_eq!(
+            claim_lifecycle(7).intent_scoped(),
+            Some(intent_lifecycle.clone())
+        );
+        let intent_address = match registry.bind(&hook, &pin, intent_lifecycle.clone()).await {
+            ContextScoutAddressBindOutcomeV1::Bound(address) => address,
+            other => panic!("expected intent address, got {other:?}"),
+        };
+        assert_eq!(
+            registry.bind(&hook, &pin, intent_lifecycle.clone()).await,
+            ContextScoutAddressBindOutcomeV1::Existing(intent_address)
+        );
+        assert_eq!(
+            owner
+                .mount_current_claim_authority(
+                    Arc::clone(&registry),
+                    &hook,
+                    1,
+                    pin.clone(),
+                    context.clone(),
+                    intent_lifecycle.clone(),
+                    intent_address,
+                    [3; 32],
+                    observed_at,
+                    true,
+                )
+                .await,
+            ContextScoutClaimAdmissionV1::Mounted
+        );
+        assert_eq!(
+            owner
+                .resolve_current_session_claim_authority(
+                    &hook,
+                    &later_lifecycle,
+                    &pin,
+                    observed_at,
+                    true,
+                )
+                .await,
+            Some((producer_address, [1; 32])),
+            "the intent mount never makes the session's native producer ambiguous"
+        );
+        assert_eq!(
+            owner
+                .resolve_current_claim_authority(&hook, &intent_lifecycle, observed_at, true)
+                .await,
+            Some((intent_address, [3; 32]))
+        );
+
         let second_address = match registry.bind(&hook, &pin, later_lifecycle.clone()).await {
             ContextScoutAddressBindOutcomeV1::Bound(address) => address,
             other => panic!("expected second producer address, got {other:?}"),
@@ -1782,13 +2105,12 @@ mod tests {
                 input_watermark,
                 configuration_revision: pin.configuration().control().configuration_revision,
                 delivery_window: ContextScoutDeliveryWindowV1::Immediate,
-                candidate: tracedecay_contracts::context_scout::ContextScoutCandidateV1 {
+                candidate: ContextScoutCandidateV1 {
                     dedupe_key: [18; 32],
-                    category:
-                        tracedecay_contracts::context_scout::ContextScoutCategoryV1::Retrieval,
+                    category: ContextScoutCategoryV1::Retrieval,
                     relevance_score: 10,
                     suggestion_text: "Use the saved diagnostic anchor.".to_owned(),
-                    evidence: super::super::evidence::fixture_context_scout_evidence(),
+                    evidence: super::super::evidence::fixture_context_scout_evidence().into(),
                     expires_at: UtcMicros(1_000),
                 },
             },
@@ -1836,6 +2158,387 @@ mod tests {
             "a foreign event must not acquire an active lease"
         );
         unregister(address.project_id, &owner);
+    }
+
+    fn active_intent_configuration(base: ContextScoutSettingsV1) -> ContextScoutConfigurationPinV1 {
+        let setting_key = SettingKey::new(CONTEXT_SCOUT_SETTINGS_SETTING_KEY).expect("setting");
+        let revision_id = ConfigurationRevisionId::new("revision.scout.intent").expect("revision");
+        let settings = ContextScoutSettingsV1 {
+            state: ContextScoutConfigurationStateV1::Active,
+            intent: Some(ContextScoutIntentSettingsV1 {
+                enabled: true,
+                engine: DecisionEngineSettingsV1 {
+                    base_url: "http://127.0.0.1:9".to_owned(),
+                    model: Some("intent-small".to_owned()),
+                    timeout_ms: 250,
+                    max_concurrent: 1,
+                    max_state_bytes: 4_096,
+                },
+                window: IntentWindowSettingsV1 {
+                    max_user_turns: 2,
+                    max_messages: 8,
+                    max_bytes: 4_096,
+                    max_age_secs: 600,
+                    freshen_budget_ms: 0,
+                },
+                questions: ContextScoutIntentSettingsV1::reference_questions(),
+                action_fact_score_permille: 700,
+                ttl_secs: 600,
+                min_delivery_gap_secs: 30,
+                prompt_lookup_deadline_ms: 200,
+            }),
+            ..base
+        };
+        settings.validate().expect("intent settings");
+        let snapshot = ConfigurationSnapshotV1::new(
+            BTreeMap::from([(
+                setting_key.clone(),
+                ConfigurationValueV1::ContextScoutSettings(settings),
+            )]),
+            BTreeMap::from([(
+                setting_key,
+                vec![ConfigurationCandidateV1 {
+                    layer: ConfigurationLayerIdV1::Project {
+                        project_id: claim_id("project.scout.fixture"),
+                    },
+                    revision_id: revision_id.clone(),
+                    disposition: CandidateDispositionV1::Winning,
+                    safe_reason: None,
+                }],
+            )]),
+        )
+        .expect("snapshot");
+        ContextScoutConfigurationPinV1::from_current(&ConfigurationCurrentStateV1 {
+            revision_id,
+            snapshot,
+        })
+        .expect("intent configuration pin")
+    }
+
+    #[tokio::test]
+    async fn intent_entries_refuse_a_pending_sibling_and_supersede_their_own_generation() {
+        let (_registry_temporary, registry_database) = test_database().await;
+        let (_registry, admitted, _pin, _context, observed_at) =
+            claim_mount_authority(registry_database);
+        let sibling_address = ContextScoutAddressV1 {
+            profile_id: [1; 16],
+            provider_id: [2; 16],
+            protected_session_id: admitted.envelope().protected_session_id,
+            thread_id: [3; 16],
+            turn_id: [4; 16],
+            agent_id: [5; 16],
+            logical_message_id: [6; 16],
+            project_id: admitted.envelope().project_id,
+        };
+        let intent_address = ContextScoutAddressV1 {
+            thread_id: [11; 16],
+            turn_id: [11; 16],
+            agent_id: [11; 16],
+            logical_message_id: [11; 16],
+            ..sibling_address
+        };
+        let (_owner_temporary, owner_database) = test_database().await;
+        let owner = ProjectContextScoutOwnerV1::startup(
+            owner_database,
+            sibling_address.project_id,
+            UtcMicros(1),
+            None,
+        )
+        .await
+        .expect("owner");
+        let configuration = active_intent_configuration(ContextScoutSettingsV1::disabled());
+        owner
+            .install_configuration(configuration.clone(), None)
+            .await
+            .expect("intent configuration");
+        let engine = owner.intent_engine().await.expect("installed engine");
+        owner
+            .install_configuration(configuration.clone(), None)
+            .await
+            .expect("reinstalled intent configuration");
+        assert!(
+            Arc::ptr_eq(
+                &engine,
+                &owner.intent_engine().await.expect("installed engine")
+            ),
+            "unchanged intent settings keep the installed engine"
+        );
+        let revision = configuration.control().configuration_revision;
+        // Recent reads filter on the wall clock; keep the fixture unexpired.
+        let expires_at = UtcMicros(4_000_000_000_000_000);
+
+        let sibling = ContextScoutDurableQueueEntryV1 {
+            work: ContextScoutWorkV1 {
+                address: sibling_address,
+                generation: 1,
+                input_watermark: [14; 32],
+            },
+            route: super::super::ContextScoutRouteV1::Deterministic,
+            model_outcome: ContextScoutModelOutcomeV1::NotRequested,
+            model_receipt: None,
+            envelope: tracedecay_contracts::context_scout::ContextScoutSuggestionEnvelopeV1 {
+                envelope_id: [17; 16],
+                address: sibling_address,
+                input_watermark: [14; 32],
+                configuration_revision: revision,
+                delivery_window: ContextScoutDeliveryWindowV1::NextBoundary,
+                candidate: ContextScoutCandidateV1 {
+                    dedupe_key: [18; 32],
+                    category: ContextScoutCategoryV1::Diagnostic,
+                    relevance_score: 10,
+                    suggestion_text: "Use the saved diagnostic anchor.".to_owned(),
+                    evidence: super::super::evidence::fixture_context_scout_evidence().into(),
+                    expires_at,
+                },
+            },
+        };
+        assert_eq!(
+            owner.store().enqueue(sibling.clone()).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+
+        let evidence = super::super::evidence::fixture_context_scout_session_evidence();
+        let intent_input = |envelope: u8, watermark: u8| ContextScoutSelectionInputV1 {
+            address: intent_address,
+            input_watermark: [watermark; 32],
+            configuration_revision: revision,
+            envelope_id: [envelope; 16],
+            now: UtcMicros(observed_at.0 + 1),
+            delivery_window: ContextScoutDeliveryWindowV1::Immediate,
+            delivered_dedupe_keys: BTreeSet::new(),
+            candidates: vec![ContextScoutCandidateV1 {
+                dedupe_key: [21; 32],
+                category: ContextScoutCategoryV1::Retrieval,
+                relevance_score: 900,
+                suggestion_text: "tracedecay hint: recall the earlier session.".to_owned(),
+                evidence: evidence.clone().into(),
+                expires_at,
+            }],
+        };
+        let deadline =
+            || MonotonicDeadline::at(std::time::Instant::now() + std::time::Duration::from_secs(1));
+
+        assert_eq!(
+            owner
+                .prepare_intent(&intent_input(22, 23), deadline(), CancellationToken::new())
+                .await
+                .expect("prepare beside a sibling"),
+            ContextScoutRuntimeOutcomeV1::Suppressed {
+                reason: ContextScoutSuppressionV1::PendingSibling,
+            }
+        );
+        assert_eq!(
+            owner
+                .configured_status()
+                .await
+                .expect("status")
+                .last_suppression,
+            Some(ContextScoutSuppressionV1::PendingSibling)
+        );
+        assert_eq!(
+            owner
+                .recent_exact(intent_address, 8)
+                .await
+                .expect("intent address")
+                .pending
+                .len(),
+            0,
+            "a suppressed pass enqueues nothing"
+        );
+
+        assert_eq!(
+            owner.store().cancel_work(sibling.work).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        let ContextScoutRuntimeOutcomeV1::Enqueued { entry: first, .. } = owner
+            .prepare_intent(&intent_input(22, 23), deadline(), CancellationToken::new())
+            .await
+            .expect("prepare without a sibling")
+        else {
+            panic!("an intent entry without a pending sibling must enqueue");
+        };
+        assert_eq!(first.route, ContextScoutRouteV1::DecisionEngine);
+        assert_eq!(first.model_outcome, evidence.decision.outcome);
+        assert_eq!(first.model_receipt, None);
+        assert_eq!(first.work.generation, 1);
+        let status = owner.configured_status().await.expect("status");
+        assert_eq!(status.last_route, Some(ContextScoutRouteV1::DecisionEngine));
+        assert_eq!(
+            status.last_model_outcome, None,
+            "the model slot describes the configured model, not the intent engine"
+        );
+
+        let ContextScoutRuntimeOutcomeV1::Enqueued { entry: second, .. } = owner
+            .prepare_intent(&intent_input(24, 25), deadline(), CancellationToken::new())
+            .await
+            .expect("newer pass")
+        else {
+            panic!("a newer pass at the intent address must enqueue");
+        };
+        assert_eq!(second.work.generation, 2);
+        let recent = owner
+            .recent_exact(intent_address, 8)
+            .await
+            .expect("intent address");
+        assert_eq!(
+            recent.pending,
+            vec![*second.clone()],
+            "a newer pass supersedes the older generation at the one intent address"
+        );
+
+        let (guidance, claim) = owner
+            .claim_ready_guidance_exact(
+                admitted.envelope(),
+                intent_address,
+                [25; 32],
+                1,
+                UtcMicros(observed_at.0 + 2),
+            )
+            .await
+            .expect("intent guidance claims at the next hook boundary");
+        assert_eq!(guidance.guidance_id, [24; 16]);
+        let delivered_at = UtcMicros(observed_at.0 + 3);
+        assert_eq!(
+            owner
+                .record_delivery(
+                    &claim,
+                    &ContextScoutDeliveryReceiptV1 {
+                        receipt_id: super::super::context_scout_delivery_receipt_id(
+                            admitted.envelope().event_id,
+                            guidance.guidance_id,
+                        ),
+                        envelope_id: guidance.guidance_id,
+                        delivered_at,
+                        outcome: super::super::ContextScoutDeliveryOutcomeV1::Displayed,
+                    },
+                )
+                .await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        let gap = 30_000_000;
+        let spaced = owner
+            .intent_session_state(intent_address, UtcMicros(delivered_at.0 + 1), gap)
+            .await
+            .expect("session state");
+        assert!(!spaced.pending_sibling);
+        assert!(spaced.delivered_within_gap);
+        assert_eq!(
+            spaced.delivered_intents,
+            BTreeSet::from([ContextScoutIntentKindV1::SessionRecall])
+        );
+        assert!(spaced.delivered_dedupe_keys.contains(&[21; 32]));
+        let after_gap = owner
+            .intent_session_state(intent_address, UtcMicros(delivered_at.0 + gap + 1), gap)
+            .await
+            .expect("session state after the gap");
+        assert!(
+            !after_gap.delivered_within_gap,
+            "spacing counts deliveries inside the gap, not every delivery ever"
+        );
+        assert_eq!(after_gap.delivered_intents, spaced.delivered_intents);
+        unregister(sibling_address.project_id, &owner);
+    }
+
+    #[tokio::test]
+    async fn intent_pass_outcomes_leave_the_configured_model_slot_alone() {
+        let (_temporary, database) = test_database().await;
+        let owner = ProjectContextScoutOwnerV1::startup(database, [43; 16], UtcMicros(1), None)
+            .await
+            .expect("owner");
+        let configuration = active_intent_configuration(ContextScoutSettingsV1 {
+            mode: ContextScoutConfigurationModeV1::ConfiguredModel,
+            model_path: Some(ContextScoutConfiguredModelPathV1::CodexAppServer),
+            model_id: Some("configured-test-model".to_owned()),
+            model_timeout_secs: Some(60),
+            ..ContextScoutSettingsV1::disabled()
+        });
+        let revision = configuration.control().configuration_revision;
+        owner
+            .install_configuration(configuration, None)
+            .await
+            .expect("configured model installation");
+
+        owner.runtime.lock().await.last_model_outcome = Some(ContextScoutModelOutcomeV1::Succeeded);
+        owner
+            .record_intent_outcome(ContextScoutSuppressionV1::NoEligibleCandidate)
+            .await;
+        let capability = owner.capability().await.expect("capability");
+        assert!(capability.configured_model_available);
+        assert_eq!(
+            capability.last_model_outcome,
+            Some(ContextScoutModelOutcomeV1::Succeeded)
+        );
+
+        {
+            let mut runtime = owner.runtime.lock().await;
+            runtime.last_model_outcome = Some(ContextScoutModelOutcomeV1::TokenBudgetExceeded);
+            runtime.last_model_receipt = Some(ContextScoutModelReceiptV1 {
+                requested_backend: ContextScoutModelBackendV1::CodexAppServer,
+                actual_provider: Some("codex".to_owned()),
+                actual_model: Some("configured-test-model".to_owned()),
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                estimated_cost_microusd: Some(1),
+            });
+        }
+        let address = ContextScoutAddressV1 {
+            profile_id: [1; 16],
+            provider_id: [2; 16],
+            protected_session_id: [3; 32],
+            thread_id: [4; 16],
+            turn_id: [5; 16],
+            agent_id: [6; 16],
+            logical_message_id: [7; 16],
+            project_id: [43; 16],
+        };
+        let evidence = super::super::evidence::fixture_context_scout_session_evidence();
+        let intent_entry = ContextScoutDurableQueueEntryV1 {
+            work: ContextScoutWorkV1 {
+                address,
+                generation: 1,
+                input_watermark: [8; 32],
+            },
+            route: ContextScoutRouteV1::DecisionEngine,
+            model_outcome: evidence.decision.outcome,
+            model_receipt: None,
+            envelope: tracedecay_contracts::context_scout::ContextScoutSuggestionEnvelopeV1 {
+                envelope_id: [9; 16],
+                address,
+                input_watermark: [8; 32],
+                configuration_revision: revision,
+                delivery_window: ContextScoutDeliveryWindowV1::NextBoundary,
+                candidate: ContextScoutCandidateV1 {
+                    dedupe_key: [10; 32],
+                    category: ContextScoutCategoryV1::Retrieval,
+                    relevance_score: 900,
+                    suggestion_text: "tracedecay hint: recall the earlier session.".to_owned(),
+                    evidence: evidence.into(),
+                    expires_at: UtcMicros(4_000_000_000_000_000),
+                },
+            },
+        };
+        assert_eq!(
+            owner.store().enqueue(intent_entry).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        owner
+            .record_intent_outcome(ContextScoutSuppressionV1::NoEligibleCandidate)
+            .await;
+
+        let budget = owner.budget().await.expect("budget");
+        assert!(budget.exhausted);
+        assert_eq!(
+            budget.last_model_outcome,
+            Some(ContextScoutModelOutcomeV1::TokenBudgetExceeded)
+        );
+        assert_eq!(
+            (budget.last_input_tokens, budget.last_output_tokens),
+            (Some(10), Some(5))
+        );
+        assert_eq!(
+            owner.configured_status().await.expect("status").last_route,
+            Some(ContextScoutRouteV1::DecisionEngine)
+        );
     }
 
     #[tokio::test]

@@ -7,9 +7,11 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
+pub use tracedecay_domain::configuration::{ContextScoutIntentKindV1, IntentDecisionSourceV1};
 use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, RetrievalAnchorId, SanitizationReceiptId, UtcMicros,
+    CodeGenerationId, ManifestDigest, ProviderId, RetrievalAnchorId, SanitizationReceiptId,
+    SessionId, UtcMicros,
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, AvailabilityContract, BindingSurface, CancellationContract,
@@ -120,6 +122,9 @@ pub enum ContextScoutRouteV1 {
     Deterministic,
     ModelAssisted,
     DeterministicFallback,
+    /// Produced by the session intent pass: decision-engine answers combined
+    /// with deterministic action facts.
+    DecisionEngine,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -128,6 +133,7 @@ pub enum ContextScoutModelBackendV1 {
     Disabled,
     CodexAppServer,
     Unsupported,
+    DecisionEngine,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -144,6 +150,8 @@ pub enum ContextScoutModelOutcomeV1 {
     DeadlineExceeded,
     TokenBudgetExceeded,
     InvalidOutput,
+    /// The engine's concurrency bound was full; the request was not sent.
+    Backpressured,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -176,6 +184,8 @@ pub enum ContextScoutSuppressionV1 {
     EvidencePartial,
     EvidenceStale,
     EvidenceUnavailable,
+    /// A suggestion for the same session is already pending delivery.
+    PendingSibling,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -256,6 +266,10 @@ pub struct ContextScoutEvidenceProjectionV1 {
     pub availability: ContextScoutEvidenceAvailabilityV1,
     pub anchor_ids: Vec<RetrievalAnchorId>,
     pub claim_digest: ManifestDigest,
+    /// Session turns a session-evidence suggestion was judged from. Absent for
+    /// code evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_window: Option<ContextScoutSessionWindowV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -321,8 +335,166 @@ pub struct ContextScoutCandidateV1 {
     pub category: ContextScoutCategoryV1,
     pub relevance_score: u16,
     pub suggestion_text: String,
-    pub evidence: ContextScoutEvidenceEnvelopeV1,
+    pub evidence: ContextScoutCandidateEvidenceV1,
     pub expires_at: UtcMicros,
+}
+
+/// Evidence one candidate is pinned to: a saved-code claim, or the session
+/// window an intent pass judged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ContextScoutCandidateEvidenceV1 {
+    Code(ContextScoutEvidenceEnvelopeV1),
+    Session(ContextScoutSessionEvidenceV1),
+}
+
+impl ContextScoutCandidateEvidenceV1 {
+    pub const fn as_code(&self) -> Option<&ContextScoutEvidenceEnvelopeV1> {
+        match self {
+            Self::Code(evidence) => Some(evidence),
+            Self::Session(_) => None,
+        }
+    }
+
+    pub const fn as_code_mut(&mut self) -> Option<&mut ContextScoutEvidenceEnvelopeV1> {
+        match self {
+            Self::Code(evidence) => Some(evidence),
+            Self::Session(_) => None,
+        }
+    }
+
+    pub const fn as_session(&self) -> Option<&ContextScoutSessionEvidenceV1> {
+        match self {
+            Self::Code(_) => None,
+            Self::Session(evidence) => Some(evidence),
+        }
+    }
+
+    pub const fn availability(&self) -> ContextScoutEvidenceAvailabilityV1 {
+        match self {
+            Self::Code(evidence) => evidence.availability,
+            Self::Session(evidence) => evidence.availability,
+        }
+    }
+
+    pub const fn authority(&self) -> &AuthorityReceipt {
+        match self {
+            Self::Code(evidence) => &evidence.authority,
+            Self::Session(evidence) => &evidence.authority,
+        }
+    }
+
+    pub const fn redaction(&self) -> &ContextScoutRedactionReceiptV1 {
+        match self {
+            Self::Code(evidence) => &evidence.redaction,
+            Self::Session(evidence) => &evidence.redaction,
+        }
+    }
+
+    pub const fn authorized_scope(&self) -> &ResolvedScope {
+        match self {
+            Self::Code(evidence) => &evidence.authorized_scope,
+            Self::Session(evidence) => &evidence.authorized_scope,
+        }
+    }
+
+    pub const fn claim_digest(&self) -> &ManifestDigest {
+        match self {
+            Self::Code(evidence) => &evidence.claim_digest,
+            Self::Session(evidence) => &evidence.claim_digest,
+        }
+    }
+
+    pub const fn claimed_at(&self) -> UtcMicros {
+        match self {
+            Self::Code(evidence) => evidence.claimed_at,
+            Self::Session(evidence) => evidence.claimed_at,
+        }
+    }
+
+    /// Saved code generation the evidence was claimed against, when any.
+    pub const fn code_generation_id(&self) -> Option<&CodeGenerationId> {
+        match self {
+            Self::Code(evidence) => Some(&evidence.code_generation_id),
+            Self::Session(evidence) => evidence.code_generation_id.as_ref(),
+        }
+    }
+}
+
+impl From<ContextScoutEvidenceEnvelopeV1> for ContextScoutCandidateEvidenceV1 {
+    fn from(evidence: ContextScoutEvidenceEnvelopeV1) -> Self {
+        Self::Code(evidence)
+    }
+}
+
+impl From<ContextScoutSessionEvidenceV1> for ContextScoutCandidateEvidenceV1 {
+    fn from(evidence: ContextScoutSessionEvidenceV1) -> Self {
+        Self::Session(evidence)
+    }
+}
+
+/// Exact bounded span of one session's transcript an intent pass read. The
+/// window body is never retained; only its digest and store-id bounds are.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutSessionWindowV1 {
+    pub first_store_id: i64,
+    pub last_store_id: i64,
+    pub message_count: u16,
+    pub window_digest: ManifestDigest,
+    pub newest_timestamp: Option<i64>,
+}
+
+/// Identity of the decision engine that answered. The endpoint is retained
+/// only as a digest.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionEngineIdentityV1 {
+    pub base_url_digest: ManifestDigest,
+    pub model: Option<String>,
+}
+
+/// One engine answer for one configured intent question.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutIntentAnswerV1 {
+    pub intent: ContextScoutIntentKindV1,
+    pub probability_permille: u16,
+    pub threshold_permille: u16,
+}
+
+/// Why the intent pass selected one intent: the engine outcome and answers,
+/// the deterministic action facts, and which of them carried the selection.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutIntentReceiptV1 {
+    pub engine: Option<DecisionEngineIdentityV1>,
+    pub outcome: ContextScoutModelOutcomeV1,
+    pub answers: Vec<ContextScoutIntentAnswerV1>,
+    pub facts: Vec<ContextScoutIntentKindV1>,
+    pub selected: ContextScoutIntentKindV1,
+    pub source: IntentDecisionSourceV1,
+}
+
+/// Exact, immutable session-evidence claim retained by one intent-pass
+/// candidate. The digest binds scope, session identity, the judged window,
+/// authorization, redaction, the decision receipt, and claim time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutSessionEvidenceV1 {
+    pub authorized_scope: ResolvedScope,
+    pub provider_id: ProviderId,
+    pub session_id: SessionId,
+    pub protected_session_id: [u8; 32],
+    pub window: ContextScoutSessionWindowV1,
+    pub prompt_excerpt_digest: Option<ManifestDigest>,
+    pub code_generation_id: Option<CodeGenerationId>,
+    pub authority: AuthorityReceipt,
+    pub redaction: ContextScoutRedactionReceiptV1,
+    pub availability: ContextScoutEvidenceAvailabilityV1,
+    pub decision: ContextScoutIntentReceiptV1,
+    pub claimed_at: UtcMicros,
+    pub claim_digest: ManifestDigest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

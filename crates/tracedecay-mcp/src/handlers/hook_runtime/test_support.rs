@@ -172,7 +172,7 @@ pub(super) fn retained_claim(id: u8) -> ContextScoutDurableClaimV1 {
             category: ContextScoutCategoryV1::Diagnostic,
             relevance_score: 1,
             suggestion_text: "bounded".to_owned(),
-            evidence: evidence(id),
+            evidence: evidence(id).into(),
             expires_at: UtcMicros(2_000),
         },
     };
