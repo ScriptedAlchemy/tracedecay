@@ -159,8 +159,7 @@ fn identity_anchors(
     let checkout = fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let relative = checkout
         .strip_prefix(worktree_root)
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+        .map_or_else(|_| PathBuf::new(), Path::to_path_buf);
     let shallow = authority.git_dir().join("shallow").is_file()
         || authority.common_dir().join("shallow").is_file();
     let roots = if shallow {
