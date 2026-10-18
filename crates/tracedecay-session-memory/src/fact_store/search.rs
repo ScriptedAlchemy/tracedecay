@@ -128,86 +128,6 @@ fn project_memory_search_scores(
     )))
 }
 
-#[cfg(test)]
-mod score_tests {
-    use super::super::search_tests::{add_command, database, write_control};
-    use super::{HolographicEncoder, project_memory_search_scores, project_memory_tokens};
-    use crate::fact_store::DatabaseFactStore;
-    use tracedecay_store::ProjectMemoryFactStore;
-
-    #[asupersync::test]
-    async fn lexical_eligibility_preserves_rounding_and_tokenless_scores() {
-        let (_directory, database) = database().await;
-        let store = DatabaseFactStore::new(&database);
-        let outcome = store
-            .add_project_memory_fact(
-                add_command(
-                    "operation.lexical-rounding",
-                    "canonical parser configuration",
-                    vec![],
-                ),
-                &write_control(),
-            )
-            .await
-            .unwrap();
-        let tracedecay_store::ProjectMemoryFactProjectionV1::Available(fact) = outcome.fact()
-        else {
-            panic!("canonical fixture payload must be available");
-        };
-        let encoder = HolographicEncoder::new();
-        let tokens = project_memory_tokens("unmatched");
-        let query = encoder.encode_fact("unmatched", &tokens).unwrap();
-        let query = encoder.prepare_query(&query).unwrap();
-        assert!(
-            project_memory_search_scores(
-                &tokens,
-                &encoder,
-                &query,
-                0.98e-6,
-                fact,
-                fact.telemetry().updated_at(),
-            )
-            .unwrap()
-            .is_none(),
-            "positive FTS below half a millionth still rounds to rejection"
-        );
-        let (scores, why) = project_memory_search_scores(
-            &tokens,
-            &encoder,
-            &query,
-            1.0e-6,
-            fact,
-            fact.telemetry().updated_at(),
-        )
-        .unwrap()
-        .expect("half a millionth is eligible");
-        assert_eq!(scores.fts_score_millionths(), 1);
-        assert_eq!(scores.jaccard_score_millionths(), 0);
-        assert_eq!(why.fts, 0.5e-6);
-        assert_eq!(why.temporal_decay, 1.0);
-
-        let tokens = project_memory_tokens("!");
-        assert!(tokens.is_empty());
-        let query = encoder.encode_fact("!", &tokens).unwrap();
-        let query = encoder.prepare_query(&query).unwrap();
-        let (scores, why) = project_memory_search_scores(
-            &tokens,
-            &encoder,
-            &query,
-            0.0,
-            fact,
-            fact.telemetry().updated_at(),
-        )
-        .unwrap()
-        .expect("tokenless queries retain holographic scoring");
-        assert_eq!(scores.fts_score_millionths(), 0);
-        assert_eq!(scores.jaccard_score_millionths(), 0);
-        assert_eq!(why.trust, fact.trust().as_f64());
-        assert_eq!(why.temporal_decay, 1.0);
-        assert_eq!(why.retrieval_count, fact.telemetry().retrieval_count());
-    }
-}
-
 /// Orders a page highest-score first, breaking ties on most-recently-updated
 /// and then ascending fact id, and drops everything at or before `after`.
 ///
@@ -911,4 +831,84 @@ pub(super) async fn record_project_memory_fact_retrieval_tx(
     )
     .await?;
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod score_tests {
+    use super::super::search_tests::{add_command, database, write_control};
+    use super::{HolographicEncoder, project_memory_search_scores, project_memory_tokens};
+    use crate::fact_store::DatabaseFactStore;
+    use tracedecay_store::ProjectMemoryFactStore;
+
+    #[asupersync::test]
+    async fn lexical_eligibility_preserves_rounding_and_tokenless_scores() {
+        let (_directory, database) = database().await;
+        let store = DatabaseFactStore::new(&database);
+        let outcome = store
+            .add_project_memory_fact(
+                add_command(
+                    "operation.lexical-rounding",
+                    "canonical parser configuration",
+                    vec![],
+                ),
+                &write_control(),
+            )
+            .await
+            .unwrap();
+        let tracedecay_store::ProjectMemoryFactProjectionV1::Available(fact) = outcome.fact()
+        else {
+            panic!("canonical fixture payload must be available");
+        };
+        let encoder = HolographicEncoder::new();
+        let tokens = project_memory_tokens("unmatched");
+        let query = encoder.encode_fact("unmatched", &tokens).unwrap();
+        let query = encoder.prepare_query(&query).unwrap();
+        assert!(
+            project_memory_search_scores(
+                &tokens,
+                &encoder,
+                &query,
+                0.98e-6,
+                fact,
+                fact.telemetry().updated_at(),
+            )
+            .unwrap()
+            .is_none(),
+            "positive FTS below half a millionth still rounds to rejection"
+        );
+        let (scores, why) = project_memory_search_scores(
+            &tokens,
+            &encoder,
+            &query,
+            1.0e-6,
+            fact,
+            fact.telemetry().updated_at(),
+        )
+        .unwrap()
+        .expect("half a millionth is eligible");
+        assert_eq!(scores.fts_score_millionths(), 1);
+        assert_eq!(scores.jaccard_score_millionths(), 0);
+        assert_eq!(why.fts, 0.5e-6);
+        assert_eq!(why.temporal_decay, 1.0);
+
+        let tokens = project_memory_tokens("!");
+        assert!(tokens.is_empty());
+        let query = encoder.encode_fact("!", &tokens).unwrap();
+        let query = encoder.prepare_query(&query).unwrap();
+        let (scores, why) = project_memory_search_scores(
+            &tokens,
+            &encoder,
+            &query,
+            0.0,
+            fact,
+            fact.telemetry().updated_at(),
+        )
+        .unwrap()
+        .expect("tokenless queries retain holographic scoring");
+        assert_eq!(scores.fts_score_millionths(), 0);
+        assert_eq!(scores.jaccard_score_millionths(), 0);
+        assert_eq!(why.trust, fact.trust().as_f64());
+        assert_eq!(why.temporal_decay, 1.0);
+        assert_eq!(why.retrieval_count, fact.telemetry().retrieval_count());
+    }
 }

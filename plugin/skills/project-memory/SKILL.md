@@ -1,6 +1,8 @@
 ---
 name: project-memory
-description: Recall or maintain durable TraceDecay project facts; use session context for raw transcript replay.
+description: Use when the user asks what was decided, agreed, or recorded about the project, or asks to remember a decision. Skip when the user asks what an earlier conversation said. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Project memory
@@ -27,3 +29,7 @@ Broad curation (`tracedecay_fact_store_curate`) is an agent-managed run, not a
 caller-authored batch of arbitrary operations. See
 [curation](references/curation.md) for admission, terminal effects, and
 verification. Inspectors can supply evidence without gaining write authority.
+
+**Report:** each fact used with its id, trust, and provenance, or the id of the
+fact stored or changed. Say when no fact matched; do not fill the gap from this
+session's context.

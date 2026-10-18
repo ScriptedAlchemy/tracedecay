@@ -1,6 +1,8 @@
 //! LSP session lifecycle: registered-owner lookup, session admission, frame relay, and expiry.
 
 use super::*;
+use crate::project_runtime::ProjectRuntimesStop;
+use crate::shutdown::{ShutdownJoined, ShutdownStatus};
 use tracedecay_lsp::LspRuntimeFailure;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -163,7 +165,7 @@ impl DaemonInvocationService {
         observed_at: UtcMicros,
     ) -> Option<(RequestContext, ManifestDigest)> {
         let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
+        let grant = owner.scope_grant_at(observed_at)?;
         if grant.scope != *scope {
             return None;
         }
@@ -241,7 +243,7 @@ impl DaemonInvocationService {
         let mut storages = vec![active_storage.clone()];
         for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
-            let grant = owner.scope_grant?;
+            let grant = owner.scope_grant_at(observed_at)?;
             if grant.scope != *scope {
                 return None;
             }
@@ -280,21 +282,25 @@ impl DaemonInvocationService {
         // first durable write. Once the first compare-and-swap starts, finish
         // every authorized replica so the caller receives one authoritative
         // settlement instead of a fabricated interruption over a partial
-        // effect.
-        for storage in storages {
-            match storage
-                .compare_and_swap(request.expected_revision, &next)
-                .ok()?
-            {
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
-                    let stored = storage.read(next.scope_set_id()).ok()?;
-                    if stored.as_ref() != Some(&next) {
-                        return None;
+        // effect. The writes park their thread on the writer, so they run on
+        // the blocking pool.
+        let expected_revision = request.expected_revision;
+        let next = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            for storage in storages {
+                match storage.compare_and_swap(expected_revision, &next).ok()? {
+                    tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
+                    tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
+                        let stored = storage.read(next.scope_set_id()).ok()?;
+                        if stored.as_ref() != Some(&next) {
+                            return None;
+                        }
                     }
                 }
             }
-        }
+            Some(next)
+        })
+        .await
+        .ok()??;
         Some((
             active_scope,
             MultiRootScopeSetCasResultV1 {
@@ -318,7 +324,7 @@ impl DaemonInvocationService {
         T: Serialize,
     {
         let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
+        let grant = owner.scope_grant_at(observed_at)?;
         let scope = grant.scope.clone();
         let context = RequestContext::new(
             grant.issuer.clone(),
@@ -391,7 +397,7 @@ impl DaemonInvocationService {
     }
 
     #[tracing::instrument(name = "daemon.service.lsp.expire_all", level = "trace", skip_all)]
-    pub async fn expire_all(&self) -> bool {
+    pub async fn expire_all(&self) -> ShutdownJoined {
         let started = std::time::Instant::now();
         let step = |outcome: &str| {
             tracedecay_runtime_core::logging::log_daemon_event(
@@ -412,7 +418,7 @@ impl DaemonInvocationService {
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
         step("lsp_registries_cleared");
-        let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
+        let project_runtimes = self.project_runtimes.shut_down_all().await;
         step("project_runtimes_shut_down");
         // A project open that lost its registration to this shutdown dropped
         // its observability owner, whose drain still holds the store lease.
@@ -433,7 +439,17 @@ impl DaemonInvocationService {
         if !work_attempts_clean {
             tracing::error!("active Work attempt process failed while shutdown joined it");
         }
-        project_runtimes_clean && lease_shutdown_clean && work_attempts_clean
+        let (project_runtimes_stopped, lost_work) = match project_runtimes {
+            ProjectRuntimesStop::Stopped => (true, Vec::new()),
+            ProjectRuntimesStop::StoppedWithLostWork(lost_work) => (true, lost_work),
+            ProjectRuntimesStop::DidNotStop => (false, Vec::new()),
+        };
+        let status = if project_runtimes_stopped && lease_shutdown_clean && work_attempts_clean {
+            ShutdownStatus::Clean
+        } else {
+            ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
+        };
+        ShutdownJoined { status, lost_work }
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

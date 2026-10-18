@@ -70,14 +70,11 @@ fn direct_configuration_grants_reject_foreign_caller_selected_layers() {
         collection_id: tracedecay_domain::QueryCollectionId::new("collection.configuration.exact")
             .expect("collection"),
     };
-    let authority = DaemonConfigurationGrantAuthority::for_test(
-        [
-            exact_project.clone(),
-            exact_profile.clone(),
-            exact_collection.clone(),
-        ],
-        UtcMicros(100),
-    )
+    let authority = DaemonConfigurationGrantAuthority::for_test([
+        exact_project.clone(),
+        exact_profile.clone(),
+        exact_collection.clone(),
+    ])
     .expect("test configuration grant authority");
     let expected_revision =
         ConfigurationRevisionId::new("configuration.revision.exact").expect("revision");

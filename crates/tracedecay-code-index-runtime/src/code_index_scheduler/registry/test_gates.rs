@@ -20,8 +20,8 @@ use super::{
     cold_mount_admission_barriers, cold_mount_open_controls, cold_mount_post_check_controls,
     complete_seat_probe_miss_gate, graph_decode_gate, opened_published_text_projection_gate,
     published_text_projection_gate, query_admission_controls, serving_swap_gate,
-    take_worker_step_gate, test_gate_root, text_projection_store_contention_gate,
-    unique_mounted_for_scope, wait_notified_if_unset,
+    take_worker_step_gate, terminal_suppression_gate, test_gate_root,
+    text_projection_store_contention_gate, unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -111,6 +111,26 @@ impl CodeIndexSchedulerRegistryV1 {
         Self::pass_worker_step_gate(gate).await;
     }
 
+    /// Panic the worker for `project_root` on its next admitted pass, or as it
+    /// exits if no pass comes first, outside the per-step guard that catches a
+    /// reconcile step's panic.
+    #[cfg(test)]
+    pub fn panic_next_worker_pass(project_root: &Path) {
+        armed_worker_panics()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(test_gate_root(project_root));
+    }
+
+    #[cfg(test)]
+    pub(super) fn panic_worker_pass_if_armed(project_root: &Path) {
+        let armed = armed_worker_panics()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&test_gate_root(project_root));
+        assert!(!armed, "injected code-index worker panic");
+    }
+
     /// Hold the next graph tail of the worker for `project_root` right before
     /// it seats the decoded generation. The first receiver resolves once the
     /// worker waits there; sending on the returned sender releases it.
@@ -132,6 +152,30 @@ impl CodeIndexSchedulerRegistryV1 {
     #[cfg(test)]
     pub(super) async fn wait_for_serving_swap_gate(project_root: &Path) {
         let gate = take_worker_step_gate(serving_swap_gate(), &test_gate_root(project_root));
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    /// Hold the next woken worker for `project_root` after its shutdown check,
+    /// right before a terminal publication park suppresses its pass.
+    #[cfg(test)]
+    pub fn pause_next_terminal_suppression(
+        &self,
+        project_root: PathBuf,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        arm_worker_step_gate(
+            terminal_suppression_gate(),
+            test_gate_root(&project_root),
+            format_args!("one terminal suppression gate per worktree"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_terminal_suppression_gate(project_root: &Path) {
+        let gate =
+            take_worker_step_gate(terminal_suppression_gate(), &test_gate_root(project_root));
         Self::pass_worker_step_gate(gate).await;
     }
 
@@ -687,6 +731,25 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|worktree| worktree.pending_wake.lock().micros)
     }
 
+    /// Stamp one worker wake for a mounted root even while it is parked, as
+    /// the worker's own end-of-pass continuation does.
+    #[cfg(test)]
+    pub(crate) async fn note_worker_wake_for_test(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
+            return false;
+        };
+        let mounted = self.mounted.lock().await;
+        let Some(worktree) = mounted.get(&project_root) else {
+            return false;
+        };
+        Self::note_wake(
+            &worktree.pending_wake,
+            &worktree.wake,
+            super::CodeIndexCadenceTriggerV1::HookHint,
+        );
+        true
+    }
+
     /// The exact-source currency witness for one mounted root, so tests can
     /// stage the unproven-seat state a restart restore leaves behind.
     #[cfg(test)]
@@ -827,4 +890,11 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn retiring_owner_count(&self) -> usize {
         self.retiring.lock().await.len()
     }
+}
+
+#[cfg(test)]
+fn armed_worker_panics() -> &'static std::sync::Mutex<std::collections::BTreeSet<PathBuf>> {
+    static ARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    ARMED.get_or_init(Default::default)
 }

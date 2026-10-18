@@ -8,6 +8,7 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::admission::{HostAdmission, is_admission_cancellation};
 use crate::observation::ObservationCancellation;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 
@@ -67,15 +68,21 @@ pub fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>
     cancellation: &'a ObservationCancellation,
 ) -> Pin<Box<dyn Future<Output = TranscriptIngestResult<CursorTranscriptIngestStats>> + Send + 'a>>
 {
-    let sweep = super::try_ingest_cursor_project_sweep_capped_with_session_ids(
-        project_root,
-        project_id,
-        admission,
-        max_new_bytes,
-        skip_session_ids,
-        cancellation,
-    );
-    Box::pin(async move { sweep.await.map(|outcome| outcome.stats) })
+    // Rehash into the default (Send) hasher so the boxed future stays `Send`.
+    let skip_session_ids: HashSet<String> = skip_session_ids.into_iter().collect();
+    Box::pin(async move {
+        super::try_ingest_cursor_project_sweep_capped_with_session_ids(
+            project_root,
+            project_id,
+            admission,
+            max_new_bytes,
+            skip_session_ids,
+            cancellation,
+            &mut SourceSweep::new("cursor", None),
+        )
+        .await
+        .map(|outcome| outcome.stats)
+    })
 }
 
 pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
@@ -91,6 +98,7 @@ pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
         max_new_bytes,
         skip_session_ids,
         cancellation,
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .map(|outcome| outcome.stats)

@@ -110,7 +110,10 @@ use tracedecay_lcm::payload::read_verified_payload_content_with_checkpoint;
 pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
-pub use projection::{record_canonical_observation_effect, request_session_temporal_reset};
+pub use projection::{
+    record_canonical_observation_effect, request_session_temporal_reset,
+    request_session_temporal_reset_if_materialized,
+};
 pub use refresh::{
     SessionRefreshBeginBatchItemV1, SessionRefreshBeginBatchOutcomeV1, SessionRefreshBeginPlanV1,
     SessionRefreshCompletionStage, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,

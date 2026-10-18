@@ -106,13 +106,14 @@ pub async fn execute_work_application(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
-    // Keep the Work dispatch and activity-publication frame out of invocation callers.
-    Box::pin(async move {
-        let activity_database = registered.database.clone();
-        let activity_root = project_root.clone();
-        let mutates = work_invocation_mutates(&request);
-        let dispatched: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>> =
-            Box::pin(request_dispatch::dispatch_work_application(
+    let refused_request_id = request_id.clone();
+    let activity_database = registered.database.clone();
+    let activity_root = project_root.clone();
+    let mutates = work_invocation_mutates(&request);
+    dispatch_outliving_caller(
+        refused_request_id,
+        Box::pin(async move {
+            let response = request_dispatch::dispatch_work_application(
                 registered,
                 attempt_processes,
                 observability_producer,
@@ -122,28 +123,48 @@ pub async fn execute_work_application(
                 observed_at,
                 deadline,
                 cancellation,
-            ));
-        let response = dispatched.await;
-        if mutates
-            && matches!(
-                response.outcome,
-                DaemonInvocationOutcome::WorkApplication { .. }
-            )
-            && let Some(project_root) = activity_root.as_deref()
-        {
-            tracedecay_session_memory::event_lane::publish(
-                &activity_database,
-                tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
-                project_root,
-                None,
-                1,
-                work_activity_detail(&response.outcome),
             )
             .await;
-        }
-        response
-    })
+            if mutates
+                && matches!(
+                    response.outcome,
+                    DaemonInvocationOutcome::WorkApplication { .. }
+                )
+                && let Some(project_root) = activity_root.as_deref()
+            {
+                tracedecay_session_memory::event_lane::publish(
+                    &activity_database,
+                    tracedecay_session_memory::event_lane::ActivityFamilyV1::Task,
+                    project_root,
+                    None,
+                    1,
+                    work_activity_detail(&response.outcome),
+                )
+                .await;
+            }
+            response
+        }),
+    )
     .await
+}
+
+async fn dispatch_outliving_caller(
+    request_id: String,
+    dispatch: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>>,
+) -> DaemonInvocationResponse {
+    let refused = |error: &dyn std::fmt::Display| {
+        tracing::error!(%error, "Work dispatch did not run to completion");
+        DaemonInvocationResponse::problem(request_id.clone(), DaemonInvocationProblem::Unavailable)
+    };
+    match tracedecay_runtime_core::native_runtime::NativeTask::spawn(dispatch) {
+        Ok(task) => match task.await {
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(response) => {
+                response
+            }
+            outcome => refused(&format!("{outcome:?}")),
+        },
+        Err(error) => refused(&error),
+    }
 }
 
 fn publish_committed_task_activity_in_background(
@@ -515,9 +536,6 @@ mod native_activity_tests {
     fn background_task_activity_publishes_without_a_tokio_runtime() {
         let profile = tempfile::tempdir().expect("profile root");
         let project = tempfile::tempdir().expect("project root");
-        let _probe = crate::invocation::NATIVE_WRITER_WAITS_PROBE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
         native_runtime::block_on(async {
             assert!(tokio::runtime::Handle::try_current().is_err());

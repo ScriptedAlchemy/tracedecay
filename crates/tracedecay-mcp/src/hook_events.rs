@@ -623,7 +623,7 @@ fn safe_hook_rel_paths(paths: &[String]) -> Vec<String> {
 ///
 /// When the event `cwd` is a *linked* git worktree (a harness-created
 /// `.claude/worktrees/*` session tree whose `.git` is a gitdir pointer rather
-/// than a real directory), we additionally plan `AddBranchAt` against the
+/// than a real directory), we also plan `AddBranchAt` against the
 /// resolved worktree root so the session gets its own writable branch store
 /// instead of the read-only fallback-ancestor DB. The downstream
 /// `add_hook_branch_tracking` returns `AlreadyTracked` cheaply and

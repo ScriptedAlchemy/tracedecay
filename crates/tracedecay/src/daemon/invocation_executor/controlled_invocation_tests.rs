@@ -10,6 +10,7 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationResponse,
 };
 use tracedecay_daemon_service::{DaemonInvocationOperation, RequestCancellationRegistryV1};
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
 #[test]
 fn native_worktree_operations_request_the_native_integration_owner() {
@@ -47,11 +48,12 @@ async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settle
     let daemon_cancellation = lease.token();
     let completed = Arc::new(AtomicBool::new(false));
     let completed_by_invocation = Arc::clone(&completed);
-    let invocation = tokio::spawn(async move {
+    let invocation = NativeTask::spawn(async move {
         daemon_cancellation.cancelled().await;
         completed_by_invocation.store(true, Ordering::Release);
         authoritative_response(REQUEST_ID)
-    });
+    })
+    .expect("native invocation task");
     let cancellation =
         CancellationSignal::active("cancel.in-process-effect-cancel").expect("cancellation signal");
     let caller_cancellation = cancellation.clone();
@@ -60,21 +62,19 @@ async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settle
         assert!(caller_cancellation.cancel(now_micros()));
     });
 
-    let response = tokio::time::timeout(
-        Duration::from_secs(1),
-        settle_in_process_invocation(
-            &request_cancellations,
-            REQUEST_ID,
-            invocation,
-            Duration::from_secs(1),
-            cancellation,
-            None,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-            DAEMON_TOOL_RESPONSE_GRACE,
-        ),
+    // The deadline sits past any test run, so only the caller's cancellation
+    // can request the daemon cancel this settlement waits on.
+    let response = settle_in_process_invocation(
+        &request_cancellations,
+        REQUEST_ID,
+        invocation,
+        Duration::from_hours(24),
+        cancellation,
+        None,
+        InvocationCancellationPolicy::AuthoritativeEffect,
+        DAEMON_TOOL_RESPONSE_GRACE,
     )
     .await
-    .expect("authoritative settlement is joined")
     .expect("daemon settlement is returned");
 
     assert_authoritative_settlement(response);
@@ -92,28 +92,25 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
     let daemon_cancellation = lease.token();
     let completed = Arc::new(AtomicBool::new(false));
     let completed_by_invocation = Arc::clone(&completed);
-    let invocation = tokio::spawn(async move {
+    let invocation = NativeTask::spawn(async move {
         daemon_cancellation.cancelled().await;
         completed_by_invocation.store(true, Ordering::Release);
         authoritative_response(REQUEST_ID)
-    });
+    })
+    .expect("native invocation task");
 
-    let response = tokio::time::timeout(
-        Duration::from_secs(1),
-        settle_in_process_invocation(
-            &request_cancellations,
-            REQUEST_ID,
-            invocation,
-            Duration::from_millis(10),
-            CancellationSignal::active("cancel.in-process-effect-deadline")
-                .expect("cancellation signal"),
-            None,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-            DAEMON_TOOL_RESPONSE_GRACE,
-        ),
+    let response = settle_in_process_invocation(
+        &request_cancellations,
+        REQUEST_ID,
+        invocation,
+        Duration::from_millis(10),
+        CancellationSignal::active("cancel.in-process-effect-deadline")
+            .expect("cancellation signal"),
+        None,
+        InvocationCancellationPolicy::AuthoritativeEffect,
+        DAEMON_TOOL_RESPONSE_GRACE,
     )
     .await
-    .expect("authoritative settlement is joined")
     .expect("daemon settlement is returned");
 
     assert_authoritative_settlement(response);
@@ -129,7 +126,8 @@ async fn in_process_effect_without_settlement_returns_reset_required() {
     let lease = request_cancellations
         .register(REQUEST_ID)
         .expect("register invocation cancellation");
-    let invocation = tokio::spawn(std::future::pending::<DaemonInvocationResponse>());
+    let invocation = NativeTask::spawn(std::future::pending::<DaemonInvocationResponse>())
+        .expect("native invocation task");
 
     let started = std::time::Instant::now();
     let response = tokio::time::timeout(
@@ -179,12 +177,19 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
         .register(REQUEST_ID)
         .expect("register invocation cancellation");
     let admitted_cancellation = lease.token();
+    let invocation_cancellation = admitted_cancellation.clone();
     let (started, started_rx) = tokio::sync::oneshot::channel::<()>();
-    let invocation = tokio::spawn(async move {
-        let _admission = admission;
+    let (alive, ended) = tokio::sync::oneshot::channel::<()>();
+    let invocation = NativeTask::spawn(async move {
+        let _alive = alive;
         started.send(()).expect("report invocation start");
+        // The read gives up its project lease once it observes the admitted
+        // cancellation, but never returns: only settlement ends it.
+        invocation_cancellation.cancelled().await;
+        drop(admission);
         std::future::pending::<DaemonInvocationResponse>().await
-    });
+    })
+    .expect("native invocation task");
     started_rx.await.expect("nested invocation starts");
     let quiescing_registry = registry.clone();
     let quiescing_project = project.clone();
@@ -206,32 +211,33 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
     );
 
     admitted_cancellation.cancel();
-    let response = tokio::time::timeout(
-        Duration::from_secs(2),
-        settle_in_process_invocation(
-            &request_cancellations,
-            REQUEST_ID,
-            invocation,
-            Duration::from_secs(10),
-            CancellationSignal::active("cancel.in-process-independent")
-                .expect("independent cancellation signal"),
-            Some(admitted_cancellation),
-            InvocationCancellationPolicy::ReadOnly,
-            DAEMON_TOOL_RESPONSE_GRACE,
-        ),
+    // Without the admitted cancellation the read would settle `TimedOut`
+    // only once the ten second deadline passed.
+    let response = settle_in_process_invocation(
+        &request_cancellations,
+        REQUEST_ID,
+        invocation,
+        Duration::from_secs(10),
+        CancellationSignal::active("cancel.in-process-independent")
+            .expect("independent cancellation signal"),
+        Some(admitted_cancellation),
+        InvocationCancellationPolicy::ReadOnly,
+        DAEMON_TOOL_RESPONSE_GRACE,
     )
-    .await
-    .expect("admitted cancellation settles the nested read");
+    .await;
 
     assert!(matches!(
         response,
         Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled { .. })
     ));
-    let guard = tokio::time::timeout(Duration::from_secs(1), quiescence)
+    assert!(
+        ended.await.is_err(),
+        "settlement aborts the read that never returns"
+    );
+    let guard = quiescence
         .await
-        .expect("nested settlement releases the project lease")
         .expect("quiescence task")
-        .expect("quiescence drains the runtime");
+        .expect("the released lease lets quiescence drain");
     assert!(registry.is_empty());
     drop(guard);
     drop(lease);

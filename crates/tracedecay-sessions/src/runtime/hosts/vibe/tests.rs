@@ -110,7 +110,6 @@ async fn capture_profile(
         ObservationScopeV1::Profile,
         None,
         &ObservationCancellation::default(),
-        None,
     )
     .await
     .unwrap()

@@ -7,6 +7,10 @@ use tracedecay_runtime_core::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
 };
 
+fn identify(path: &Path) -> Option<ClaudeSourceScanIdentity> {
+    identify_claude_source(Path::new("/"), path)
+}
+
 #[test]
 fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
     let dir = tempfile::tempdir().unwrap();
@@ -15,19 +19,19 @@ fn bounded_scan_carries_identity_cursor_generation_and_coverage() {
     let contents = [complete.as_slice(), b"{\"partial\":"].concat();
     std::fs::write(&path, &contents).unwrap();
 
-    let identity = identify_claude_source(&path).unwrap();
+    let identity = identify(&path).unwrap();
     let scan = scan_claude_source_frames(identity, StoredCursor::default(), None).unwrap();
 
     assert_eq!(scan.identity.provider, "claude");
     assert_eq!(scan.identity.session_id, "session-42");
     assert_eq!(
         scan.identity.source_id,
-        cursor::claude_observation_source_id(&path)
+        cursor::claude_observation_path_source_id(Path::new("/"), &path)
     );
     assert!(
         scan.identity
             .source_id
-            .starts_with("tracedecay-claude-observation-source-v1-sha256-")
+            .starts_with("tracedecay-claude-observation-source-v2-sha256-")
     );
     assert_eq!(scan.identity.source_path, path);
     assert_eq!(scan.previous_cursor.state, StoredCursor::default());
@@ -61,7 +65,7 @@ fn bounded_scan_blocks_oversized_frame_and_suffix_at_one_mib() {
     );
     std::fs::write(&path, format!("{oversized}{{\"type\":\"summary\"}}\n")).unwrap();
 
-    let identity = identify_claude_source(&path).unwrap();
+    let identity = identify(&path).unwrap();
     let scan = scan_claude_source_frames(identity, StoredCursor::default(), None).unwrap();
 
     assert!(scan.frames.is_empty());
@@ -88,7 +92,7 @@ fn bounded_scan_exposes_whitespace_ranges_without_parsing_them() {
     let record = b"{\"type\":\"summary\"}\n";
     std::fs::write(&path, [b"\n".as_slice(), record, b" \t\n"].concat()).unwrap();
 
-    let identity = identify_claude_source(&path).unwrap();
+    let identity = identify(&path).unwrap();
     let scan = scan_claude_source_frames(identity, StoredCursor::default(), None).unwrap();
 
     assert_eq!(scan.frames.len(), 1);
@@ -160,8 +164,8 @@ fn non_utf8_paths_that_render_identically_have_distinct_cursor_keys() {
         cursor::claude_cursor_key(&first).durable_text(),
         cursor::claude_cursor_key(&second).durable_text()
     );
-    let first_identity = identify_claude_source(&first).unwrap();
-    let second_identity = identify_claude_source(&second).unwrap();
+    let first_identity = identify(&first).unwrap();
+    let second_identity = identify(&second).unwrap();
     assert_ne!(first_identity.session_id, second_identity.session_id);
     assert_eq!(
         first_identity.session_id,
@@ -172,18 +176,19 @@ fn non_utf8_paths_that_render_identically_have_distinct_cursor_keys() {
         "privacy.structural-id.v1.ee63d9294be4d710712850f8e5dd96b296ba64b79a4dfb53995e1ecd9c7e6f49"
     );
     assert_eq!(
-        first_identity.source_id,
+        first_identity.stem_source_id,
         "tracedecay-claude-observation-source-v1-sha256-b878c24deeee723afacac8f34481430383c0bb4a1aa04880ad1af6c0b128187c"
     );
     assert_eq!(
-        second_identity.source_id,
+        second_identity.stem_source_id,
         "tracedecay-claude-observation-source-v1-sha256-0dc1ffe6e231fc3d7ed7f6634dd60932564ce1ef0fcb0ee959a4359a1d9d4477"
     );
+    assert_ne!(first_identity.source_id, second_identity.source_id);
 }
 
 #[cfg(unix)]
 #[test]
-fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
+fn observation_source_ids_are_private_and_follow_the_projects_relative_path() {
     let root = tempfile::tempdir().unwrap();
     let first = root.path().join("account-one/session.jsonl");
     let second = root.path().join("account-two/session.jsonl");
@@ -194,19 +199,38 @@ fn observation_source_ids_are_private_and_follow_native_transcript_identity() {
     std::fs::write(&second, "").unwrap();
     std::fs::write(&other, "").unwrap();
 
-    let first_identity = identify_claude_source(&first).unwrap();
-    let second_identity = identify_claude_source(&second).unwrap();
-    let other_identity = identify_claude_source(&other).unwrap();
+    let first_identity = identify_claude_source(root.path(), &first).unwrap();
+    let second_identity = identify_claude_source(root.path(), &second).unwrap();
+    let other_identity = identify_claude_source(root.path(), &other).unwrap();
     assert_eq!(first_identity.session_id, second_identity.session_id);
     assert_eq!(first_identity.session_id, "session");
     assert_eq!(other_identity.session_id, "other-session");
     assert_eq!(
         first_identity.source_id,
+        "tracedecay-claude-observation-source-v2-sha256-c616d6158ad32ca1c204938215042bdc4125db7f48ea51b6ed5e577605430536"
+    );
+    assert_ne!(second_identity.source_id, first_identity.source_id);
+    let moved = tempfile::tempdir().unwrap();
+    assert_eq!(
+        identify_claude_source(
+            moved.path(),
+            &moved.path().join("account-one/session.jsonl")
+        )
+        .unwrap()
+        .source_id,
+        first_identity.source_id,
+        "the key survives moving the projects directory"
+    );
+    assert_eq!(
+        first_identity.stem_source_id,
         "tracedecay-claude-observation-source-v1-sha256-13f767a4cb9df80b65b90e859dee16bdb99ac3eba0d792e0bcc5c8c09dea501f"
     );
-    assert_eq!(second_identity.source_id, first_identity.source_id);
     assert_eq!(
-        other_identity.source_id,
+        second_identity.stem_source_id,
+        first_identity.stem_source_id
+    );
+    assert_eq!(
+        other_identity.stem_source_id,
         "tracedecay-claude-observation-source-v1-sha256-6af786644f998205035a6b817210583dd95133bb265cb54908fef24a75c40f23"
     );
 }
@@ -572,7 +596,7 @@ fn claude_unknown_membership_retries_without_advancing_cursor() {
 
     let scan = || {
         try_scan_claude_source_frames_with_resume(
-            identify_claude_source(&transcript).unwrap(),
+            identify(&transcript).unwrap(),
             StoredCursor::default(),
             None,
             None,
@@ -616,8 +640,8 @@ fn workflow_journals_are_not_claude_session_transcripts() {
 
     assert!(super::is_claude_session_transcript(&session));
     assert!(!super::is_claude_session_transcript(&journal));
-    assert!(identify_claude_source(&session).is_some());
-    assert!(identify_claude_source(&journal).is_none());
+    assert!(identify(&session).is_some());
+    assert!(identify(&journal).is_none());
 
     let discovered = ClaudeSource::with_home(root.path())
         .discover_transcript_paths(TranscriptDiscoveryBounds::default_walk())
@@ -640,8 +664,8 @@ fn non_utf8_claude_transcripts_are_still_session_files() {
     assert!(super::is_claude_session_transcript(&session));
     assert!(super::is_claude_session_transcript(&agent));
     assert!(!super::is_claude_session_transcript(&journal));
-    assert!(identify_claude_source(&agent).is_some());
-    assert!(identify_claude_source(&journal).is_none());
+    assert!(identify(&agent).is_some());
+    assert!(identify(&journal).is_none());
 }
 
 // APFS requires UTF-8 filenames; Linux can materialize this discovery fixture.

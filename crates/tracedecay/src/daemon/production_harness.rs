@@ -1076,7 +1076,7 @@ impl ProductionProjectCompositionHarnessV1 {
         .await
     }
 
-    async fn call_tool_with_params(
+    pub(crate) async fn call_tool_with_params(
         &self,
         project_root: impl AsRef<Path>,
         tool_name: &str,
@@ -1287,11 +1287,33 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
         let Some(resources) = self.resources.take() else {
             return;
         };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(tracing::Instrument::instrument(
-                shutdown_production_project_harness(resources),
+        // A test drops its harness as its runtime stops, and that runtime
+        // cancels anything spawned on it. Unshut, the composition's native
+        // tasks keep every store and its threads alive for the whole process,
+        // so the shutdown runs to completion on a thread of its own.
+        let shutdown = move || match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(tracing::Instrument::instrument(
+                Box::pin(shutdown_production_project_harness(resources)),
                 tracing::trace_span!("daemon.harness.shutdown"),
-            ));
+            )),
+            Err(error) => tracing::warn!(
+                event = "production_harness_drop_shutdown_unavailable",
+                %error,
+                "production-composition harness dropped without a shutdown runtime"
+            ),
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("tracedecay-harness-shutdown".to_owned())
+            .spawn(shutdown)
+        {
+            tracing::warn!(
+                event = "production_harness_drop_shutdown_unavailable",
+                %error,
+                "production-composition harness dropped without a shutdown thread"
+            );
         }
     }
 }
@@ -1324,7 +1346,11 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         tracing::trace_span!("daemon.harness.detach"),
     )
     .await;
-    resources.servers.clear();
+    let handed_out = resources
+        .servers
+        .drain()
+        .map(|(_, server)| Arc::downgrade(&server))
+        .collect::<Vec<_>>();
     for server in &servers {
         server.ledger_writes_settled().await;
         server.shutdown_background_tasks().await;
@@ -1391,8 +1417,18 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .store_administration
         .shutdown_retirement_reapers()
         .await;
+    // A server its caller still holds keeps its stores leased, and the caller
+    // cannot drop it while it awaits this shutdown, so waiting would only
+    // spend the budget. Close what is idle in one pass instead.
+    let store_close_deadline = if handed_out.iter().any(|server| server.strong_count() != 0) {
+        std::time::Instant::now()
+    } else {
+        std::time::Instant::now() + tracedecay_daemon_service::shutdown::DAEMON_STORE_CLOSE_RESERVE
+    };
     if let Err(error) = tracing::Instrument::instrument(
-        resources.store_administration.close_stores_for_shutdown(),
+        resources
+            .store_administration
+            .close_stores_for_shutdown(store_close_deadline),
         tracing::trace_span!("daemon.harness.shutdown_graph"),
     )
     .await
@@ -1836,3 +1872,6 @@ mod idle_history_reads_journey_test;
 
 #[cfg(test)]
 mod source_body_readiness_journey_test;
+
+#[cfg(test)]
+mod drop_shutdown_journey_test;

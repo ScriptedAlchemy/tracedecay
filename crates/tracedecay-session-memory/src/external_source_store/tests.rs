@@ -499,3 +499,43 @@ async fn cline_cutover_requires_the_durable_retained_receipt_and_exact_revision(
         "a different retained payload revision cannot authorize the successor"
     );
 }
+
+#[tokio::test]
+async fn a_drainer_whose_head_another_drainer_projected_past_continues() {
+    let fixture = Fixture::open().await;
+    for (stream, ordinal, native) in [
+        (ClineTranscriptStream::UiMessages, 0, "ui-1"),
+        (ClineTranscriptStream::ApiHistory, 0, "api-1"),
+    ] {
+        let receipt = fixture
+            .persist(observation(stream, true, ordinal, native, false))
+            .await;
+        fixture
+            .retained
+            .capture_host_observation(&receipt)
+            .await
+            .unwrap();
+    }
+    let loser_head = fixture
+        .retained
+        .read_pending_projection(None)
+        .await
+        .unwrap()
+        .expect("the loser read the queue head");
+    let winner = fixture
+        .retained
+        .drain_host_projection_replay(
+            4,
+            &tracedecay_sessions::observation::ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!((winner.projected, winner.deferred), (2, false));
+
+    let projected = fixture
+        .retained
+        .project_pending_head(&loser_head, host_external_source_projector().unwrap())
+        .await
+        .expect("a head another drainer already projected is not a failure");
+    assert!(!projected, "the loser did not project the head itself");
+}

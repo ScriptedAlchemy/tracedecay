@@ -1068,7 +1068,7 @@ impl DaemonInvocationState {
     }
 
     #[tracing::instrument(name = "daemon.invocation_state.shutdown", level = "trace", skip_all)]
-    pub(super) async fn shutdown(&self) -> ShutdownStatus {
+    pub(super) async fn shutdown(&self) -> tracedecay_daemon_service::shutdown::ShutdownJoined {
         let started = std::time::Instant::now();
         let step = |outcome: &str| {
             log_daemon_event(
@@ -1108,15 +1108,12 @@ impl DaemonInvocationState {
         }
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         step("lsp_sessions_expired");
-        let expired = self.service.expire_all().await;
+        let mut expired = self.service.expire_all().await;
         step("invocation_service_expired");
-        if !expired {
-            ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
-        } else if schedulers_timed_out {
-            ShutdownStatus::TimedOut
-        } else {
-            ShutdownStatus::Clean
+        if expired.status.is_clean() && schedulers_timed_out {
+            expired.status = ShutdownStatus::TimedOut;
         }
+        expired
     }
 }
 
@@ -1269,6 +1266,7 @@ mod shutdown_tests {
             ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
         );
         assert_eq!(receipt.unfinished(), &["invocation"]);
+        assert_eq!(receipt.lost_work, Vec::new());
     }
 
     #[tokio::test]
@@ -1278,7 +1276,7 @@ mod shutdown_tests {
         state.cancel_admissions();
         let started = std::time::Instant::now();
         assert!(
-            state.shutdown().await.is_clean(),
+            state.shutdown().await.status.is_clean(),
             "empty invocation shutdown must expire cleanly"
         );
         assert!(

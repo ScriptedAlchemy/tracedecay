@@ -73,6 +73,7 @@ use tracedecay_policy::{
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
+use crate::callable_code_authorization::{mounted_grant_at, mounted_grant_expires_at};
 use crate::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
     ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
@@ -196,11 +197,6 @@ mod work_attempt_exec;
 mod work_blocked_interval_recovery;
 mod work_routing;
 
-/// Held by tests that read the process-wide native writer-wait counter, and
-/// by the off-Tokio attempt tests whose synchronous Work storage writes raise it.
-#[cfg(test)]
-pub(crate) static NATIVE_WRITER_WAITS_PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub use clock::now_millis;
 use configuration::*;
 pub use configuration::{ProfileConfigurationAuthorityV1, execute_profile_configuration};
@@ -302,6 +298,9 @@ fn retained_request_admission_problem(admission: RequestAdmission) -> Option<App
         RequestAdmission::Admitted => None,
         RequestAdmission::Cancelled => Some(ApplicationProblem::cancelled_before_admission()),
         RequestAdmission::TimedOut => Some(ApplicationProblem::timed_out_before_admission()),
+        RequestAdmission::GrantExpired => {
+            Some(ApplicationProblem::grant_expired_before_admission())
+        }
     }
 }
 
@@ -585,13 +584,14 @@ impl DaemonInvocationService {
                     message: "automation retained application authority is unavailable".to_owned(),
                 })
             })?;
+        let grant = registered.grant_at(observed_at);
         let effective_deadline = Deadline {
-            expires_at: UtcMicros(deadline.expires_at.0.min(registered.grant.expires_at.0)),
+            expires_at: UtcMicros(deadline.expires_at.0.min(grant.expires_at.0)),
         };
         let context = RequestContext::new(
             registered.actor,
             registered.scope,
-            registered.grant,
+            grant,
             request_id,
             effective_deadline,
             cancellation,
@@ -626,7 +626,7 @@ impl DaemonInvocationService {
         &self,
         owner: &DaemonNativeIntegrationOwner,
     ) -> Result<(), tracedecay_contracts::NativeIntegrationPortError> {
-        let roots = owner.cleanup_recovery_roots()?;
+        let roots = owner.cleanup_recovery_roots().await?;
         self.worktree_holder_admission
             .mark_recovery_required(roots)
             .await;

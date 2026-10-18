@@ -42,6 +42,7 @@ pub trait LspRuntimeTask: Send + Sync {
 
 /// Runtime injection used by broker policy without taking a Tokio dependency.
 pub trait LspRuntimeSpawner: Send + Sync {
+    #[track_caller]
     fn spawn(&self, future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask>;
 }
 

@@ -330,7 +330,7 @@ fn preview_for_operation(
 }
 
 /// Fixture timeline anchored at a fixed far-future epoch (2100-01-01 UTC) so
-/// the store actor's autonomous wall-clock preview-input GC never observes
+/// the store's autonomous wall-clock preview-input GC never observes
 /// fixture expiries as already elapsed. Ordinals are spaced 200ms apart: wide
 /// enough to preserve every strict ordering the tests assert, narrow enough
 /// that fixture preview lifetimes stay inside the domain's 30s maximum.
@@ -505,28 +505,26 @@ pub fn execution_for(
     }
 }
 
-pub fn test_store() -> (RegisteredGlobalDbHarness, DaemonGitIndexTransactionStore) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("registered fixture runtime");
-    let database = runtime.block_on(RegisteredGlobalDbHarness::open("git-index-transaction"));
+pub async fn test_store() -> (RegisteredGlobalDbHarness, DaemonGitIndexTransactionStore) {
+    let database = RegisteredGlobalDbHarness::open("git-index-transaction").await;
     let store = DaemonGitIndexTransactionStore::open(database.registered.clone())
-        .expect("canonical registered store actor");
+        .await
+        .expect("canonical registered store");
     (database, store)
 }
 
-pub fn test_port_from_preview(
+pub async fn test_port_from_preview(
     operation: GitIndexTransactionOperationV1,
     native_modes: impl IntoIterator<Item = NativeMode>,
     recovery_modes: impl IntoIterator<Item = RecoveryMode>,
 ) -> TestHarness {
-    let (database, store) = test_store();
+    let (database, store) = test_store().await;
     let preview_template = preview_for_operation(operation, fixture_time(100));
     let authority_request = apply_request(&preview_template, "idempotency.transport");
     let preview_request = preview_request(&preview_template, &authority_request);
     store
         .save_preview_input(preview_input(&preview_template))
+        .await
         .expect("save daemon preview input");
     let native =
         FakeNative::with_preview(Some(preview_template.clone()), native_modes, recovery_modes);
@@ -546,6 +544,7 @@ pub fn test_port_from_preview(
     );
     let preview = port
         .preview(&preview_request)
+        .await
         .expect("preview reaches the native owner")
         .preview;
     let request = apply_request(&preview, "idempotency.transport");

@@ -25,6 +25,7 @@ use super::failure::{
     failed_observation_run, warn_transcript_catch_up_failure,
 };
 use super::project_provider::hermes_run_outcome;
+use super::quarantine::SourceSweep;
 use super::scheduler::{read_codex_discovery_frontier, write_codex_discovery_frontier};
 use super::user::{
     BoundedProviderFailure, BoundedProviderOutcome, try_ingest_user_codex_sessions_rotated,
@@ -210,6 +211,7 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             stored_coverage,
             Some(HostProviderCoverage::Complete)
         ));
+        let mut sweep = SourceSweep::new("codex", self.codex_discovery);
         let ingested = erase_send!(
             try_ingest_user_codex_sessions_rotated(
                 self.profile_root,
@@ -220,10 +222,11 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 self.cancellation,
                 frontier,
                 self.codex_discovery,
+                &mut sweep,
             ),
             crate::runtime::source::TranscriptIngestResult<super::user::CodexUserIngestOutcome>
         );
-        match ingested.await {
+        let mut run = match ingested.await {
             Ok(result) => {
                 let outcome = result.outcome;
                 let mut run = ProviderRunOutcome::bounded(
@@ -288,26 +291,34 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 "Codex transcript catch-up failed",
                 self.max_new_bytes,
             ),
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.cursor", level = "trace", skip_all)]
     async fn run_cursor(self) -> ProviderRunOutcome {
-        cursor_provider_run_outcome(
+        let mut sweep = SourceSweep::new("cursor", self.codex_discovery);
+        let mut run = cursor_provider_run_outcome(
             try_ingest_user_cursor_sessions_with_db_bounded(
                 self.roots.to_vec(),
                 self.facade,
                 Some(self.max_new_bytes),
                 self.cancellation,
+                &mut sweep,
             )
             .await,
-        )
+        );
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.hermes", level = "trace", skip_all)]
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let Some(outcome) = hermes::ingest_user_sessions_capped_with_admission(
+        let mut sweep = SourceSweep::new("hermes", self.codex_discovery);
+        let Some(outcome) = hermes::ingest_user_with_sweep(
             self.facade,
+            &mut sweep,
             self.roots,
             Some(self.max_new_bytes),
             self.cancellation,
@@ -316,18 +327,22 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
         else {
             return ProviderRunOutcome::skipped();
         };
-        hermes_run_outcome(outcome, false)
+        let mut run = hermes_run_outcome(outcome, false);
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.claude", level = "trace", skip_all)]
     async fn run_claude(self) -> UserProviderRunResult {
-        match claude_observation::ingest_user_sessions_with_admission(
+        let mut sweep = SourceSweep::new("claude", self.codex_discovery);
+        let mut run = match claude_observation::ingest_user_sessions_with_sweep(
             self.profile_root,
             None,
             self.roots.to_vec(),
             self.facade,
             Some(self.max_new_bytes),
             self.cancellation.clone(),
+            &mut sweep,
         )
         .await
         {
@@ -337,26 +352,28 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             ),
             Err(error) => {
                 if let Some(stats) = error.accumulated_stats() {
-                    return UserProviderRunResult::claude(
+                    UserProviderRunResult::claude(
                         claude_provider_run_outcome(stats, Some(&error), self.max_new_bytes),
                         stats.projected_session_ids().clone(),
+                    )
+                } else if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
+                    UserProviderRunResult::provider(cancelled)
+                } else {
+                    let failure = claude_catch_up_failure("observation", &error);
+                    tracing::warn!(
+                        reason_code = failure.reason_code,
+                        retryable = failure.retryable,
+                        "Claude observation catch-up failed"
                     );
+                    UserProviderRunResult::provider(ProviderRunOutcome::failed(
+                        failure,
+                        self.max_new_bytes,
+                    ))
                 }
-                if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
-                    return UserProviderRunResult::provider(cancelled);
-                }
-                let failure = claude_catch_up_failure("observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "Claude observation catch-up failed"
-                );
-                UserProviderRunResult::provider(ProviderRunOutcome::failed(
-                    failure,
-                    self.max_new_bytes,
-                ))
             }
-        }
+        };
+        sweep.report_into(&mut run.outcome);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.kiro", level = "trace", skip_all)]
@@ -365,13 +382,15 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
         let source = source.for_user_scope(self.roots.to_vec());
-        match kiro::capture_kiro_snapshot_observations(
+        let mut sweep = SourceSweep::new("kiro", self.codex_discovery);
+        let mut run = match kiro::capture_kiro_snapshot_observations_with_sweep(
             self.facade,
             &source,
             self.profile_root,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
@@ -386,7 +405,9 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 "user Kiro observation catch-up failed",
                 self.max_new_bytes,
             ),
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.kimi", level = "trace", skip_all)]
@@ -395,14 +416,15 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
         let source = source.for_user_scope(self.roots.to_vec());
-        match kimi::capture_kimi_observations(
+        let mut sweep = SourceSweep::new("kimi", self.codex_discovery);
+        let mut run = match kimi::capture_kimi_sweep(
             self.facade,
             &source,
             self.profile_root,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
-            self.codex_discovery,
+            &mut sweep,
         )
         .await
         {
@@ -418,7 +440,8 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 run
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                if let Some(mut cancelled) = cancelled_provider_outcome(&error) {
+                    sweep.report_into(&mut cancelled);
                     return cancelled;
                 }
                 let mut run = ProviderRunOutcome::failed(
@@ -449,7 +472,9 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 }
                 run
             }
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.pi", level = "trace", skip_all)]
@@ -458,14 +483,15 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
         let source = source.for_user_scope(self.roots.to_vec());
-        match pi::capture_pi_observations(
+        let mut sweep = SourceSweep::new("pi", self.codex_discovery);
+        let mut run = match pi::capture_pi_sweep(
             self.facade,
             &source,
             self.profile_root,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
-            self.codex_discovery,
+            &mut sweep,
         )
         .await
         {
@@ -481,7 +507,8 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 run
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                if let Some(mut cancelled) = cancelled_provider_outcome(&error) {
+                    sweep.report_into(&mut cancelled);
                     return cancelled;
                 }
                 let mut run = ProviderRunOutcome::failed(
@@ -512,7 +539,9 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 }
                 run
             }
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.opencode", level = "trace", skip_all)]
@@ -520,15 +549,17 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
         let Some(source) = opencode::OpenCodeSource::new_for_user(self.roots.to_vec()) else {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
-        match opencode::capture_opencode_observations(
+        let mut sweep = SourceSweep::new("opencode", self.codex_discovery);
+        let captured = opencode::capture_opencode_observations_with_sweep(
             self.facade,
             &source,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            &mut sweep,
         )
-        .await
-        {
+        .await;
+        let mut run = match captured {
             Ok(outcome) => {
                 let mut run = ProviderRunOutcome::bounded(
                     outcome.stats,
@@ -545,39 +576,41 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 }
                 run
             }
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                let mut run = ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
+            Err(error) => match cancelled_provider_outcome(&error) {
+                Some(cancelled) => cancelled,
+                None => {
+                    let mut run = ProviderRunOutcome::failed(
+                        warn_transcript_catch_up_failure(
+                            "opencode",
+                            "observation",
+                            &error,
+                            "user OpenCode observation catch-up failed",
+                        ),
+                        self.max_new_bytes,
+                    );
+                    if let Err(coverage_error) = persist_host_provider_coverage(
+                        self.facade,
+                        &ObservationScopeV1::Profile,
                         "opencode",
-                        "observation",
-                        &error,
-                        "user OpenCode observation catch-up failed",
-                    ),
-                    self.max_new_bytes,
-                );
-                if let Err(coverage_error) = persist_host_provider_coverage(
-                    self.facade,
-                    &ObservationScopeV1::Profile,
-                    "opencode",
-                    HostProviderCoverage::Unavailable,
-                    1,
-                    Some(HostCoverageReason::DatabaseUnreadable),
-                )
-                .await
-                {
-                    run.add_failure(warn_transcript_catch_up_failure(
-                        "opencode",
-                        "coverage",
-                        &coverage_error,
-                        "user OpenCode coverage persistence failed",
-                    ));
+                        HostProviderCoverage::Unavailable,
+                        1,
+                        Some(HostCoverageReason::DatabaseUnreadable),
+                    )
+                    .await
+                    {
+                        run.add_failure(warn_transcript_catch_up_failure(
+                            "opencode",
+                            "coverage",
+                            &coverage_error,
+                            "user OpenCode coverage persistence failed",
+                        ));
+                    }
+                    run
                 }
-                run
-            }
-        }
+            },
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.cline_like", level = "trace", skip_all)]
@@ -592,13 +625,15 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
         let source = source.for_user_scope(self.roots.to_vec());
-        match cline_like::capture_cline_like_snapshot_observations(
+        let mut sweep = SourceSweep::new(self.candidate.id(), self.codex_discovery);
+        let mut run = match cline_like::capture_cline_like_snapshot_observations_with_sweep(
             self.facade,
             &source,
             self.profile_root,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
@@ -607,21 +642,26 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
+            Err(error) => match cancelled_provider_outcome(&error) {
+                Some(cancelled) => cancelled,
+                None => {
+                    let failure = classify_transcript_ingest_failure(
+                        self.candidate.id(),
+                        "observation",
+                        &error,
+                    );
+                    tracing::warn!(
+                        provider = self.candidate.id(),
+                        reason_code = failure.reason_code,
+                        retryable = failure.retryable,
+                        "user snapshot observation catch-up failed"
+                    );
+                    ProviderRunOutcome::failed(failure, self.max_new_bytes)
                 }
-                let failure =
-                    classify_transcript_ingest_failure(self.candidate.id(), "observation", &error);
-                tracing::warn!(
-                    provider = self.candidate.id(),
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "user snapshot observation catch-up failed"
-                );
-                ProviderRunOutcome::failed(failure, self.max_new_bytes)
-            }
-        }
+            },
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.vibe", level = "trace", skip_all)]
@@ -630,14 +670,15 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
         let source = source.for_user_scope(self.roots.to_vec());
-        match vibe::capture_vibe_observations(
+        let mut sweep = SourceSweep::new("vibe", self.codex_discovery);
+        let mut run = match vibe::capture_vibe_sweep(
             self.facade,
             &source,
             self.profile_root,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
-            self.codex_discovery,
+            &mut sweep,
         )
         .await
         {
@@ -652,7 +693,9 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 "user Vibe observation catch-up failed",
                 self.max_new_bytes,
             ),
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 }
 

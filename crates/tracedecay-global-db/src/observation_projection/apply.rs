@@ -23,16 +23,17 @@ use tracedecay_runtime_core::db::{
 use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
 
 use super::state::{
-    canonicalize_session_project_paths, message_projection, read_message, read_observation,
-    read_output_state, read_session, reaggregate_output_state_for_output,
-    reconcile_session_rows_detailed, storage, storage_message, stored_output_digest,
-    verify_output_state, verify_projection_rows,
+    canonicalize_session_project_paths, message_projection, output_ownership_sql, read_message,
+    read_observation, read_output_state, read_session, reconcile_session_rows_detailed, storage,
+    storage_message, stored_output_digest, verify_output_state, verify_projection_rows,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
     message_transition, write_workflow_fact_transition,
 };
-use tracedecay_session_temporal_store::request_session_temporal_reset;
+use tracedecay_session_temporal_store::{
+    request_session_temporal_reset, request_session_temporal_reset_if_materialized,
+};
 
 fn decode_canonical_envelope(
     payload: &serde_json::Value,
@@ -1088,51 +1089,51 @@ async fn reconcile_projected_codex_goal_response(
     else {
         return Ok(());
     };
+    retire_replaced_codex_output(conn, current.provider.as_str(), &response_message_id).await
+}
+
+/// Retires the output `message_id` that another Codex record of the same
+/// message replaces. Its row and provenance go, each owning
+/// observation settles as an `output_collision` skip, and a session temporal
+/// generation that already holds it is rebuilt.
+pub(super) async fn retire_replaced_codex_output(
+    conn: &impl Executor,
+    provider: &str,
+    message_id: &str,
+) -> ProjectionStoreResult<()> {
     let mut provenance_rows = conn
         .query(
             "SELECT observation_id, receipt_id
              FROM observation_projection_provenance
              WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                current.provider.as_str(),
-                response_message_id.as_str(),
-            ],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
         )
         .await
-        .map_err(|error| storage("read paired Codex goal provenance", error))?;
+        .map_err(|error| storage("read replaced Codex provenance", error))?;
     let mut replaced_observations = Vec::new();
     while let Some(row) = provenance_rows
         .next()
         .await
-        .map_err(|error| storage("read paired Codex goal provenance", error))?
+        .map_err(|error| storage("read replaced Codex provenance", error))?
     {
         replaced_observations.push((
             row.get::<String>(0)
-                .map_err(|error| storage("read paired Codex goal provenance", error))?,
+                .map_err(|error| storage("read replaced Codex provenance", error))?,
             row.get::<String>(1)
-                .map_err(|error| storage("read paired Codex goal provenance", error))?,
+                .map_err(|error| storage("read replaced Codex provenance", error))?,
         ));
     }
     drop(provenance_rows);
-    delete_projected_output(
-        conn,
-        current.provider.as_str(),
-        response_message_id.as_str(),
-    )
-    .await?;
+    delete_projected_output(conn, provider, message_id).await?;
     conn.execute(
         "DELETE FROM observation_projection_provenance
          WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            current.provider.as_str(),
-            response_message_id.as_str(),
-        ],
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
     )
     .await
-    .map_err(|error| storage("remove paired Codex goal provenance", error))?;
+    .map_err(|error| storage("remove replaced Codex provenance", error))?;
     for (observation_id, receipt_id) in replaced_observations {
+        request_session_temporal_reset_if_materialized(conn, &observation_id).await?;
         conn.execute(
             "INSERT INTO observation_projection_dispositions
                 (projector_version, observation_id, receipt_id, reason)
@@ -1146,20 +1147,9 @@ async fn reconcile_projected_codex_goal_response(
             ],
         )
         .await
-        .map_err(|error| storage("retire paired Codex goal observation", error))?;
+        .map_err(|error| storage("retire replaced Codex observation", error))?;
     }
-    conn.execute(
-        "DELETE FROM temp.observation_projection_output_state
-         WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            current.provider.as_str(),
-            response_message_id.as_str(),
-        ],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| storage("remove paired Codex goal output state", error))
+    Ok(())
 }
 
 /// Replaces the stored output row with the one this binary derives.
@@ -1433,6 +1423,7 @@ async fn apply_rows(
         MessageTransition::Supersede => supersede_projected_message(conn, message).await?,
         MessageTransition::Retain => {}
     }
+    super::codex_echo::retire_codex_response_echo(conn, observation, message).await?;
     Ok(transition == MessageTransition::Insert)
 }
 
@@ -1736,7 +1727,6 @@ async fn read_provenance_output_binding(
 )]
 async fn apply_provenance(
     conn: &impl Executor,
-    sequence: u64,
     projection: &SessionMessageProjection,
     message_created: bool,
 ) -> ProjectionStoreResult<()> {
@@ -1791,50 +1781,6 @@ async fn apply_provenance(
         }
         Err(error) => return Err(error),
     }
-    if inserted == 0 {
-        return Ok(());
-    }
-
-    let sequence_i64 =
-        i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_output_state (
-            projector_version, output_provider, output_message_id,
-            canonical_observation_id, latest_observation_id, latest_sequence,
-            projector_owned, owner_count
-         ) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, 1)
-         ON CONFLICT(projector_version, output_provider, output_message_id) DO UPDATE SET
-            canonical_observation_id = CASE
-                WHEN observation_projection_output_state.projector_owned = 1
-                 AND excluded.latest_sequence >= observation_projection_output_state.latest_sequence
-                THEN excluded.latest_observation_id
-                ELSE observation_projection_output_state.canonical_observation_id
-            END,
-            latest_observation_id = CASE
-                WHEN excluded.latest_sequence >= observation_projection_output_state.latest_sequence
-                THEN excluded.latest_observation_id
-                ELSE observation_projection_output_state.latest_observation_id
-            END,
-            latest_sequence = MAX(
-                observation_projection_output_state.latest_sequence,
-                excluded.latest_sequence
-            ),
-            projector_owned = MAX(
-                observation_projection_output_state.projector_owned,
-                excluded.projector_owned
-            ),
-            owner_count = observation_projection_output_state.owner_count + 1",
-        params![
-            provenance.projector_version(),
-            message.provider.as_str(),
-            message.message_id.as_str(),
-            provenance.observation_id().as_str(),
-            sequence_i64,
-            i64::from(message_created),
-        ],
-    )
-    .await
-    .map_err(|error| storage("update projection output state", error))?;
     Ok(())
 }
 
@@ -1950,7 +1896,7 @@ async fn apply_message_effect(
     let rows: Pin<Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>> =
         Box::pin(apply_rows(conn, sequence, observation, projection));
     let message_created = rows.await?;
-    apply_provenance(conn, sequence, projection, message_created).await?;
+    apply_provenance(conn, projection, message_created).await?;
     // The session-temporal store materialized the previous owner's
     // occurrence; once another observation owns the message, that occurrence
     // is stale and the session must rebuild.
@@ -1965,8 +1911,7 @@ async fn apply_message_effect(
     Ok(())
 }
 
-/// The observation whose rendering an output's row holds, per the ownership
-/// cache this writer keeps current.
+/// The observation whose rendering an output's row holds, per its provenance.
 async fn read_canonical_owner(
     conn: &impl QueryExecutor,
     provider: &str,
@@ -1974,8 +1919,10 @@ async fn read_canonical_owner(
 ) -> ProjectionStoreResult<Option<String>> {
     let mut rows = conn
         .query(
-            "SELECT canonical_observation_id FROM temp.observation_projection_output_state
-             WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
+            &format!(
+                "SELECT canonical_observation_id FROM ({})",
+                output_ownership_sql()
+            ),
             params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
         )
         .await
@@ -2076,7 +2023,6 @@ pub(in super::super) async fn retire_source_record(
     )
     .await?;
     for (provider, message_id) in outputs {
-        reaggregate_output_state_for_output(conn, &provider, &message_id).await?;
         let Some(owner_id) = read_canonical_owner(conn, &provider, &message_id).await? else {
             delete_projected_output(conn, &provider, &message_id).await?;
             continue;

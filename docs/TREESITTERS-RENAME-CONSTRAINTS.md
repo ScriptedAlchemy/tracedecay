@@ -28,7 +28,7 @@ migration (`docs/RUST-PARSER-MIGRATION.md`), not renaming them.
 | Source of `medium` / `lite` | **crates.io registry** (0.2.0 each), not git | `Cargo.lock:4509-4512`, `Cargo.lock:4525-4529` |
 | Public registry history | Published as `0.3.2`, `0.4.0` on crates.io before the switch to a git pin | `CHANGELOG.md:530,552` |
 | Build-script coupling | Upstream's build script compiles vendored C/C++ grammars under `.cargo/config.toml` `CFLAGS=-DNDEBUG` | `CHANGELOG.md:582-583` |
-| API surface tracedecay consumes | `all_languages()`, `markdown::LANGUAGE`, `markdown::inline::LANGUAGE` | `ts_provider.rs:27`, `markdown_extractor.rs:70,139` |
+| API tracedecay consumes | `all_languages()`, `markdown::LANGUAGE`, `markdown::inline::LANGUAGE` | `ts_provider.rs:27`, `markdown_extractor.rs:70,139` |
 
 The project *itself* rebranded tracedecay → tracedecay (lib/bin name is `tracedecay`,
 `Cargo.toml:97,100`; version reset at `CHANGELOG.md:12`) and carries extensive

@@ -17,22 +17,9 @@ pub mod host_admission;
 /// that parked a native worker. An off-Tokio test asserts this does not move.
 #[cfg(test)]
 pub(crate) fn native_runtime_hazards() -> u64 {
-    [
-        "daemon-service.operation_events.sse_disconnect",
-        "daemon-service.hook_orchestration.admit",
-        "daemon-service.work_blocked_interval_recovery.start",
-        "daemon-service.observability.mount_drain",
-        "daemon-service.observability.settle_drain",
-        "daemon-service.observability.producer_drop",
-        "daemon-service.work_attempt.spawn_for_worktree",
-        "daemon-service.host_admission.bootstrap",
+    tracedecay_runtime_core::native_runtime::tokio_runtime_missing_count(
         "daemon-service.shutdown.runner",
-        "daemon-service.shutdown_coordination.runner",
-    ]
-    .into_iter()
-    .map(tracedecay_runtime_core::native_runtime::tokio_runtime_missing_count)
-    .sum::<u64>()
-        + tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits()
+    ) + tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits()
 }
 
 /// Park after core publication when `TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH`
@@ -131,8 +118,14 @@ async fn hold_for_test(variable: &str, stage: &[u8]) -> Result<()> {
             entered.display()
         ),
     })?;
+    // Holds park daemon tasks on the native runtime too, where a Tokio timer
+    // panics for want of a reactor.
     while hold.exists() {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tracedecay_runtime_core::native_runtime::sleep_until(
+            std::time::Instant::now() + Duration::from_millis(20),
+        )
+        .await
+        .map_err(|message| TraceDecayError::Config { message })?;
     }
     Ok(())
 }

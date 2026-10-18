@@ -104,6 +104,7 @@ where
             provider: "claude",
             reason: "project_sessions_authority_mismatch",
             retryable: false,
+            status: crate::admission::HostAdmissionStatus::Unavailable,
             detail: None,
         });
     }

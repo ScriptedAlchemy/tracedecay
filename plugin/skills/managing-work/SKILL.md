@@ -1,41 +1,30 @@
 ---
 name: managing-work
-description: Create or control TraceDecay Work tasks, attempts, graph mutations, placements, or adjudication.
+description: Use when the user asks to create or control TraceDecay Work tasks, attempts, graph mutations, placements, or adjudication. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Managing Work
 
-For bounded parallel implementation with a reviewed synthesis, start with
-`tracedecay_work_advance_job`. One request names the tasks, each task's
-placement, and the synthesis; each call runs the next existing operations and
-returns their receipts, a wait, a typed refusal, or the completed attempts.
-Call it again with the same request until it settles. The operations below
-stay available for steps the guided job leaves to you, such as pause, resume,
-retry, and adjudication.
+Follow these steps in order. Report a step you skip as `skip: <reason>`.
+[Operations](references/operations.md) covers each manual Work operation.
 
-Work is the daemon-owned task/attempt surface. `tracedecay_work_create` mints a
-task; proposal review and acceptance (`tracedecay_work_review_proposal`,
-`tracedecay_work_accept_proposal`) precede execution admission
-(`tracedecay_work_admit_execution`). An existing attempt's status and evidence
-are distinct from starting, retrying, resuming, or canceling it
-(`tracedecay_work_start_attempt`, `tracedecay_work_retry_attempt`,
-`tracedecay_work_resume_attempts`, `tracedecay_work_cancel_attempt`), and a run
-is paused or resumed as a whole (`tracedecay_work_pause_run`,
-`tracedecay_work_resume_run`). Consume exact proposal, attempt, placement, and
-run identities returned by the preceding operation.
+1. For bounded parallel implementation with a reviewed synthesis, call
+   `tracedecay_work_advance_job` with one request that names the tasks, each
+   task's placement, and the synthesis. skip: the user asked to control one
+   existing task, attempt, placement, or run; go to step 4.
+2. Call it again with the same request until it settles: receipts, a wait, a
+   typed refusal, or the completed attempts.
+3. On a typed refusal or a failed attempt, read its state before you retry,
+   resume, or cancel anything.
+4. For a step the job leaves to you (pause, resume, retry, adjudication), call
+   the operation with the exact identity the preceding operation returned.
+5. Read the final state of every task, attempt, and run you touched.
 
-Graph mutation and duplicate adjudication have preparation operations whose
-prepared identity and expected state must be preserved through
-`tracedecay_work_mutate_graph`, `tracedecay_work_adjudicate_duplicate`, and
-`tracedecay_work_adjudicate_leak`, rather than deriving a new request from a
-display label. Placement preflight, admission
-(`tracedecay_work_admit_placement`), status, and release
-(`tracedecay_work_release_placement`) similarly belong to one returned
-authority. `tracedecay_work_synthesize` admits one synthesis attempt
-over exact sibling attempt identities; an unsynthesized answer is a typed
-refusal, not a failed attempt.
+Named Workflow lifecycle belongs to `managing-workflows`; session recovery is
+read-only history, not Work execution.
 
-For multi-root Work queries, use a saved scope set with `multi_root_execute`.
-Do not silently substitute the active project's scope. Use live metadata for
-available controls and their arguments. Named Workflow lifecycle belongs to
-`managing-workflows`; session recovery is read-only history, not Work execution.
+**Report:** each task, attempt, placement, or run identity with its state and
+the receipt or typed refusal that set it. Do not retry a refused step without
+reading its state.

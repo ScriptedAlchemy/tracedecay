@@ -1,4 +1,5 @@
 pub(crate) mod apply;
+mod codex_echo;
 #[cfg(test)]
 mod rearm_tests;
 mod rebuild;
@@ -17,6 +18,7 @@ pub(super) use apply::{
     ConvergedRendering, converge_released_output_rendering, derive_projection,
     derive_projection_with_alias, retire_source_record, verify_workflow_effects,
 };
+pub(crate) use codex_echo::converge_codex_response_echoes;
 pub use rebuild::{
     converge_projection_predecessor, project_observation, project_queued_observations,
     rebuild_projection,
@@ -27,7 +29,6 @@ pub(super) use schema::{
 };
 pub(crate) use source_transition::verify_native_source_supersession;
 pub(crate) use state::RearmedProjectionRetries;
-pub(super) use state::ensure_projection_output_state_cache;
 #[cfg(test)]
 pub(super) use state::verify_projection_rows;
 pub(super) use state::{

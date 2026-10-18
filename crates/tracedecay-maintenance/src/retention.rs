@@ -6,7 +6,7 @@
 //! * `analytics_events`, hook/tool/skill telemetry. Derived, reconstructable
 //!   signal, so it carries a **safe default retention of 180 days**.
 //! * `lcm_raw_messages`, the stored session messages, retained for a
-//!   six-month recovery horizon. Current session stores additionally use
+//!   six-month recovery horizon. Current session stores also use
 //!   projection-durability-aware retention in `tracedecay_lcm::retention`.
 //!
 //! Every window is expressed in whole days. Rows are pruned only when their
@@ -32,6 +32,8 @@ use tracedecay_runtime_core::db::engine::{Executor, params};
 pub mod cold_store;
 /// Read-only diagnostics over retention-owned state.
 pub mod diagnostics;
+/// Bounded metadata census of every store family under a profile root.
+pub mod footprint;
 /// Exact-liveness mark-and-sweep for immutable derived code generations.
 /// Detection and deletion of corruption/recovery artifacts found beside live
 /// databases (plan 38, §5).

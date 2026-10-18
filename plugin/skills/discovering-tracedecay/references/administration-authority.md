@@ -1,7 +1,7 @@
 # Administration authority
 
 Project identity is registry-owned. Resolve project and store selectors through
-the supported project and storage surfaces. A linked worktree retains its exact
+the supported project and storage APIs. A linked worktree retains its exact
 snapshot while sharing the registered project identity. Cross-project reads use
 the selected project's store. Multi-root queries use a saved scope set; replace
 it with `tracedecay_multi_root_scope_set_compare_and_swap` against the identity

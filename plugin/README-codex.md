@@ -12,10 +12,8 @@ Codex.
   selection, code search, symbol inspection, and bounded graphs. It requires
   Node.js 20 or later on PATH; invoke `tracedecay_workspace` to open it.
   Both MCP servers use the resolved TraceDecay binary from installation.
-  The install sets `TRACEDECAY_MCP_REPEAT_READ_POINTERS=1` on the graph
-  server: Codex starts one server per thread, so a repeated identical read
-  with unchanged content gets a short pointer to the result that thread
-  already holds. Repeating the call once more returns the full content.
+  The graph server runs `tracedecay serve --full-tool-list`; see
+  [Code mode](#code-mode).
 - **Skills** (`skills/`): one skill per common workflow, searching for code,
   reading code cheaply, mapping architecture, impact analysis, reviewing diffs,
   recalling project memory and session context, and more. Codex auto-discovers
@@ -26,7 +24,9 @@ Codex.
   `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
   `PostToolUse`, `PostCompact`, and `Stop`. `SessionStart` and `PostToolUse`
   can return daemon-approved guidance through Codex's documented
-  `additionalContext` response. The other events are capture-only or bounded
+  `additionalContext` response. In a registered project, `SessionStart` leads
+  with the skill mandate from `plugin/hooks/session-start-context.md`, as on
+  Claude. The other events are capture-only or bounded
   pressure probes. The daemon owns capture, preflight, compaction, and any
   model work.
 
@@ -47,10 +47,6 @@ neither client starts a missing or stopped service. If the daemon is
 unavailable or intentionally held, report that state and use scoped native
 tools without retrying or changing daemon lifecycle.
 
-For literal strings, regexes, and config keys inside indexed code, use
-`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
-`tracedecay_context` for concept-level discovery.
-
 Before running `cargo check`/`tsc`/`clippy` in the shell, or when shell output
 shows compile errors, the injected steering routes the moment to tracedecay
 diagnostics: paste captured output into `tracedecay_diagnose`, or read the
@@ -68,3 +64,36 @@ Codex does not expose an authenticated compacted payload through this hook,
 so pressure-only compaction stays read-only: the daemon reports
 native-summary publication as unavailable and does not mutate transcript
 state.
+
+## Code mode
+
+Codex can call tools from a model-written JavaScript program instead of one
+tool call per turn. The program runs in Codex's `exec` sandbox, calls each MCP
+tool as `await tools.mcp__graph__tracedecay_<name>(args)`, and returns only
+what it prints. Codex 0.163 with current GPT models already works this way
+with no feature flag: every TraceDecay call arrives from `exec`.
+
+TraceDecay adapts the graph server to that host:
+
+- The server lists every tool with its full input schema
+  (`--full-tool-list`). Codex finds tools through its own `ALL_TOOLS` and
+  `tools.tool_search`, and it builds each tool's TypeScript declaration from
+  the input schema.
+- The server's `initialize` instructions are three short sentences. Codex
+  prefixes them to every tool description it shows a program, so a program
+  that lists 20 tools pays for them 20 times.
+- Results keep the default Markdown rendering. Programs print results rather
+  than parse them, and `format: "json"` returns the full typed envelope,
+  which is several times larger. Ask for `format: "json"` only when the
+  program reads specific fields.
+- Repeat-read pointers are off, because the program that receives a pointer
+  cannot act on it.
+- `tracedecay_analytics` still counts each tool by name. The daemon records
+  every call the program makes; Codex reports only `exec` to hooks, and the
+  TraceDecay `PostToolUse` hook matches only `Bash` and `apply_patch`.
+
+The full tool list and the short instructions together cut input per task
+by 13% on gpt-5.6-sol and 9% on gpt-6.1-sol in the agent-adoption eval,
+without a measurable change in task success on its small fixture. The
+measurements and every decision behind this section are in
+[`docs/code-mode/decisions.tsv`](../docs/code-mode/decisions.tsv).

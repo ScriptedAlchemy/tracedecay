@@ -32,8 +32,8 @@ rust.toolchain(
         "fastbuild": "1",
         "opt": "3",
     },
-    versions = ["nightly/2026-09-27"],
-    rustfmt_version = "nightly/2026-09-27",
+    versions = ["nightly/2026-10-17"],
+    rustfmt_version = "nightly/2026-10-17",
 )
 use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")
@@ -56,6 +56,46 @@ crate.annotation(
     patch_args = ["-p1"],
     patches = ["//scripts:bazel/patches/aws-lc-sys-jitterentropy-include.patch"],
     version = "0.46.0",
+)
+
+# arborium grammar build scripts read `env!("CARGO_MANIFEST_DIR")`, which bakes
+# the compiling output base's absolute path into the build-script binary. The
+# action key does not include that path, so the disk cache served one output
+# base's binary to another and cc looked for parser.c under a dead output base.
+# The patch reads the directory when the script runs instead.
+crate.annotation(
+    crate = "arborium-kotlin",
+    patch_args = ["-p1"],
+    patches = ["//scripts:bazel/patches/arborium-grammar-runtime-manifest-dir.patch"],
+    version = "2.18.2",
+)
+
+crate.annotation(
+    crate = "arborium-lean",
+    patch_args = ["-p1"],
+    patches = ["//scripts:bazel/patches/arborium-grammar-runtime-manifest-dir.patch"],
+    version = "2.18.2",
+)
+
+# One long poll must not delay the rest of the runtime. Two upstream fixes:
+# Dicklesworthstone/asupersync#83, a reactor leader that leaves epoll to run a
+# task promotes no parked follower, so the poll delays every socket wake and
+# shared timer; Dicklesworthstone/asupersync#84, a task woken by the executing
+# task waits in that worker's unstealable LIFO slot for the whole poll while
+# other workers idle. One patch file holds both because crate_universe applies
+# an annotation's patches in sorted label order. Delete this annotation and the
+# patch once the pinned or published asupersync contains both fixes.
+# The blocking-pool stack patch touches other files, so its order does not
+# matter: it gives pool threads the runtime's thread_stack_size (16 MiB in the
+# CLI) instead of the standard library's 2 MiB.
+crate.annotation(
+    crate = "asupersync",
+    patch_args = ["-p1"],
+    patches = [
+        "//scripts:bazel/patches/asupersync-blocking-pool-stack.patch",
+        "//scripts:bazel/patches/asupersync-scheduler.patch",
+    ],
+    version = "0.6.0",
 )
 
 # .cargo/config.toml's [env] LIBSQLITE3_FLAGS, which Cargo hands every build
@@ -103,7 +143,7 @@ node.toolchain(node_version = "26.11.1")
 use_repo(node, "nodejs")
 
 pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
-pnpm.pnpm(pnpm_version = "12.11.2")
+pnpm.pnpm(pnpm_version = "12.14.0")
 use_repo(pnpm, "pnpm")
 
 npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")

@@ -712,6 +712,12 @@ static SHARED_JSONL_WAITER_REGISTRATIONS: OnceLock<Mutex<HashMap<PathBuf, usize>
 #[cfg(test)]
 static SHARED_JSONL_BUILD_GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<std::sync::Barrier>>>> =
     OnceLock::new();
+/// A pin of a gated path meets its test twice: once on entry, so the test
+/// knows the pin is in progress, and once to finish it.
+#[cfg(test)]
+pub(in crate::runtime) static SHARED_JSONL_PIN_GATES: OnceLock<
+    Mutex<HashMap<PathBuf, Arc<std::sync::Barrier>>>,
+> = OnceLock::new();
 
 #[cfg(test)]
 #[derive(Default)]
@@ -959,15 +965,25 @@ pub(crate) struct SharedJsonlPathPin {
 }
 
 pub(crate) fn pin_shared_jsonl_paths(paths: &[PathBuf]) -> SharedJsonlPathPin {
-    let mut canonical = Vec::with_capacity(paths.len());
-    for path in paths {
-        let Ok(path) = std::fs::canonicalize(path) else {
-            continue;
-        };
-        if !canonical.contains(&path) {
-            canonical.push(path);
-        }
+    #[cfg(test)]
+    let gate = {
+        let mut gates = SHARED_JSONL_PIN_GATES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        paths.iter().find_map(|path| gates.remove(path))
+    };
+    #[cfg(test)]
+    if let Some(gate) = &gate {
+        gate.wait();
+        gate.wait();
     }
+    let mut canonical = paths
+        .iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect::<Vec<_>>();
+    canonical.sort_unstable();
+    canonical.dedup();
     let pins = SHARED_JSONL_PATH_PINS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut pins = pins.lock().unwrap_or_else(PoisonError::into_inner);
     for path in &canonical {

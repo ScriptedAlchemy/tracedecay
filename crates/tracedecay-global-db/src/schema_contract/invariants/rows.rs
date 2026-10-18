@@ -404,7 +404,7 @@ pub(super) async fn validate_source_cursor_authority_chunk(
             decode_authority_json(&scope_json, "source cursor advance scope JSON")?;
         let coverage: ObservationCoverageV1 =
             decode_authority_json(&coverage_json, "source cursor advance coverage JSON")?;
-        let receipt_matches = match ObservationCoverageReason::try_from(reason.as_str()) {
+        let receipt_matches = match reason.parse::<ObservationCoverageReason>() {
             Ok(parsed_reason) => match (receipt_id, receipt_json) {
                 (None, None) => parsed_reason.is_receiptless(),
                 (Some(receipt_id), Some(receipt_json)) if !parsed_reason.is_receiptless() => {

@@ -540,10 +540,14 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
-    pub fn dispatch_read(
+    /// Runs one typed read as a job on the blocking pool, so the awaiting
+    /// task's thread never parks on reader admission or a reader reply. The
+    /// probe bounds the job: its deadline or cancellation interrupts the
+    /// reader connection.
+    pub async fn dispatch_read(
         &self,
         request: RuntimeReadRequestV1,
-        probe: &dyn RuntimeRequestProbeV1,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
     ) -> Result<RuntimeReadOutcomeV1, RepositoryDispatchError> {
         let readers = {
             let state = self.lock_state();
@@ -555,15 +559,19 @@ impl RepositoryRuntimePhysicalAttachment {
                 .clone()
                 .ok_or(RepositoryDispatchError::Closed)?
         };
-        let mut reader = readers
-            .acquire_for_dispatch(&request, probe)
-            .map_err(RepositoryDispatchError::Reader)?;
-        let mut snapshot = reader
-            .begin_snapshot()
-            .map_err(|error| RepositoryDispatchError::ReaderWorker(error.to_string()))?;
-        snapshot
-            .execute(request, probe)
-            .map_err(RepositoryDispatchError::Reader)
+        crate::native_runtime::spawn_blocking(move || {
+            let mut reader = readers
+                .acquire_for_dispatch(&request, probe.as_ref())
+                .map_err(RepositoryDispatchError::Reader)?;
+            let mut snapshot = reader
+                .begin_snapshot()
+                .map_err(|error| RepositoryDispatchError::ReaderWorker(error.to_string()))?;
+            snapshot
+                .execute(request, probe.as_ref())
+                .map_err(RepositoryDispatchError::Reader)
+        })
+        .await
+        .map_err(RepositoryDispatchError::ReaderWorker)?
     }
 
     #[tracing::instrument(name = "rusqlite.attachment.drain", level = "trace", skip_all)]
@@ -1199,6 +1207,230 @@ mod tests {
             }))
             .expect("the released reader must let the checkpoint recover below the soft limit");
 
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
+
+    /// A reader that started at the newest frame never holds back the
+    /// backfill, but it still holds a WAL read slot, and SQLite cannot restart
+    /// the log while any slot is held. Releasing the drain once every frame is
+    /// backfilled lets the next write append past the hard limit again; under
+    /// overlapping reads that re-enters the drain on every batch and the log
+    /// never restarts.
+    #[test]
+    fn hard_wal_pressure_holds_writes_until_the_wal_log_can_restart() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("hard-pressure-restart.sqlite3");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(connection);
+        let path = path.canonicalize().unwrap();
+        let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+        let binding = binding();
+        let mut admission = AdmissionConfigV1::default();
+        admission.wal.soft_limit_bytes = 8 * 1024;
+        admission.wal.hard_limit_bytes = 16 * 1024;
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .attach(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path,
+                admission,
+            )
+            .unwrap();
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch(
+                "CREATE TABLE hard_pressure (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)"
+                    .to_owned(),
+            )
+            .unwrap();
+        let count = || statement("SELECT COUNT(*) FROM hard_pressure", vec![]);
+        let older = handle.begin_read_snapshot(Duration::from_secs(1)).unwrap();
+        older.query(count()).unwrap();
+        handle
+            .execute(statement(
+                "INSERT INTO hard_pressure (id, payload) VALUES (?, ?)",
+                vec![
+                    ExactSqlValue::Integer(1),
+                    ExactSqlValue::Blob(vec![7; 128 * 1024]),
+                ],
+            ))
+            .unwrap();
+        let checkpoint = attachment
+            .lock_state()
+            .writer
+            .as_ref()
+            .expect("writer remains attached")
+            .checkpoint_handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut pressure = checkpoint.pressure_subscription();
+        runtime
+            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+                matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
+            }))
+            .expect("the over-hard-limit write must publish hard checkpoint pressure");
+        // Hard pressure blocks only general readers; the health lane still
+        // admits, and a reader admitted now reads the newest frame.
+        let current = handle
+            .begin_health_read_snapshot(Duration::from_secs(1))
+            .unwrap();
+        current.query(count()).unwrap();
+        let blocked_wal_bytes = fs::metadata(&wal_path).unwrap().len();
+
+        let queued_handle = handle.clone();
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+        let queued = thread::spawn(move || {
+            let result = queued_handle.execute(statement(
+                "INSERT INTO hard_pressure (id, payload) VALUES (?, ?)",
+                vec![ExactSqlValue::Integer(2), ExactSqlValue::Blob(vec![8; 32])],
+            ));
+            let _ = completed_tx.send(result);
+        });
+        drop(older);
+        assert!(
+            completed_rx.recv_timeout(Duration::from_secs(2)).is_err(),
+            "a reader still holding a WAL read slot must keep the drain: the log cannot restart"
+        );
+        assert_eq!(
+            fs::metadata(&wal_path).unwrap().len(),
+            blocked_wal_bytes,
+            "the queued write must not grow the physical WAL while the log cannot restart"
+        );
+        runtime
+            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+                matches!(
+                    pressure,
+                    crate::CheckpointPressure::BlockGeneral { blockers, .. }
+                        if blockers.count() == 1
+                )
+            }))
+            .expect("the drain must name the one reader that still holds a read slot");
+
+        drop(current);
+        completed_rx.recv().unwrap().unwrap();
+        queued.join().unwrap();
+        let mut status = checkpoint.status_subscription();
+        runtime
+            .block_on(wait_for(&cx(), &mut status, |status| {
+                status.latest.as_ref().is_some_and(|outcome| match outcome {
+                    crate::CheckpointOutcome::BelowSoft { wal }
+                    | crate::CheckpointOutcome::Complete { wal, .. } => wal.bytes <= 8 * 1024,
+                    crate::CheckpointOutcome::Pending { .. }
+                    | crate::CheckpointOutcome::Interrupted { .. } => false,
+                })
+            }))
+            .expect("the write after the drain must start the restarted log from its first frame");
+
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
+
+    /// #4097: a reader that never releases its snapshot used to keep the hard
+    /// drain pending forever, with every general write refused. Past one read
+    /// deadline the fence revokes the snapshot, the log restarts, and the
+    /// queued write commits while the snapshot is still held.
+    #[test]
+    fn a_hard_drain_converges_behind_a_reader_that_never_releases() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("hard-pressure-revoke.sqlite3");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(connection);
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        let mut admission = AdmissionConfigV1::default();
+        admission.wal.soft_limit_bytes = 8 * 1024;
+        admission.wal.hard_limit_bytes = 16 * 1024;
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .attach(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path,
+                admission,
+            )
+            .unwrap();
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch(
+                "CREATE TABLE hard_pressure (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)"
+                    .to_owned(),
+            )
+            .unwrap();
+        let count = || statement("SELECT COUNT(*) FROM hard_pressure", vec![]);
+        let pinned = handle.begin_read_snapshot(Duration::from_secs(1)).unwrap();
+        pinned.query(count()).unwrap();
+        handle
+            .execute(statement(
+                "INSERT INTO hard_pressure (id, payload) VALUES (?, ?)",
+                vec![
+                    ExactSqlValue::Integer(1),
+                    ExactSqlValue::Blob(vec![7; 128 * 1024]),
+                ],
+            ))
+            .unwrap();
+        let checkpoint = attachment
+            .lock_state()
+            .writer
+            .as_ref()
+            .expect("writer remains attached")
+            .checkpoint_handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let mut pressure = checkpoint.pressure_subscription();
+        runtime
+            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+                matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
+            }))
+            .expect("the over-hard-limit write must publish hard checkpoint pressure");
+
+        let queued = handle.clone();
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+        let writer = thread::spawn(move || {
+            let result = queued.execute(statement(
+                "INSERT INTO hard_pressure (id, payload) VALUES (?, ?)",
+                vec![ExactSqlValue::Integer(2), ExactSqlValue::Blob(vec![8; 32])],
+            ));
+            let _ = completed_tx.send(result);
+        });
+        completed_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the queued write is not held until the reader lets go")
+            .expect("the queued write commits while the reader still holds its snapshot");
+        writer.join().unwrap();
+        let mut status = checkpoint.status_subscription();
+        let context = cx();
+        let converged = wait_for(&context, &mut status, |status| {
+            matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
+                && status.latest.as_ref().is_some_and(|outcome| match outcome {
+                    crate::CheckpointOutcome::BelowSoft { wal }
+                    | crate::CheckpointOutcome::Complete { wal, .. } => wal.bytes <= 8 * 1024,
+                    crate::CheckpointOutcome::Pending { .. }
+                    | crate::CheckpointOutcome::Interrupted { .. } => false,
+                })
+        });
+        runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(30), converged).await })
+            .expect("the drain converges while the reader still holds its snapshot")
+            .expect("the drain completes and the restarted log stays below the soft limit");
+        assert!(
+            pinned.query(count()).is_err(),
+            "the revoked snapshot no longer reads its old view"
+        );
+
+        drop(pinned);
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();
     }

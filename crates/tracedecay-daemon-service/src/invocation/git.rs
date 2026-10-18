@@ -358,7 +358,6 @@ pub(super) async fn execute_git_read(
     if initial.scope != terminal.scope
         || initial.requester != terminal.requester
         || initial.effective_capabilities != terminal.effective_capabilities
-        || initial.grant_expires_at != terminal.grant_expires_at
         || initial.policy_revision != terminal.policy_revision
         || initial.policy_digest != terminal.policy_digest
         || initial.configuration_digest != terminal.configuration_digest
@@ -413,22 +412,8 @@ pub(super) async fn execute_git_read(
                         );
                     }
                 };
-                let service = Arc::clone(&owner.service);
-                match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                    service.save_preview_input(input)
-                })
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        return application_problem(wire_request_id, map_git_port_problem(error));
-                    }
-                    Err(_) => {
-                        return DaemonInvocationResponse::problem(
-                            wire_request_id,
-                            DaemonInvocationProblem::Unavailable,
-                        );
-                    }
+                if let Err(error) = Box::pin(owner.service.save_preview_input(input)).await {
+                    return application_problem(wire_request_id, map_git_port_problem(error));
                 }
             }
             let packet = match git_read_evidence_packet(
@@ -519,9 +504,9 @@ pub(super) async fn execute_git_preview(
     // this async state machine: constructing that future on the socket poll
     // stack overflows. Keep every payload on a blocking thread or the heap.
     let join_id = wire_request_id.clone();
-    let prepared = match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        prepare_git_preview(wire_request_id, owner, request, deadline, cancellation)
-    })
+    let prepared = match tracedecay_runtime_core::native_runtime::on_blocking_pool(
+        prepare_git_preview(wire_request_id, owner, request, deadline, cancellation),
+    )
     .await
     {
         Ok(Ok(prepared)) => prepared,
@@ -551,9 +536,9 @@ pub(super) async fn execute_git_apply(
         return missing_registered_owner_problem(publication, wire_request_id);
     };
     let join_id = wire_request_id.clone();
-    let prepared = match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        prepare_git_apply(wire_request_id, owner, request, deadline, cancellation)
-    })
+    let prepared = match tracedecay_runtime_core::native_runtime::on_blocking_pool(
+        prepare_git_apply(wire_request_id, owner, request, deadline, cancellation),
+    )
     .await
     {
         Ok(Ok(prepared)) => prepared,
@@ -580,7 +565,7 @@ struct PreparedGitApply {
     request: GitIndexApplyRequestV1,
 }
 
-fn prepare_git_preview(
+async fn prepare_git_preview(
     wire_request_id: String,
     owner: DaemonGitInvocationOwner,
     request: GitPreviewSurfaceRequest,
@@ -607,7 +592,9 @@ fn prepare_git_preview(
             invalid_git_request(),
         )));
     };
-    let preview_input = match service.read_preview_input(&preview_input_id, authority.evaluated_at)
+    let preview_input = match service
+        .read_preview_input(&preview_input_id, authority.evaluated_at)
+        .await
     {
         Ok(input) if input.operation == operation => input,
         Ok(_) => return Err(Box::new(concealed_application_problem(wire_request_id))),
@@ -637,7 +624,7 @@ fn prepare_git_preview(
     }))
 }
 
-fn prepare_git_apply(
+async fn prepare_git_apply(
     wire_request_id: String,
     owner: DaemonGitInvocationOwner,
     request: GitApplySurfaceRequest,
@@ -645,12 +632,15 @@ fn prepare_git_apply(
     cancellation: CancellationContext,
 ) -> Result<Box<PreparedGitApply>, Box<DaemonInvocationResponse>> {
     let service = Arc::clone(&owner.service);
-    let preview = service.read_preview(&request.preview_id).map_err(|error| {
-        Box::new(application_problem(
-            wire_request_id.clone(),
-            map_git_port_problem(error),
-        ))
-    })?;
+    let preview = service
+        .read_preview(&request.preview_id)
+        .await
+        .map_err(|error| {
+            Box::new(application_problem(
+                wire_request_id.clone(),
+                map_git_port_problem(error),
+            ))
+        })?;
     if preview.preview_digest != request.preview_digest
         || preview.repository_snapshot.project_id != owner.project_id
     {
@@ -703,12 +693,13 @@ async fn settle_prepared_git_preview(
     let started_at = prepared.request.observed_at;
     let effective_deadline = prepared.request.context.deadline().clone();
     let wire_request_id = prepared.wire_request_id.clone();
-    let result = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+    let result = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         GitIndexTransactionService::new(SharedGitTransactionPort {
             service: prepared.service,
             cancellation: None,
         })
         .preview(prepared.request)
+        .await
     })
     .await;
     let response = match result {
@@ -755,12 +746,13 @@ async fn settle_prepared_git_apply(
     let effective_deadline = prepared.request.context.deadline().clone();
     let wire_request_id = prepared.wire_request_id.clone();
     let cancellation = emitter.clone();
-    let result = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+    let result = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         GitIndexTransactionService::new(SharedGitTransactionPort {
             service: prepared.service,
             cancellation: Some(cancellation),
         })
         .apply(prepared.request)
+        .await
     })
     .await;
     let response = match result {

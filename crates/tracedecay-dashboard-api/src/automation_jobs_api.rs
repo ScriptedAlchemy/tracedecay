@@ -439,4 +439,29 @@ mod tests {
             "the job run parked no native thread on a writer"
         );
     }
+
+    #[test]
+    fn scheduler_reconcile_runs_without_a_tokio_runtime() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-reconcile-native",
+        ));
+        let (reconciled, reconciles) = mpsc::channel();
+        let reconciled = std::sync::Mutex::new(reconciled);
+        dash.automation_scheduler_reconciler = Some(Arc::new(move || {
+            let on_tokio = tokio::runtime::Handle::try_current().is_ok();
+            let _ = reconciled.lock().expect("reconcile channel").send(on_tokio);
+            Box::pin(async {
+                tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
+            })
+        }));
+
+        native_runtime::block_on(async { dash.reconcile_automation_scheduler() })
+            .expect("native block_on");
+
+        let on_tokio = reconciles
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the reconcile reaches the daemon's reconciler");
+        assert!(!on_tokio, "the reconcile ran on a Tokio worker");
+    }
 }

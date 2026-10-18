@@ -245,12 +245,15 @@ pub enum TranscriptIngestError {
     /// [`Self::NonDurableRecord`] this says nothing about the record itself,
     /// so the admission authority's own retryability verdict must survive to
     /// classification: a still-mounting write authority is a transient race,
-    /// not a permanently blocked projection.
+    /// not a permanently blocked projection. Its status survives for the same
+    /// reason: only a `Degraded` refusal says the record, not the authority,
+    /// is at fault.
     #[error("{provider} observation admission failed: {reason}")]
     HostAdmission {
         provider: &'static str,
         reason: &'static str,
         retryable: bool,
+        status: crate::admission::HostAdmissionStatus,
         detail: Option<String>,
     },
     #[error("{provider} frame state is invalid")]

@@ -1,34 +1,33 @@
 ---
 name: reviewing-changes
-description: 'Review semantic risk in a PR, branch, or working-tree diff, including changed callers, coverage gaps, and unsafe or redundant code.'
+description: Use when the user asks to review, summarize, or assess the risk of a PR, branch, or working-tree diff. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Reviewing changes
 
-Read the actual diff and use `diff_context` for working-tree changes or
-`pr_context` for ref-to-ref semantic context. Their changed symbols, dependents,
-and test links supplement the diff; they cannot prove unindexed or external
-consumers safe. Deepen on a risky symbol rather than repeating every analysis
-across all changed files.
+Follow these steps in order. Report a step you skip as `skip: <reason>`.
 
-A scan hit is a lead: test unwraps and unsafe blocks are not automatically
-defects. Confirm concrete behavior and reachable callers. For dead-code or
-ship-risk work, see [safety audit](references/safety-audit.md).
+1. Read the actual diff.
+2. Load its semantic context: `tracedecay_diff_context` for working-tree
+   changes, `tracedecay_pr_context` for a ref-to-ref range. Changed symbols,
+   dependents, and test links supplement the diff; they cannot prove unindexed
+   or external consumers safe.
+3. Deepen on the riskiest changed symbols with callers, impact, and test links
+   rather than repeating every analysis across every file. skip: the diff is
+   small enough to read whole.
+4. Confirm each candidate finding against concrete behavior and a reachable
+   caller. A scan hit is a lead: test unwraps and unsafe blocks are not defects
+   by themselves. For dead-code or ship-risk work, see
+   [safety audit](references/safety-audit.md).
+5. Explain each finding against the changed behavior and its evidence.
 
-Generation-bound Git reads do not authorize index/ref writes. TraceDecay Git
-preview/apply (`tracedecay_git_preview`, then `tracedecay_git_apply`) consumes
-exact returned authority. Feedback advisory handles are read-only diagnostics
-and never permission to post or resolve GitHub comments. Branch-stack
-integration requires its frozen snapshot and approved application identity
-(`tracedecay_approve_native_integration`, `tracedecay_apply_native_integration`,
-`tracedecay_cancel_native_integration`); an ordinary review does not authorize
-integration.
+A review grants no write authority. Before a Git apply, a native integration,
+or a worktree cleanup, read [write authority](references/write-authority.md).
+Structural test selection belongs to `assessing-impact`; structural mutation
+belongs to `editing-safely`.
 
-Worktree cleanup consumes inventory, inspection, confirmation, removal
-(`tracedecay_worktree_cleanup_remove`), and reconciliation identities and does
-not delete a branch. Preserve peer ownership and reconcile typed outcomes rather
-than reconstructing a target from its name.
-
-Explain findings against the actual changed behavior and evidence. Structural
-test selection belongs to `assessing-impact`; structural mutation belongs to
-`editing-safely`.
+**Report:** actionable findings only, each with location, failure mode, and
+evidence, then the coverage the semantic context lacked. Do not post, resolve,
+or apply anything the review did not authorize.

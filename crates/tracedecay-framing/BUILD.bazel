@@ -25,7 +25,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-framing__+test-helpers__dev",
+    name = "tracedecay-framing__dev",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_framing",
@@ -37,13 +37,13 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     aliases = aliases(normal = True),
     rustc_flags = perf_rustc_flags(1),
-    crate_features = ["test-helpers"],
+    crate_features = [],
 )
 
 rust_test(
     name = "unit_test",
-    crate = ":tracedecay-framing__+test-helpers__dev",
-    crate_features = ["test-helpers"],
+    crate = ":tracedecay-framing__dev",
+    crate_features = [],
     edition = crate_edition(),
     version = "0.1.0",
     deps = all_crate_deps(normal = True, normal_dev = True) + [],

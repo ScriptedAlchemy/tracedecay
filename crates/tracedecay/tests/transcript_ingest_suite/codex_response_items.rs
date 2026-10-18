@@ -458,19 +458,12 @@ Budget:
         .collect::<Vec<_>>();
     assert_eq!(
         visible_replies,
-        vec![
-            (
-                "assistant".to_owned(),
-                Some("message".to_owned()),
-                "Visible assistant reply".to_owned(),
-            ),
-            (
-                "assistant".to_owned(),
-                Some("message".to_owned()),
-                "Visible assistant reply".to_owned(),
-            ),
-        ],
-        "the response_item message and the event_msg agent_message are both turns"
+        vec![(
+            "assistant".to_owned(),
+            Some("message".to_owned()),
+            "Visible assistant reply".to_owned(),
+        )],
+        "the response_item message and its event_msg agent_message are one turn"
     );
 
     assert_eq!(

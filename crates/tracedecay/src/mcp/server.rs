@@ -23,9 +23,7 @@ use tracedecay_contracts::request_identity::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
-use tracedecay_mcp::response_handles::{
-    cleanup_expired_response_handles, response_handle_stats_json,
-};
+use tracedecay_mcp::response_handles::response_handle_stats_json;
 use tracedecay_mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
@@ -92,16 +90,14 @@ pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 
 /// The steering instructions advertised from the `initialize` handshake of a
 /// healthy server.
-pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
-    "TraceDecay provides code-graph, session, memory, workflow, diagnostics, \
-    and project tools. Choose the tool whose description matches the task. \
-    Tool annotations distinguish read-only operations from tools that mutate \
-    local project state. The same tools are available from the shell: ",
-    tracedecay_agent_hosts::cli_fallback_args_invocation_lit!(),
-    " (`tracedecay tool` lists them and `tracedecay tool <name> --help` \
-    shows parameters). Use that interface for shell workflows or when MCP \
-    is unavailable. Do not query .tracedecay databases directly."
-);
+///
+/// Codex prefixes server instructions to every tool description it lists to
+/// an `exec` program, so each sentence here is paid once per listed tool. The
+/// shell-fallback details live in the `using-the-cli` skill and the hosts'
+/// prompt rules.
+pub(crate) const SERVER_INSTRUCTIONS: &str = "TraceDecay code-graph, memory, session, and \
+    project tools for this repository. `tracedecay tool <name> --args '<json>'` runs \
+    any of them from a shell. Do not query .tracedecay databases directly.";
 
 pub(crate) fn initialize_result(
     instructions: &str,
@@ -846,7 +842,6 @@ impl McpServer {
             host_admission_test_runtime,
         } = context;
         let file_token_map = HashMap::new();
-        let response_handle_root = cg.store_layout().response_handle_root.clone();
         let persisted_tokens_saved = match cg.get_tokens_saved().await {
             Ok(persisted) => Some(persisted),
             Err(error) => {
@@ -1093,15 +1088,6 @@ impl McpServer {
             dispatch_authority: RetainedDispatchAuthority::new(dispatch_server.clone()),
         });
 
-        // Detached: the sweep is best-effort and the server never waits on it.
-        drop(tracedecay_runtime_core::native_runtime::spawn_blocking(
-            move || {
-                let _ = cleanup_expired_response_handles(
-                    &response_handle_root,
-                    tracedecay_runtime_core::tracedecay::current_timestamp(),
-                );
-            },
-        ));
         if own_project_host_admission_replay
             && let Some(broker) = server.host_admission_broker.clone()
         {

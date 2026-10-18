@@ -979,6 +979,19 @@ fn real_file_contention_benchmark() {
     }
 }
 
+/// Drives one typed attachment read from this plain test thread, which owns
+/// no native runtime.
+fn read(
+    attachment: &tracedecay_rusqlite_runtime::repository::RepositoryRuntimePhysicalAttachment,
+    request: &RuntimeReadRequestV1,
+) -> RuntimeReadOutcomeV1 {
+    native_runtime::block_on(
+        attachment.dispatch_read(request.clone(), Arc::new(Probe::for_read(request))),
+    )
+    .expect("a plain test thread may block on the native runtime")
+    .expect("typed read")
+}
+
 #[test]
 fn at_least_attachment_reads_use_the_writers_committed_watermark() {
     let database = TestDatabase::new("read-commit-coverage.db");
@@ -1014,9 +1027,7 @@ fn at_least_attachment_reads_use_the_writers_committed_watermark() {
             control.clone(),
         )
         .unwrap();
-        let outcome = attachment
-            .dispatch_read(request.clone(), &Probe::for_read(&request))
-            .unwrap();
+        let outcome = read(&attachment, &request);
         assert_eq!(outcome.validate_for(&request), Ok(()));
         let coverage = match outcome.coverage() {
             RuntimeReadCoverageV1::Complete { coverage } if required == receipt.commit_sequence => {
@@ -1083,9 +1094,7 @@ fn at_least_reads_under_a_newer_authority_epoch_inherit_the_committed_frontier()
     )
     .unwrap();
 
-    let outcome = attachment
-        .dispatch_read(request.clone(), &Probe::for_read(&request))
-        .unwrap();
+    let outcome = read(&attachment, &request);
 
     let RuntimeReadCoverageV1::Complete { coverage } = outcome.coverage() else {
         panic!(
@@ -1141,9 +1150,7 @@ fn at_least_reads_under_a_superseded_authority_epoch_are_typed_unavailable() {
     )
     .unwrap();
 
-    let outcome = attachment
-        .dispatch_read(request.clone(), &Probe::for_read(&request))
-        .unwrap();
+    let outcome = read(&attachment, &request);
 
     assert_eq!(
         outcome.coverage(),

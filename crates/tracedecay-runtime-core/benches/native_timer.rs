@@ -48,7 +48,7 @@ fn native_timers(c: &mut Criterion) {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    native_runtime::process_runtime().expect("native runtime");
+    native_runtime::install(native_runtime::default_builder()).expect("native runtime");
     let mut group = c.benchmark_group("timer_from_tokio");
     group.bench_function("native_timeout_ready_future", |b| {
         b.iter_custom(per_call(&runtime, || {

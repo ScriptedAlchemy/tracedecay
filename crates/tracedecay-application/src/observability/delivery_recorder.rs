@@ -268,15 +268,15 @@ async fn run_recorder(
                 drain_once(authority.as_ref(), spool.as_ref(), &mut summary).await;
                 retry_due = Instant::now() + RECORDER_RETRY_INTERVAL;
             }
-            Some(RecorderControl::Shutdown { reply }) = control.recv() => {
-                while wake.try_recv().is_ok() {}
-                while drain_once(authority.as_ref(), spool.as_ref(), &mut summary).await > 0 {}
-                summary.retained = pending_count(spool.as_ref());
-                state.store(RECORDER_STOPPED, Ordering::Release);
-                let _ = reply.send(summary);
-                return;
-            }
-            else => {
+            control = control.recv() => {
+                // A closed lane means every frontend dropped without a
+                // shutdown: stop, leaving pending receipts for restart replay.
+                if let Some(RecorderControl::Shutdown { reply }) = control {
+                    while wake.try_recv().is_ok() {}
+                    while drain_once(authority.as_ref(), spool.as_ref(), &mut summary).await > 0 {}
+                    summary.retained = pending_count(spool.as_ref());
+                    let _ = reply.send(summary);
+                }
                 state.store(RECORDER_STOPPED, Ordering::Release);
                 return;
             }
@@ -343,6 +343,7 @@ const fn map_spool_start_error(error: DeliveryRecorderSpoolError) -> &'static st
         DeliveryRecorderSpoolError::Full => "delivery_settlement_recorder_spool_full",
         DeliveryRecorderSpoolError::UnsafePath => "delivery_settlement_recorder_spool_unsafe",
         DeliveryRecorderSpoolError::Corrupt => "delivery_settlement_recorder_spool_corrupt",
+        DeliveryRecorderSpoolError::Removed => "delivery_settlement_recorder_spool_removed",
         DeliveryRecorderSpoolError::Io => "delivery_settlement_recorder_spool_io",
         DeliveryRecorderSpoolError::InvalidReceipt => "delivery_settlement_recorder_spool_invalid",
         DeliveryRecorderSpoolError::LockPoisoned => {
@@ -357,6 +358,7 @@ const fn map_spool_admission_error(error: DeliveryRecorderSpoolError) -> &'stati
         DeliveryRecorderSpoolError::Busy => "delivery_settlement_recorder_spool_busy",
         DeliveryRecorderSpoolError::UnsafePath => "delivery_settlement_recorder_spool_unsafe",
         DeliveryRecorderSpoolError::Corrupt => "delivery_settlement_recorder_spool_corrupt",
+        DeliveryRecorderSpoolError::Removed => "delivery_settlement_recorder_spool_removed",
         DeliveryRecorderSpoolError::Io => "delivery_settlement_recorder_spool_io",
         DeliveryRecorderSpoolError::InvalidReceipt => "delivery_settlement_recorder_spool_invalid",
         DeliveryRecorderSpoolError::LockPoisoned => {

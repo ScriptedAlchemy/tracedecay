@@ -1438,7 +1438,7 @@ impl<'a> PreparedJsonlScan<'a> {
         after_generation_capture();
         // A generation that is not the file's own identity was minted for a
         // rewrite, so it stays flagged for every batch it covers. The rewind
-        // clause additionally covers the first batch after a file was replaced
+        // clause also covers the first batch after a file was replaced
         // by a different identity, whose generation is that new identity.
         let replacement = file_id != file_identity || (seek_to == 0 && previous.position > 0);
         io.change = if replacement {

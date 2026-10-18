@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::runtime::host_scan::HostScanBudget;
-use crate::runtime::hosts::codex::SettledTranscript;
+use crate::runtime::ingest::quarantine::SettledClaim;
 use crate::runtime::source::{FileDiscoveryReport, canonical_framed_sha256};
 
 use super::MAX_DISCOVERY_FAILURE_EVIDENCE;
@@ -44,8 +44,7 @@ pub(super) struct KimiDiscoveryReport {
 /// One Kimi `state.json` that becomes converged when `pending_wires` are
 /// admitted through the identity `settled` observed.
 pub(super) struct KimiStateGate {
-    pub(super) path: PathBuf,
-    pub(super) settled: SettledTranscript,
+    pub(super) settled: SettledClaim,
     pub(super) pending_wires: Vec<PathBuf>,
 }
 

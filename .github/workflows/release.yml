@@ -288,7 +288,7 @@ jobs:
         if: needs.validate-release.outputs.build_required == 'true'
         run: scripts/check-dashboard-digests.sh dashboard-digests
 
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Revalidate release tag target
         env:
@@ -676,13 +676,13 @@ jobs:
         run: |
           python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "26.11.1"
+          node-version: "26.12.0"
 
       - name: Install reviewed npm
         run: npm install -g npm@12.2.0
@@ -782,7 +782,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "26.11.1"
+          node-version: "26.12.0"
 
       # Prerelease SDK versions mirror the beta release convention: they take
       # the beta dist-tag and never take latest. Recovery re-runs are

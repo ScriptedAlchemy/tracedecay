@@ -21,6 +21,8 @@ pub mod runtime_ledger {
     pub use crate::ledger::{RETIRE_RUNTIME_EFFECTS_V1, RUNTIME_LEDGER_SCHEMA};
 }
 pub mod native_runtime;
+#[cfg(test)]
+mod native_runtime_wake_tests;
 mod operation;
 mod persistence;
 pub mod reader;
@@ -51,11 +53,11 @@ pub use operation::{
     ExactSqlOnlyStorageOperationV1, StorageOperationError, StorageOperationExecutor,
 };
 pub use telemetry::{
-    ReaderAdmissionSnapshot, SqliteStoreSizeTelemetryPort, SqliteVmSnapshot, WalCheckpointSample,
-    WalCheckpointSnapshot, WriterBatchMetrics, WriterBatchTotals, WriterClientServiceSnapshot,
-    WriterCommitSnapshot, WriterLockWorkSnapshot, WriterOperationCounters, WriterQueueSnapshot,
-    WriterServiceCounts, WriterTelemetrySnapshot, WriterTransactionMetrics,
-    WriterTransactionOutcome, WriterTransactionTotals,
+    ReaderAdmissionSnapshot, SqliteVmSnapshot, WalCheckpointSample, WalCheckpointSnapshot,
+    WriterBatchMetrics, WriterBatchTotals, WriterClientServiceSnapshot, WriterCommitSnapshot,
+    WriterLockWorkSnapshot, WriterOperationCounters, WriterQueueSnapshot, WriterServiceCounts,
+    WriterTelemetrySnapshot, WriterTransactionMetrics, WriterTransactionOutcome,
+    WriterTransactionTotals,
 };
 pub use writer::{
     CheckpointControlError, CheckpointHandle, CheckpointRequest, CheckpointTicket,

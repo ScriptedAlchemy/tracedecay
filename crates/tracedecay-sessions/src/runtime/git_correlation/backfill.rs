@@ -276,9 +276,10 @@ pub struct BackfillStats {
     pub skipped_no_window: usize,
     pub skipped_not_worktree: usize,
     pub skipped_git_error: usize,
-    /// Retained spans whose archived branch no longer resolves. Their observed
-    /// identity remains authoritative; only inferred historical attribution is
-    /// unavailable.
+    /// Retained span targets whose archived branch or worktree no longer
+    /// resolves, or whose Git reads kept failing past the retry budget. Their
+    /// observed identity remains authoritative; only inferred historical
+    /// attribution is unavailable.
     pub unavailable_attributions: usize,
     /// Whether this pass durably advanced the incremental session tuple.
     pub frontier_advanced: bool,
@@ -310,8 +311,9 @@ impl BackfillStats {
 /// Abstracts the git subprocess surface the backfill needs, so tests can run
 /// the core against a real repo ([`SystemGit`]) or a canned fixture.
 ///
-/// `Send + Sync` so a `&dyn GitReflogSource` can be held across an `.await`
-/// inside a spawned task (the startup auto-backfill runs on a tokio worker).
+/// `Send + Sync` so the convergence pass can hand an
+/// `Arc<dyn GitReflogSource>` to the blocking pool, where its subprocess
+/// waits cannot hold a native worker.
 pub trait GitReflogSource: Send + Sync {
     /// Proves that this source has no history to publish. Sources without an
     /// unborn-repository authority retain normal reflog reads and error handling.
@@ -527,14 +529,13 @@ pub struct CollectedBackfill {
     level = "trace",
     skip_all
 )]
-pub async fn collect_incremental_backfill<S, G>(
+pub async fn collect_incremental_backfill<S>(
     session_store: &S,
-    git: &G,
+    git: Arc<dyn GitReflogSource>,
     project_root: Option<&std::path::Path>,
 ) -> Result<CollectedBackfill, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
-    G: GitReflogSource + ?Sized,
 {
     session_store.require_project_sessions_authority()?;
     let snapshot = session_store.read_snapshot().await?;
@@ -567,8 +568,15 @@ where
         dry_run: false,
         project_root: project_root.map(std::path::Path::to_path_buf),
     };
-    let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
-    let derived = derive_backfill_evidence(git, &opts, &rows, no_analytics);
+    // Every Git read here is a subprocess whose pipes this thread waits on,
+    // so the derivation runs on the blocking pool, never a native worker.
+    let (rows, derived) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
+        let derived = derive_backfill_evidence(git.as_ref(), &opts, &rows, no_analytics);
+        (rows, derived)
+    })
+    .await
+    .map_err(GitCorrelationError::Unavailable)?;
     let settled_through = derived
         .settled_rows
         .checked_sub(1)
@@ -625,8 +633,9 @@ pub(super) async fn advance_history_frontier(
 /// mirroring the ingest-time sweep's scanner: commits on the recorded branch
 /// (or `HEAD` for detached spans) inside the gap-widened span window. Reports
 /// [`TargetScan::MissingReference`] for an archived branch that no longer
-/// exists, and [`TargetScan::Unavailable`] for a missing worktree or Git
-/// failure that a later sweep may recover.
+/// exists, [`TargetScan::MissingWorktree`] for a worktree that is gone or no
+/// longer a repository, and [`TargetScan::Unavailable`] for a Git failure
+/// that a later sweep may recover.
 pub(super) fn scan_span_target<G: GitReflogSource + ?Sized>(
     git: &G,
     target: &SpanScanTarget,
@@ -635,7 +644,7 @@ pub(super) fn scan_span_target<G: GitReflogSource + ?Sized>(
 ) -> TargetScan {
     let worktree = std::path::Path::new(&target.worktree);
     if !worktree.is_dir() {
-        return TargetScan::Unavailable;
+        return TargetScan::MissingWorktree;
     }
     let since = target.window_start.saturating_sub(gap_secs);
     let until = target.window_end.saturating_add(gap_secs);
@@ -647,6 +656,9 @@ pub(super) fn scan_span_target<G: GitReflogSource + ?Sized>(
     match git.commit_reference_exists(worktree, branch) {
         Ok(true) => {}
         Ok(false) => return TargetScan::MissingReference,
+        Err(_) if tracedecay_runtime_core::worktree::git_worktree_root(worktree).is_none() => {
+            return TargetScan::MissingWorktree;
+        }
         Err(_) => return TargetScan::Unavailable,
     }
     let Some(log_text) = git.commit_log(worktree, branch, since) else {

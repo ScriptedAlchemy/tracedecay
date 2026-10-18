@@ -2,6 +2,7 @@ use super::super::*;
 use super::kernels::TranscriptPayloadRouteV1::{InlineMessages, SourceScan};
 use super::kernels::{TranscriptCaptureContext, transcript_capture_kernel};
 use crate::structured_hook_error_data;
+use serde_json::json;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;

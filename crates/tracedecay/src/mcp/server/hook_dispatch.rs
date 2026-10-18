@@ -131,12 +131,7 @@ impl McpServer {
                 .await
                 {
                     Ok(true) => {
-                        if let Some(reconcile) = &self.automation_scheduler_reconciler {
-                            let reconcile = Arc::clone(reconcile);
-                            tokio::spawn(async move {
-                                let _ = reconcile().await;
-                            });
-                        }
+                        self.spawn_automation_scheduler_reconcile();
                         HostAdmissionOutcome::replay_completed(true, false)
                     }
                     Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
@@ -157,12 +152,7 @@ impl McpServer {
                 .await
                 {
                     Ok(()) => {
-                        if let Some(reconcile) = &self.automation_scheduler_reconciler {
-                            let reconcile = Arc::clone(reconcile);
-                            tokio::spawn(async move {
-                                let _ = reconcile().await;
-                            });
-                        }
+                        self.spawn_automation_scheduler_reconcile();
                         HostAdmissionOutcome::replay_completed(true, false)
                     }
                     Err(_) => {
@@ -171,6 +161,20 @@ impl McpServer {
                 }
             }
             HookEventPlan::Noop => HostAdmissionOutcome::replay_completed(false, true),
+        }
+    }
+
+    /// Best-effort: a reconcile the runtime does not admit is logged and skipped.
+    fn spawn_automation_scheduler_reconcile(&self) {
+        if let Some(reconcile) = &self.automation_scheduler_reconciler {
+            let reconcile = Arc::clone(reconcile);
+            if let Err(error) =
+                tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+                    let _ = reconcile().await;
+                })
+            {
+                tracing::warn!(%error, "hook automation scheduler reconcile not admitted");
+            }
         }
     }
 

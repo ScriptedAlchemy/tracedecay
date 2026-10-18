@@ -200,7 +200,7 @@ pub async fn record_version(
 pub fn ready<T>(
     future: impl Future<Output = Result<T, SchemaVersionError>>,
 ) -> Result<T, SchemaVersionError> {
-    let mut future = Box::pin(future);
+    let mut future = std::pin::pin!(future);
     let waker = std::task::Waker::noop();
     let mut context = Context::from_waker(waker);
     match future.as_mut().poll(&mut context) {

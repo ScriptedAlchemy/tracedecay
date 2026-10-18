@@ -41,12 +41,10 @@ impl TraceDecay {
 
     /// Consumes the code graph and closes the database connection.
     ///
-    /// The Context Scout owner started by a writable open keeps a clone of
-    /// `db` in the process-global owner registry, so a standalone close must
-    /// retire it too: otherwise the database, its writer lease, and its
-    /// authority role outlive the graph that published them. The unregister
-    /// is identity-guarded, so a newer owner bound to a replacement database
-    /// is left in place.
+    /// Close also removes the process-global route to the Context Scout owner
+    /// this graph published, even while another graph still holds that
+    /// owner. The unregister is identity-guarded, so a newer owner bound to a
+    /// replacement database is left in place.
     pub fn close(self) {
         if !self.read_only
             && let Some(project_id) =

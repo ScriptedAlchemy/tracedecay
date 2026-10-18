@@ -498,7 +498,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvo
 pub(super) async fn settle_in_process_invocation(
     request_cancellations: &tracedecay_daemon_service::RequestCancellationRegistryV1,
     request_id: &str,
-    invocation: tokio::task::JoinHandle<DaemonInvocationResponse>,
+    invocation: native_runtime::NativeTask<DaemonInvocationResponse>,
     remaining: Duration,
     cancellation: tracedecay_contracts::CancellationSignal,
     admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
@@ -516,8 +516,8 @@ pub(super) async fn settle_in_process_invocation(
             CancellationStage::EffectInFlight
         }
     };
-    let invocation = invocation;
-    tokio::pin!(invocation);
+    let invocation_wait = invocation.wait();
+    tokio::pin!(invocation_wait);
     let cancellation_wait = tracedecay_daemon_protocol::wait_for_cancellation(cancellation);
     tokio::pin!(cancellation_wait);
     let has_admitted_cancellation = admitted_cancellation.is_some();
@@ -529,9 +529,7 @@ pub(super) async fn settle_in_process_invocation(
     };
     tokio::pin!(admitted_cancellation_wait);
     let timed_out = tokio::select! {
-        response = &mut invocation => {
-            return response.map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable);
-        }
+        outcome = &mut invocation_wait => return invocation_response(outcome),
         () = &mut cancellation_wait => false,
         () = &mut admitted_cancellation_wait => false,
         // A timer that cannot start fails closed, as an elapsed deadline.
@@ -542,7 +540,7 @@ pub(super) async fn settle_in_process_invocation(
     }
     match policy {
         tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly => {
-            if native_runtime::timeout(Duration::from_secs(1), &mut invocation)
+            if native_runtime::timeout(Duration::from_secs(1), &mut invocation_wait)
                 .await
                 .is_err()
             {
@@ -565,18 +563,31 @@ pub(super) async fn settle_in_process_invocation(
             // effect merely outlived its budget. Wait for the authoritative
             // settlement over the same grace the daemon's own clients keep
             // reading for, so the effect's real terminal is the one reported.
-            match native_runtime::timeout(response_grace, &mut invocation).await {
-                Ok(Ok(response)) => Ok(response),
+            match native_runtime::timeout(response_grace, &mut invocation_wait).await {
+                Ok(native_runtime::NativeTaskOutcome::Completed(response)) => Ok(response),
                 Err(native_runtime::TimeoutError::TimerUnavailable(_)) => {
                     Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)
                 }
-                Ok(Err(_)) | Err(native_runtime::TimeoutError::Elapsed) => {
+                Ok(_) | Err(native_runtime::TimeoutError::Elapsed) => {
                     Ok(DaemonInvocationResponse::problem(
                         request_id,
                         tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired,
                     ))
                 }
             }
+        }
+    }
+}
+
+fn invocation_response(
+    outcome: native_runtime::NativeTaskOutcome<DaemonInvocationResponse>,
+) -> std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError>
+{
+    match outcome {
+        native_runtime::NativeTaskOutcome::Completed(response) => Ok(response),
+        native_runtime::NativeTaskOutcome::Cancelled
+        | native_runtime::NativeTaskOutcome::Panicked(_) => {
+            Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)
         }
     }
 }
@@ -651,12 +662,15 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
             let executor = self.clone();
             let admitted_cancellation = self.admitted_cancellation.clone();
             let request_cancellations = self.invocation.service.request_cancellations().clone();
-            tokio::spawn(async move {
+            let unavailable = |_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable;
+            match native_runtime::NativeTask::spawn(async move {
                 let request_id = request.request_id.clone();
-                let invocation = tokio::spawn(tracing::Instrument::instrument(
-                    async move { executor.invoke_once(request).await },
-                    tracing::trace_span!("daemon.invocation.invoke_once"),
-                ));
+                let invocation =
+                    native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
+                        async move { executor.invoke_once(request).await },
+                        tracing::trace_span!("daemon.invocation.invoke_once"),
+                    ))
+                    .map_err(unavailable)?;
                 settle_in_process_invocation(
                     &request_cancellations,
                     &request_id,
@@ -669,8 +683,15 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
                 )
                 .await
             })
+            .map_err(unavailable)?
             .await
-            .map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)?
+            {
+                native_runtime::NativeTaskOutcome::Completed(result) => result,
+                native_runtime::NativeTaskOutcome::Cancelled
+                | native_runtime::NativeTaskOutcome::Panicked(_) => {
+                    Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)
+                }
+            }
         })
     }
 

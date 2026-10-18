@@ -1330,7 +1330,7 @@ mod test_support {
     }
 
     pub fn block_on<F: Future>(future: F) -> F::Output {
-        let mut future = Box::pin(future);
+        let mut future = std::pin::pin!(future);
         let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
         let mut context = Context::from_waker(&waker);
         loop {

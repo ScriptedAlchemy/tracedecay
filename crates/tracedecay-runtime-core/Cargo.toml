@@ -39,8 +39,6 @@ sha2 = "0.11"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7.19"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["fmt"] }
 

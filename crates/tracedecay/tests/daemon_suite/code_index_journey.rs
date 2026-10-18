@@ -101,21 +101,28 @@ pub fn daemon_log_for_failure() -> String {
 }
 
 /// Waits until the daemon log at `log_path` reports `phase` for the open of
-/// `project`.
+/// `project`. A starved daemon boots and opens slowly but keeps logging, so
+/// the wait gives up only when the log stays unchanged for
+/// [`RECEIPT_TIMEOUT`].
 pub async fn wait_for_open_phase(log_path: &Path, project: &Path, phase: &str) {
     let marker = format!("project={} phase={phase}", project.display());
-    let mut log = String::new();
-    tokio::time::timeout(RECEIPT_TIMEOUT, async {
-        loop {
-            log = fs::read_to_string(log_path).unwrap_or_default();
-            if log.contains(&marker) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
+    let mut logged = 0;
+    let mut changed_at = Instant::now();
+    loop {
+        let log = fs::read_to_string(log_path).unwrap_or_default();
+        if log.contains(&marker) {
+            return;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("project open never reached {phase}; log={log}"));
+        if log.len() != logged {
+            logged = log.len();
+            changed_at = Instant::now();
+        }
+        assert!(
+            changed_at.elapsed() < RECEIPT_TIMEOUT,
+            "project open never reached {phase}; log={log}"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -501,41 +508,46 @@ pub async fn assert_project_identity(
     );
 }
 
-/// One `tracedecay_status` read held by `wait_for` until the index reaches
-/// `state` (`fresh` or `ready`) within `budget`; panics unless the wait ends
-/// `reached`.
+/// `tracedecay_status` reads held by `wait_for` until the index reaches
+/// `state` (`fresh` or `ready`). Each read waits up to `budget`; the wait
+/// fails only when a whole `budget` passes with no change in the index's
+/// reported freshness.
 pub async fn wait_for_readiness(
     socket: &Path,
     handshake: &DaemonHandshake,
     state: &str,
     budget: Duration,
 ) -> Value {
-    // The transport must outlive the wait so its typed outcome is observed.
-    let observed = tool_within(
-        socket,
-        handshake,
-        "tracedecay_status",
-        json!({
-            "format": "json",
-            "include_branch_diagnostics": false,
-            "include_storage_health": false,
-            "include_session_ingest": false,
-            "include_staleness": false,
-            "wait_for": {
-                "state": state,
-                "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
-            },
-        }),
-        budget + tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE,
-    )
-    .await;
-    assert_eq!(
-        observed["wait"],
-        json!({ "outcome": "reached" }),
-        "index never became {state}: {observed}; daemon_log={}",
-        daemon_log_for_failure()
-    );
-    observed
+    let mut progress = crate::common::IndexProgress::new(budget);
+    loop {
+        // The transport must outlive the wait so its typed outcome is observed.
+        let observed = tool_within(
+            socket,
+            handshake,
+            "tracedecay_status",
+            json!({
+                "format": "json",
+                "include_branch_diagnostics": false,
+                "include_storage_health": false,
+                "include_session_ingest": false,
+                "include_staleness": false,
+                "wait_for": {
+                    "state": state,
+                    "timeout_ms": u64::try_from(budget.as_millis()).expect("budget fits u64"),
+                },
+            }),
+            budget + tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE,
+        )
+        .await;
+        if observed["wait"] == json!({ "outcome": "reached" }) {
+            return observed;
+        }
+        assert!(
+            observed["wait"]["outcome"] == "timed_out" && progress.moving(&observed),
+            "index stopped short of {state}: {observed}; daemon_log={}",
+            daemon_log_for_failure()
+        );
+    }
 }
 
 /// Waits until the daemon serves a complete, ready generation that differs

@@ -1,4 +1,4 @@
-# TraceDecay Plugin Bundle
+# TraceDecay plugin bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
 Cursor, Kimi Code, OpenCode, Pi, and ChatGPT. The Claude, Codex, Cursor, Kimi Code, and
@@ -30,7 +30,7 @@ The plugin is named `tracedecay`, and hosts namespace a plugin's MCP tools by
 the plugin name plus the **server key**. Claude and Codex keep the MCP server
 key as `graph` (see `.mcp.json`) so those hosts render `plugin tracedecay graph`
 / `graph:…` instead of the redundant `tracedecay tracedecay`. Cursor uses the
-server key `tracedecay` in `mcp-cursor.json` because Cursor Settings surfaces
+server key `tracedecay` in `mcp-cursor.json` because Cursor Settings displays
 that key literally (`plugin-tracedecay-graph` looked like a bare "graph"
 entry). Kimi Code also uses `tracedecay`, registered in session/user
 `mcp.json` (not the plugin manifest). The individual tool names keep their
@@ -43,13 +43,15 @@ never a doubled `tracedecay`.
 ## Source layout
 
 - `skills/`: shared `SKILL.md` workflow instructions.
-- `commands/`: Claude/shared slash-command sources (numbered tool steps).
+- `commands/`: Claude/shared slash commands for workflows no skill triggers
+  on: a repository safety audit, dead-code cleanup, branch comparison, commit
+  and PR drafting, porting, and running the tests for a change. A workflow a
+  skill already covers has no command; hosts invoke the skill by name
+  (`/tracedecay:assessing-impact` on Claude, `/assessing-impact` on Cursor).
 - `overlays/cursor/commands/`: independently authored Cursor slash commands
-  (`tracedecay-*`). Install maps them into Cursor's command directory. They are
-  skill-handoff wrappers with Cursor approval notes, not generated copies of
-  `commands/`, and they may differ on purpose (for example Claude
-  `review-diff.md` hands off to `/tracedecay:test-changes` while the Cursor
-  twin hands off to `tracedecay:assessing-impact` and omits the metrics line).
+  (`tracedecay-*`), one per `commands/` file. Install maps them into Cursor's
+  command directory. They are skill-handoff wrappers with Cursor approval
+  notes, not generated copies of `commands/`, and they may differ on purpose.
 - `hooks/hooks-claude.json`: Claude Code lifecycle hooks for session, stop,
   and saved-edit admission. They do not route tools or run local follow-up
   work.

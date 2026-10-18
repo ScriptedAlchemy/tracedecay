@@ -1,6 +1,8 @@
 ---
 name: using-the-cli
-description: 'Use TraceDecay through its generic CLI when MCP is unavailable or intentionally absent, or preserve exact arguments and scope across transports.'
+description: Use when TraceDecay MCP tools are unavailable or failing, or a call must run from the shell with the same arguments and scope. Skip when the daemon itself is down, since the CLI needs it too. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Using the CLI
@@ -27,3 +29,6 @@ Apply and rollback consume returned identities and expected state unchanged.
 Correct deterministic argument errors once. Preserve typed availability failures
 and use bounded native evidence when appropriate; private database queries are
 not an alternate public transport.
+
+**Report:** the command that ran, its result, and why the CLI replaced MCP. Do
+not start or restart the daemon to make the CLI work.

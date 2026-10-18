@@ -23,7 +23,7 @@ and repository development skills follow their own source release path.
   Host-private `agents/openai.yaml` and `*.test.sh` files stay put. Do not
   edit hash-tracked managed materializations as source.
 - For a requested managed-skill administrative change, use the supported skill
-  administration surface for the exact target. A writer-run audit alone does
+  administration API for the exact target. A writer-run audit alone does
   not authorize create, update, disable, archive, or restore operations.
   Subagents inspect and recommend; they do not mutate profile stores.
 

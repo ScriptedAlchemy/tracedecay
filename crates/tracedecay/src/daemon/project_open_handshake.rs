@@ -185,7 +185,7 @@ pub(super) async fn write_project_open_error(
     write_daemon_response(transport, &response).await
 }
 
-/// A `tools/call` refused at project open answers on the MCP tool surface
+/// A `tools/call` refused at project open answers on the MCP tool interface
 /// when the refusal is the reset-required terminal, matching the canonical
 /// problem envelope CLI and HTTP callers receive for the same operation.
 /// Non-application tools and every other open failure keep the raw shape.

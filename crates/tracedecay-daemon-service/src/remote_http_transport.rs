@@ -8,7 +8,8 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-helpers"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -44,8 +45,8 @@ const MAX_REMOTE_BRAIN_TLS_HEADER_BYTES: usize = 64 * 1024;
 pub struct RemoteBrainTlsDeadlines {
     /// Longest silence while the handshake or request is still being read.
     pub read_idle: Duration,
-    /// Absolute bound on reading one request, restarted when the handshake
-    /// completes.
+    /// Absolute bound on reading one request. It starts when the listener
+    /// first reads from the peer and restarts when the handshake completes.
     pub request_read: Duration,
     /// Longest stall of a started response write.
     pub write_idle: Duration,
@@ -83,6 +84,8 @@ pub struct RemoteBrainTlsEgressSnapshot {
 pub struct RemoteBrainTlsIngressSnapshot {
     pub headers_complete: usize,
     pub body_bytes_observed: usize,
+    pub read_idle_expirations: usize,
+    pub request_read_expirations: usize,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -95,6 +98,8 @@ pub struct RemoteBrainTlsEgressObserver {
     response_expirations: AtomicUsize,
     headers_complete: AtomicUsize,
     body_bytes_observed: AtomicUsize,
+    read_idle_expirations: AtomicUsize,
+    request_read_expirations: AtomicUsize,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -115,6 +120,8 @@ impl RemoteBrainTlsEgressObserver {
         RemoteBrainTlsIngressSnapshot {
             headers_complete: self.headers_complete.load(Ordering::SeqCst),
             body_bytes_observed: self.body_bytes_observed.load(Ordering::SeqCst),
+            read_idle_expirations: self.read_idle_expirations.load(Ordering::SeqCst),
+            request_read_expirations: self.request_read_expirations.load(Ordering::SeqCst),
         }
     }
 }
@@ -268,11 +275,17 @@ impl RemoteBrainTlsListener {
             }
         };
         let acceptor = self.acceptor.clone();
+        let handshake_read = Arc::new(AtomicBool::new(false));
+        let stream = RemoteBrainTcpStream {
+            stream,
+            read: Arc::clone(&handshake_read),
+        };
         let handshake =
             Box::pin(async move { acceptor.accept(stream).await.map_err(io::Error::other) });
         Some((
             RemoteBrainTlsIo::new(
                 handshake,
+                handshake_read,
                 permit,
                 self.deadlines,
                 #[cfg(any(test, feature = "test-helpers"))]
@@ -420,6 +433,10 @@ impl IoDeadline {
         self.expired = false;
     }
 
+    fn deadline(&self) -> Time {
+        self.sleep.deadline()
+    }
+
     fn poll_expired(&mut self, context: &mut Context<'_>) -> bool {
         if !self.expired {
             self.expired = Pin::new(&mut self.sleep).poll(context).is_ready();
@@ -428,17 +445,72 @@ impl IoDeadline {
     }
 }
 
+/// The accepted TCP stream. It flags every read that returns bytes, so a
+/// handshake flight the listener reads late restarts the read-idle deadline,
+/// which measures the peer's silence rather than the listener's own latency.
+struct RemoteBrainTcpStream {
+    stream: TcpStream,
+    read: Arc<AtomicBool>,
+}
+
+impl AsyncRead for RemoteBrainTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut self.stream).poll_read(context, buffer);
+        if buffer.filled().len() > before {
+            self.read.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl AsyncWrite for RemoteBrainTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(context, buffer)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(context, buffers)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
+    }
+}
+
 type RemoteBrainTlsHandshake =
-    Pin<Box<dyn Future<Output = io::Result<TlsStream<TcpStream>>> + Send>>;
+    Pin<Box<dyn Future<Output = io::Result<TlsStream<RemoteBrainTcpStream>>> + Send>>;
 
 enum RemoteBrainTlsTransport {
     Handshaking(RemoteBrainTlsHandshake),
-    Streaming(Box<TlsStream<TcpStream>>),
+    Streaming(Box<TlsStream<RemoteBrainTcpStream>>),
     Failed,
 }
 
 struct RemoteBrainTlsIo {
     transport: RemoteBrainTlsTransport,
+    handshake_read: Arc<AtomicBool>,
+    peer_heard: bool,
     deadlines: RemoteBrainTlsDeadlines,
     read_idle_deadline: IoDeadline,
     request_read_deadline: IoDeadline,
@@ -472,12 +544,15 @@ struct RemoteBrainTlsIo {
 impl RemoteBrainTlsIo {
     fn new(
         handshake: RemoteBrainTlsHandshake,
+        handshake_read: Arc<AtomicBool>,
         permit: OwnedSemaphorePermit,
         deadlines: RemoteBrainTlsDeadlines,
         #[cfg(any(test, feature = "test-helpers"))] egress: Arc<RemoteBrainTlsEgressObserver>,
     ) -> Self {
         Self {
             transport: RemoteBrainTlsTransport::Handshaking(handshake),
+            handshake_read,
+            peer_heard: false,
             deadlines,
             read_idle_deadline: IoDeadline::after(deadlines.read_idle),
             request_read_deadline: IoDeadline::after(deadlines.request_read),
@@ -509,31 +584,42 @@ impl RemoteBrainTlsIo {
         }
     }
 
-    fn poll_request_absolute_deadline(&mut self, context: &mut Context<'_>) -> io::Result<()> {
+    /// Checks both request read deadlines. Called only when a read would wait
+    /// on the peer, so bytes the peer sent in time are read first however late
+    /// the listener polls. When both deadlines have passed, the earlier one
+    /// names the timeout.
+    fn poll_request_read_deadlines(&mut self, context: &mut Context<'_>) -> io::Result<()> {
         if self.request_read_complete {
             return Ok(());
         }
-        if self.request_read_deadline.poll_expired(context) {
-            self.transport = RemoteBrainTlsTransport::Failed;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Remote Brain TLS request admission timed out",
-            ));
-        }
-        Ok(())
-    }
-
-    fn poll_read_idle_deadline(&mut self, context: &mut Context<'_>) -> io::Result<()> {
-        if self.request_read_complete {
+        let idle_expired = self.read_idle_deadline.poll_expired(context);
+        let request_expired = self.request_read_deadline.poll_expired(context);
+        let idle_first = idle_expired
+            && !(request_expired
+                && self.request_read_deadline.deadline() < self.read_idle_deadline.deadline());
+        if !idle_first && !request_expired {
             return Ok(());
         }
-        if !self.read_idle_deadline.poll_expired(context) {
-            return Ok(());
+        // Counted before the transport drops the socket, so a peer that sees
+        // the close also sees the count.
+        #[cfg(any(test, feature = "test-helpers"))]
+        if idle_first {
+            self.egress
+                .read_idle_expirations
+                .fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.egress
+                .request_read_expirations
+                .fetch_add(1, Ordering::SeqCst);
         }
         self.transport = RemoteBrainTlsTransport::Failed;
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "Remote Brain TLS request read timed out",
+            if idle_first {
+                "Remote Brain TLS request read timed out"
+            } else {
+                "Remote Brain TLS request admission timed out"
+            },
         ))
     }
 
@@ -559,7 +645,11 @@ impl RemoteBrainTlsIo {
         if !write_idle_expired && !response_expired {
             return Ok(());
         }
-        self.transport = RemoteBrainTlsTransport::Failed;
+        // A listener polled after both deadlines passed counts the earlier.
+        #[cfg(any(test, feature = "test-helpers"))]
+        let write_idle_expired = write_idle_expired
+            && !(response_expired
+                && self.response_deadline.deadline() < self.write_idle_deadline.deadline());
         #[cfg(any(test, feature = "test-helpers"))]
         if write_idle_expired && !self.egress_idle_expired {
             self.egress_idle_expired = true;
@@ -578,7 +668,7 @@ impl RemoteBrainTlsIo {
             }
         }
         #[cfg(any(test, feature = "test-helpers"))]
-        if response_expired && !self.egress_response_expired {
+        if !write_idle_expired && !self.egress_response_expired {
             self.egress_response_expired = true;
             self.egress
                 .response_expirations
@@ -586,6 +676,7 @@ impl RemoteBrainTlsIo {
         }
         #[cfg(any(test, feature = "test-helpers"))]
         self.clear_egress_backpressure();
+        self.transport = RemoteBrainTlsTransport::Failed;
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "Remote Brain TLS response write timed out",
@@ -623,7 +714,19 @@ impl RemoteBrainTlsIo {
             return Poll::Ready(Ok(()));
         };
         match handshake.as_mut().poll(context) {
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if self.handshake_read.swap(false, Ordering::Relaxed) {
+                    let now = wall_now();
+                    self.read_idle_deadline
+                        .reset_after(now, self.deadlines.read_idle);
+                    if !self.peer_heard {
+                        self.peer_heard = true;
+                        self.request_read_deadline
+                            .reset_after(now, self.deadlines.request_read);
+                    }
+                }
+                Poll::Pending
+            }
             Poll::Ready(Ok(stream)) => {
                 // A write-side poll can finish the handshake after the reader
                 // parked on it. Its final read may already hold the request,
@@ -747,12 +850,11 @@ impl AsyncRead for RemoteBrainTlsIo {
         context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if let Err(error) = self.poll_request_absolute_deadline(context) {
-            return Poll::Ready(Err(error));
-        }
+        // The handshake goes first: one that completes on this poll restarts
+        // the request deadline, so it must not fail on the expired one.
         match self.poll_handshake(context) {
             Poll::Pending => {
-                return match self.poll_read_idle_deadline(context) {
+                return match self.poll_request_read_deadlines(context) {
                     Ok(()) => Poll::Pending,
                     Err(error) => Poll::Ready(Err(error)),
                 };
@@ -778,7 +880,7 @@ impl AsyncRead for RemoteBrainTlsIo {
             }
         }
         if result.is_pending()
-            && let Err(error) = self.poll_read_idle_deadline(context)
+            && let Err(error) = self.poll_request_read_deadlines(context)
         {
             return Poll::Ready(Err(error));
         }
@@ -1037,8 +1139,16 @@ mod tests {
 
     /// Completes the handshake, sends `REQUEST` in the same flight as the
     /// client Finished, then holds the connection open until released, so the
-    /// server sees no readiness edge after that flight.
-    fn hold_open_client(address: SocketAddr, release: mpsc::Receiver<()>) {
+    /// server sees no readiness edge after that flight. Reports on `sent` once
+    /// the `ClientHello` and once the final flight are on the wire. Answers
+    /// the server's flight only once `answer` fires, so the listener's first
+    /// read cannot finish the handshake however its thread is scheduled.
+    fn hold_open_client(
+        address: SocketAddr,
+        sent: mpsc::Sender<()>,
+        answer: mpsc::Receiver<()>,
+        release: mpsc::Receiver<()>,
+    ) {
         let mut roots = rustls::RootCertStore::empty();
         roots
             .add(CertificateDer::from_pem_slice(TRUST_ROOT).unwrap())
@@ -1057,9 +1167,15 @@ mod tests {
         .unwrap();
         let mut socket = std::net::TcpStream::connect(address).unwrap();
         tls.writer().write_all(REQUEST).unwrap();
+        while tls.wants_write() {
+            tls.write_tls(&mut socket).unwrap();
+        }
+        let _ = sent.send(());
+        let _ = answer.recv();
         while tls.is_handshaking() || tls.wants_write() {
             tls.complete_io(&mut socket).unwrap();
         }
+        let _ = sent.send(());
         let _ = release.recv();
     }
 
@@ -1068,8 +1184,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let listener = tls_listener(directory.path());
         let address = listener.bound_addr().unwrap();
+        let (sent, _) = mpsc::channel();
+        let (answer, await_answer) = mpsc::channel();
         let (release, held) = mpsc::channel();
-        let client = std::thread::spawn(move || hold_open_client(address, held));
+        let client =
+            std::thread::spawn(move || hold_open_client(address, sent, await_answer, held));
         let (mut io, _) = native_runtime::block_on(listener.accept())
             .unwrap()
             .expect("accepted connection");
@@ -1085,6 +1204,7 @@ mod tests {
                 .is_pending(),
             "the reader parks on the handshake"
         );
+        answer.send(()).unwrap();
         let mut seen = 0;
         while matches!(io.transport, RemoteBrainTlsTransport::Handshaking(_)) {
             seen = waker.wait_past(seen);
@@ -1103,6 +1223,145 @@ mod tests {
         assert_eq!(buffer.filled(), REQUEST);
 
         drop(release);
+        client.join().unwrap();
+    }
+
+    /// The listener polls each handshake flight only after its connection has
+    /// waited past both read deadlines. The client sent every flight at once,
+    /// so the listener's lateness must not count as the client's silence.
+    #[test]
+    fn a_late_listener_poll_does_not_time_out_a_prompt_handshake() {
+        let deadlines = RemoteBrainTlsDeadlines {
+            read_idle: Duration::from_millis(200),
+            request_read: Duration::from_millis(400),
+            ..RemoteBrainTlsDeadlines::PRODUCTION
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tls_listener(directory.path()).with_deadlines(deadlines);
+        let address = listener.bound_addr().unwrap();
+        let (sent, client_sent) = mpsc::channel();
+        let (answer, await_answer) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let client =
+            std::thread::spawn(move || hold_open_client(address, sent, await_answer, held));
+        let (mut io, _) = native_runtime::block_on(listener.accept())
+            .unwrap()
+            .expect("accepted connection");
+        let accepted = std::time::Instant::now();
+        let poll_late = |past: Duration| {
+            std::thread::sleep(past.saturating_sub(accepted.elapsed()));
+        };
+
+        let waker = Arc::new(CountingWaker::default());
+        let task_waker = Waker::from(Arc::clone(&waker));
+        let mut context = Context::from_waker(&task_waker);
+        let mut storage = [0_u8; 4096];
+        let mut buffer = ReadBuf::new(&mut storage);
+        client_sent.recv().expect("client sends its ClientHello");
+        poll_late(deadlines.request_read * 3 / 2);
+        let first_read = Pin::new(&mut io).poll_read(&mut context, &mut buffer);
+        assert!(
+            first_read.is_pending(),
+            "reading the waiting ClientHello restarts both read deadlines: {first_read:?}"
+        );
+        answer.send(()).unwrap();
+        client_sent.recv().expect("client sends its final flight");
+        poll_late(deadlines.request_read * 3);
+        let read = Pin::new(&mut io).poll_read(&mut context, &mut buffer);
+        assert!(
+            matches!(read, Poll::Ready(Ok(()))),
+            "a handshake the listener can finish restarts the request deadline: {read:?}"
+        );
+        assert_eq!(buffer.filled(), REQUEST);
+
+        drop(release);
+        client.join().unwrap();
+    }
+
+    /// The client sends its headers with the handshake and its body as soon as
+    /// the listener has read them, so the whole request is waiting well before
+    /// the absolute request deadline. A listener that polls only once that
+    /// deadline has passed must read the waiting body rather than time the
+    /// client out.
+    #[test]
+    fn a_late_listener_poll_reads_a_body_that_arrived_in_time() {
+        const HEADERS: &[u8] =
+            b"POST /remote/authority HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n";
+        const BODY: &[u8] = b"{}";
+        let deadlines = RemoteBrainTlsDeadlines {
+            read_idle: Duration::from_millis(200),
+            request_read: Duration::from_millis(400),
+            ..RemoteBrainTlsDeadlines::PRODUCTION
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tls_listener(directory.path()).with_deadlines(deadlines);
+        let address = listener.bound_addr().unwrap();
+        let (sent, body_sent) = mpsc::channel();
+        let (headers_read, send_body) = mpsc::channel::<()>();
+        let client = std::thread::spawn(move || {
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(CertificateDer::from_pem_slice(TRUST_ROOT).unwrap())
+                .unwrap();
+            let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            let mut tls = rustls::ClientConnection::new(
+                Arc::new(config),
+                ServerName::IpAddress(address.ip().into()),
+            )
+            .unwrap();
+            let mut socket = std::net::TcpStream::connect(address).unwrap();
+            tls.writer().write_all(HEADERS).unwrap();
+            while tls.is_handshaking() || tls.wants_write() {
+                tls.complete_io(&mut socket).unwrap();
+            }
+            send_body.recv().expect("the listener reads the headers");
+            tls.writer().write_all(BODY).unwrap();
+            while tls.wants_write() {
+                tls.write_tls(&mut socket).unwrap();
+            }
+            let _ = sent.send(());
+            let _ = send_body.recv();
+        });
+        let (mut io, _) = native_runtime::block_on(listener.accept())
+            .unwrap()
+            .expect("accepted connection");
+
+        let waker = Arc::new(CountingWaker::default());
+        let task_waker = Waker::from(Arc::clone(&waker));
+        let mut context = Context::from_waker(&task_waker);
+        let mut storage = [0_u8; 4096];
+        let mut buffer = ReadBuf::new(&mut storage);
+        let mut seen = 0;
+        while Pin::new(&mut io)
+            .poll_read(&mut context, &mut buffer)
+            .is_pending()
+        {
+            seen = waker.wait_past(seen);
+        }
+        assert_eq!(buffer.filled(), HEADERS);
+        let headers_read_at = std::time::Instant::now();
+        headers_read.send(()).unwrap();
+
+        body_sent.recv().expect("client sends its body");
+        std::thread::sleep(
+            (deadlines.request_read * 3 / 2).saturating_sub(headers_read_at.elapsed()),
+        );
+        let mut storage = [0_u8; 4096];
+        let mut buffer = ReadBuf::new(&mut storage);
+        let read = Pin::new(&mut io).poll_read(&mut context, &mut buffer);
+        assert!(
+            matches!(read, Poll::Ready(Ok(()))),
+            "a body waiting before the request deadline is read on a late poll: {read:?}"
+        );
+        assert_eq!(buffer.filled(), BODY);
+
+        drop(headers_read);
         client.join().unwrap();
     }
 }

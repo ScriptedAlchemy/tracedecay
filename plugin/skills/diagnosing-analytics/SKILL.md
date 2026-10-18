@@ -1,6 +1,8 @@
 ---
 name: diagnosing-analytics
-description: 'Explain TraceDecay usage, hook capture, attribution, or adoption analytics using supported diagnostics and source coverage.'
+description: 'Use when the user asks how TraceDecay is used: tool or skill usage, hook capture, attribution, or adoption analytics. Load this skill before the first tool call.'
+metadata:
+  opencode/slash: "true"
 ---
 
 # Diagnosing analytics
@@ -22,3 +24,7 @@ Invocation counts measure use, not task success. Compare outcomes, unnecessary
 calls, false triggers, and missed useful routing before recommending more skill
 or hint exposure. Trace a discrepancy to its capture, import, attribution, or
 read scope before changing configuration.
+
+**Report:** each count with the source it came from (analytics, hook JSONL, or
+session archive) and its included and total rows. Do not present one source's
+count as the complete history.

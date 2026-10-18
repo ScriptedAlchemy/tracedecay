@@ -30,15 +30,15 @@ where
         Self { store }
     }
 
-    pub fn begin_or_replay(
+    pub async fn begin_or_replay(
         &self,
         request: GitIndexTransactionBeginRequestV1,
     ) -> Result<GitIndexTransactionBeginResultV1, GitIndexJournalError> {
         request.validate()?;
-        Ok(self.store.begin_or_replay(request)?)
+        Ok(self.store.begin_or_replay(request).await?)
     }
 
-    pub fn advance(
+    pub async fn advance(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
         current: &GitIndexTransactionJournalV1,
@@ -48,14 +48,13 @@ where
         let mut replacement = current.clone();
         let expected_phase_epoch = replacement.phase_epoch;
         replacement.advance(next, updated_at)?;
-        Ok(self.store.compare_and_swap_journal(
-            idempotency_key,
-            expected_phase_epoch,
-            replacement,
-        )?)
+        Ok(self
+            .store
+            .compare_and_swap_journal(idempotency_key, expected_phase_epoch, replacement)
+            .await?)
     }
 
-    pub fn write_terminal(
+    pub async fn write_terminal(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
         current: &GitIndexTransactionJournalV1,
@@ -76,6 +75,6 @@ where
             receipt,
         };
         write.validate()?;
-        Ok(self.store.write_terminal(write)?)
+        Ok(self.store.write_terminal(write).await?)
     }
 }

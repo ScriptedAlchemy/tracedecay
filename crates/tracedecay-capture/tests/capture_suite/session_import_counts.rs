@@ -1,5 +1,9 @@
 //! Session-import normalizers against the raw Codex, Cursor, and Pi fixtures
 //! the cass comparison measured.
+//!
+//! The counts are message records, not conversation turns. Codex writes one
+//! turn as a `response_item` and an `event_msg` of the same text; capture keeps
+//! both records, so both count here, and projection keeps one turn.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -1270,7 +1270,7 @@ fn flip_trailing_hex(value: &str) -> String {
 /// generation id advances to an unseated successor, replacing the
 /// predecessor's index entry (same-revision entries are replaced, not
 /// appended), while the sealed artifact and Git evidence stay in place.
-/// `drift_content` additionally flips the sealed source content identity,
+/// `drift_content` also flips the sealed source content identity,
 /// staging a successor sealed from different bytes.
 fn advance_pointer_to_unseated_successor(scoped_store_root: &Path, drift_content: bool) {
     use tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest;

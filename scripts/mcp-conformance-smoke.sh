@@ -4,7 +4,7 @@
 #
 # Why this exists on top of tests/mcp_suite/ (which already exercises
 # initialize/tools/call with hand-crafted JSON-RPC): the Inspector embeds the
-# official TypeScript SDK client, so every call here additionally proves
+# official TypeScript SDK client, so every call here also proves
 #   - protocol-version negotiation with a *newer* client (the 0.22.0 client
 #     requests protocolVersion 2025-11-25; the server answers 2024-11-05 and
 #     the SDK accepts it, the Rust tests only ever send 2024-11-05),

@@ -36,6 +36,11 @@ use tracedecay_global_db::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb
 /// Maximum events committed with one matching durable cursor frontier.
 const IMPORT_BATCH_SIZE: usize = 500;
 
+/// Size above which a fully imported hook analytics file is truncated. Every
+/// row of a consumed file is already durable in `analytics_events`, so the file
+/// only needs to hold the not-yet-imported tail.
+const HOOK_ANALYTICS_ROTATE_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct HookImportSource {
     /// JSONL file to import.
@@ -141,6 +146,14 @@ pub async fn analytics_sync_with_db(
 pub async fn import_source(
     gdb: &RegisteredGlobalDb,
     source: &HookImportSource,
+) -> HookImportSourceOutcome {
+    import_source_rotating_above(gdb, source, HOOK_ANALYTICS_ROTATE_BYTES).await
+}
+
+async fn import_source_rotating_above(
+    gdb: &RegisteredGlobalDb,
+    source: &HookImportSource,
+    rotate_bytes: u64,
 ) -> HookImportSourceOutcome {
     let mut result = HookImportSourceOutcome {
         path: source.path.clone(),
@@ -255,7 +268,84 @@ pub async fn import_source(
         result.error = Some(err);
     }
     observe_import_write_latency(gdb, durable_started, result.error.is_none()).await;
+    let read_end = start + text.len() as u64;
+    if result.error.is_none() && consumed == text.len() && read_end > rotate_bytes {
+        rotate_consumed_file(
+            gdb,
+            &source.path,
+            &cursor_key,
+            ParseOffset {
+                byte_offset: read_end,
+                mtime,
+                file_id: 0,
+            },
+        )
+        .await;
+    }
     result
+}
+
+/// Truncates `path` to zero when its length still equals `consumed_end`,
+/// holding the sidecar lock every analytics append takes so no row can land
+/// between the length check and the truncate. A held lock or a longer file
+/// means rows arrived after the import read; rotation waits for the next
+/// import. Returns whether the file was truncated.
+fn truncate_if_unchanged(path: &Path, consumed_end: u64) -> std::io::Result<bool> {
+    let Some(_append_lock) = tracedecay_runtime_core::storage::try_acquire_sidecar_lock(
+        &tracedecay_runtime_core::storage::append_lock_path(path),
+    )?
+    else {
+        return Ok(false);
+    };
+    let file = std::fs::OpenOptions::new().write(true).open(path)?;
+    if file.metadata()?.len() != consumed_end {
+        return Ok(false);
+    }
+    file.set_len(0)?;
+    Ok(true)
+}
+
+/// Rotates a fully imported file and rewinds its durable cursor to the start,
+/// so a file that regrows past the old offset before the next import is not
+/// read from the middle. Rotation failures lose no rows and are only logged.
+async fn rotate_consumed_file(
+    gdb: &RegisteredGlobalDb,
+    path: &Path,
+    cursor_key: &str,
+    consumed: ParseOffset,
+) {
+    match truncate_if_unchanged(path, consumed.byte_offset) {
+        Ok(false) => return,
+        Ok(true) => {}
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "hook analytics rotation failed");
+            return;
+        }
+    }
+    tracing::info!(
+        path = %path.display(),
+        rotated_bytes = consumed.byte_offset,
+        "hook analytics file rotated after full import"
+    );
+    if let Err(error) = gdb
+        .append_analytics_events_with_cursor(
+            &[],
+            cursor_key,
+            consumed,
+            ParseOffset {
+                byte_offset: 0,
+                mtime: consumed.mtime,
+                file_id: 0,
+            },
+        )
+        .await
+    {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "hook analytics cursor rewind failed after rotation"
+        );
+    }
 }
 
 /// Retains one `storage.measurement.observed.v1` write-latency observation for
@@ -356,7 +446,145 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RegisteredGlobalDb, hook_row_to_analytics_event};
+    use std::path::Path;
+
+    use super::{
+        HookImportSource, RegisteredGlobalDb, hook_row_to_analytics_event,
+        import_source_rotating_above, truncate_if_unchanged,
+    };
+    use tracedecay_global_db::AnalyticsEventQuery;
+
+    fn rows(first: usize, count: usize) -> String {
+        (first..first + count)
+            .map(|index| {
+                format!(
+                    r#"{{"agent":"claude","event":"hook_invoked","hook_name":"hook{index}","ts_unix_ms":1783000000000}}{}"#,
+                    "\n"
+                )
+            })
+            .collect()
+    }
+
+    async fn stored_hook_names(db: &RegisteredGlobalDb) -> Vec<String> {
+        let mut names = db
+            .query_analytics_events(&AnalyticsEventQuery {
+                provider: None,
+                project_id: None,
+                session_id: None,
+                event_kind: None,
+                since: None,
+                until: None,
+                before_id: None,
+                limit: 1000,
+            })
+            .await
+            .expect("query analytics events")
+            .into_iter()
+            .filter_map(|event| event.hook_name)
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn append(path: &Path, text: &str) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .expect("open analytics file")
+            .write_all(text.as_bytes())
+            .expect("append analytics rows");
+    }
+
+    fn source(path: &Path) -> HookImportSource {
+        HookImportSource {
+            path: path.to_path_buf(),
+            default_project_root: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_consumed_file_over_the_threshold_rotates_and_new_rows_import_once() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "hook-analytics-rotation",
+        )
+        .await;
+        let directory = tempfile::tempdir().expect("analytics directory");
+        let path = directory.path().join("hook_analytics.jsonl");
+        append(&path, &rows(0, 3));
+
+        let outcome = import_source_rotating_above(&harness.registered, &source(&path), 1).await;
+        assert_eq!((outcome.imported, outcome.error), (3, None));
+        assert_eq!(std::fs::metadata(&path).expect("rotated file").len(), 0);
+
+        // Longer than the rotated file was, so a cursor left at the old end
+        // would resume mid-file and drop rows.
+        append(&path, &rows(3, 5));
+        let outcome =
+            import_source_rotating_above(&harness.registered, &source(&path), u64::MAX).await;
+        assert_eq!((outcome.imported, outcome.error), (5, None));
+        let expected = (0..8)
+            .map(|index| format!("hook{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(stored_hook_names(&harness.registered).await, expected);
+    }
+
+    #[tokio::test]
+    async fn a_file_under_the_threshold_or_with_an_unconsumed_tail_is_not_rotated() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "hook-analytics-no-rotation",
+        )
+        .await;
+        let directory = tempfile::tempdir().expect("analytics directory");
+        let small = directory.path().join("small.jsonl");
+        append(&small, &rows(0, 2));
+        let small_len = std::fs::metadata(&small).expect("small file").len();
+        let outcome =
+            import_source_rotating_above(&harness.registered, &source(&small), small_len).await;
+        assert_eq!(outcome.imported, 2);
+        assert_eq!(
+            std::fs::metadata(&small).expect("small file").len(),
+            small_len
+        );
+
+        let partial = directory.path().join("partial.jsonl");
+        append(&partial, &rows(10, 2));
+        append(&partial, r#"{"agent":"claude","event":"hook_inv"#);
+        let partial_len = std::fs::metadata(&partial).expect("partial file").len();
+        let outcome = import_source_rotating_above(&harness.registered, &source(&partial), 1).await;
+        assert_eq!(outcome.imported, 2);
+        assert_eq!(
+            std::fs::metadata(&partial).expect("partial file").len(),
+            partial_len,
+            "an unfinished trailing row keeps the file"
+        );
+    }
+
+    #[test]
+    fn truncation_requires_the_exact_consumed_length_and_the_append_lock() {
+        let directory = tempfile::tempdir().expect("analytics directory");
+        let path = directory.path().join("hook_analytics.jsonl");
+        append(&path, &rows(0, 2));
+        let consumed = std::fs::metadata(&path).expect("file").len();
+
+        append(&path, &rows(2, 1));
+        assert!(!truncate_if_unchanged(&path, consumed).expect("stale length"));
+        assert!(std::fs::metadata(&path).expect("file").len() > consumed);
+
+        let length = std::fs::metadata(&path).expect("file").len();
+        let held = tracedecay_runtime_core::storage::try_acquire_sidecar_lock(
+            &tracedecay_runtime_core::storage::append_lock_path(&path),
+        )
+        .expect("append lock")
+        .expect("lock is free");
+        assert!(!truncate_if_unchanged(&path, length).expect("held lock"));
+        assert_eq!(std::fs::metadata(&path).expect("file").len(), length);
+        drop(held);
+
+        assert!(truncate_if_unchanged(&path, length).expect("exact length"));
+        assert_eq!(std::fs::metadata(&path).expect("file").len(), 0);
+    }
 
     fn aliased_root() -> (tempfile::TempDir, String, std::path::PathBuf) {
         let root = tempfile::tempdir().expect("project root");

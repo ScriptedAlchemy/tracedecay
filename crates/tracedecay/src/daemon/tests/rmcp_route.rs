@@ -839,14 +839,21 @@ impl ControlledCancellationExecutor {
     }
 
     async fn await_cancellation(&self, cancellation: tracedecay_contracts::CancellationSignal) {
+        // Dispatches run on native workers, so the fixture polls on native
+        // timers.
+        let tick = || {
+            tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(1),
+            )
+        };
         let ordinal = self.started.fetch_add(1, Ordering::SeqCst);
         while !cancellation.is_cancelled() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            let _ = tick().await;
         }
         self.cancellation_observed.fetch_add(1, Ordering::SeqCst);
         if ordinal == 0 {
             while !self.release_first.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                let _ = tick().await;
             }
         }
         self.completed.fetch_add(1, Ordering::SeqCst);

@@ -1029,7 +1029,7 @@ fn hunk_commit_matches_preview(
 
 /// Verify the complete operation-specific terminal state before emitting a
 /// success receipt. Native publication proves which process crossed the
-/// boundary; this observation additionally refuses success if HEAD/ref or
+/// boundary; this observation also refuses success if HEAD/ref or
 /// stable repository authority drifted before the terminal receipt.
 fn live_result_matches_preview(
     preview: &GitIndexPreviewV1,
@@ -1090,7 +1090,7 @@ impl<A> FixedDaemonGitIndexExecutor<A> {
 
 impl<A> GitIndexNativeExecutor for FixedDaemonGitIndexExecutor<A>
 where
-    A: GitIndexPreviewAssembler,
+    A: GitIndexPreviewAssembler + Sync,
 {
     #[tracing::instrument(name = "daemon.git.tx.native_preview", level = "trace", skip_all)]
     fn preview(
@@ -1220,7 +1220,7 @@ where
 
 impl<A> GitIndexRecoveryExecutor for FixedDaemonGitIndexExecutor<A>
 where
-    A: GitIndexPreviewAssembler,
+    A: GitIndexPreviewAssembler + Sync,
 {
     fn reconcile(
         &self,

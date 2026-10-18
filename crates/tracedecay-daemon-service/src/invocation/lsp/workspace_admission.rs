@@ -171,7 +171,7 @@ impl DaemonInvocationService {
         let mut admitted = Vec::with_capacity(roots.len());
         for (ordinal, (project_root, uri, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
-            let grant = owner.scope_grant?;
+            let grant = owner.scope_grant_at(observed_at)?;
             if grant.scope != *scope {
                 return None;
             }

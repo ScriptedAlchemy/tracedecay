@@ -3,7 +3,9 @@
 > **Current layout:** all agent bundles are composed from the shared
 > `plugin/` tree. Skills live in `plugin/skills/`; per-host manifests in
 > `plugin/.{cursor,codex,claude}-plugin/`; hooks in
-> `plugin/hooks/hooks-<host>.json`; host READMEs in `plugin/README-<host>.md`.
+> `plugin/hooks/hooks-<host>.json`, and the skill mandate in
+> `plugin/hooks/session-start-context.md` (Claude and Codex `SessionStart`,
+> the Cursor rule, Kimi and OpenCode `AGENTS.md`); host READMEs in `plugin/README-<host>.md`.
 > Cursor's workflow dispatchers deploy as native Cursor 1.6+ commands from
 > `plugin/overlays/cursor/commands/*.md`; Claude uses `plugin/commands/*.md`.
 > `crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs` owns each host's deployed file set.
@@ -88,9 +90,17 @@ cleanly on Claude, Codex, *and* Cursor:
   Cursor-only key (`disable-model-invocation`/`paths`) would break Codex/Claude,
   so it fails here, that surface belongs in the native commands overlay.
 - **Description budget.** 50–320 characters, ≤45 words, trigger-first ("Use
-  …"), ends with a period, no angle brackets, unique across the set.
+  when …"), ends with "Load this skill before the first tool call.", no angle
+  brackets, unique across the set. A skill that can misfire adds one "Skip
+  when …" sentence directly before the load clause, as pstack's `tdd` does.
 - **Body rules.** Exactly one plain-title H1 (never `# /slug`), no skipped
-  heading levels, no body-only `## When to Use` section, ≤500 lines.
+  heading levels, no body-only `## When to Use` section, ≤500 lines. The
+  last paragraph is the reply contract: `**Report:**`, what to return and
+  which evidence to quote, then what not to do
+  (`bundled_skills_close_with_a_report_contract`). A multi-step skill numbers
+  its steps from 1 and opens them with "Follow these steps in order. Report a
+  step you skip as `skip: <reason>`."; a skippable step names its valid skip
+  reason.
 - **Hygiene + layout.** No BOM/CRLF/tabs/trailing whitespace, one trailing
   newline, balanced fences, non-empty body; a skill dir holds only `SKILL.md`
   plus the supported resource dirs (`agents/`, `scripts/`, `references/`,
@@ -270,16 +280,20 @@ not hand-register `include_str!` entries.
 
 1. **Create the source skill:** a new directory
    `plugin/skills/<skill-name>/SKILL.md` with `name` and `description`
-   frontmatter. Keep the description trigger-first ("Use when …"), under 320
-   characters and 45 words; keep the body under 500 lines. Use only allowed
-   frontmatter keys (see layer 2 above). A skill directory may additionally
+   frontmatter. Start the description with the trigger ("Use when …") and end
+   it with "Load this skill before the first tool call.", under 320 characters
+   and 45 words; keep the body under 500 lines and close it with a
+   `**Report:**` paragraph (see layer 2). Use only allowed
+   frontmatter keys (see layer 2 above), and set `metadata:` with
+   `opencode/slash: "true"` so OpenCode offers the skill as `/<skill-name>`
+   like the other hosts do. A skill directory may also
    carry `scripts/`, `references/`, and `assets/` support files, these are
    embedded automatically by the recursive `build.rs` codegen
    (`GENERATED_SKILL_FILES`), so no table edit is needed.
-2. **Wire it into the model-invocable index (if model-invocable):** add the
-   slug to `hooks::CURSOR_PLUGIN_SKILLS` in `src/hooks/steering.rs`. Workflow
-   dispatch that should be explicit-invoke lives as a Cursor native command
-   under `plugin/overlays/cursor/commands/<slug>.md`, not as a skill.
+2. **Do not add a command for it.** Every host that ships commands invokes a
+   skill by name. A command (`plugin/commands/<slug>.md` plus
+   `plugin/overlays/cursor/commands/tracedecay-<slug>.md`) is only for a
+   workflow no skill triggers on.
 3. **Watch the metadata budget:** the summed name+description metadata must
    stay under 6,000 characters. If your addition tips it over, tighten
    descriptions rather than raising the budget.

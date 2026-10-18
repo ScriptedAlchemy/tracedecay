@@ -72,11 +72,20 @@ fn codex_plugin_mcp_pins_explorer_binary_and_plugin_relative_adapter() {
             json!(["chatgpt-extension/embedded/server.mjs", "--binary", bin]),
             "Codex does not expand ${{PLUGIN_ROOT}}; the adapter path must be plugin-relative"
         );
-        assert_eq!(value["mcpServers"]["graph"]["command"], json!(bin));
+        let graph = &value["mcpServers"]["graph"];
+        assert_eq!(graph["command"], json!(bin));
+        let expected_args = match scope {
+            InstallScope::Global => json!(["serve", "--full-tool-list"]),
+            InstallScope::ProjectLocal => json!(["serve", "--full-tool-list", "--path", "."]),
+        };
         assert_eq!(
-            value["mcpServers"]["graph"]["env"],
-            json!({ "TRACEDECAY_MCP_REPEAT_READ_POINTERS": "1" }),
-            "Codex runs one serve per thread, so repeat-read pointers are on"
+            graph["args"], expected_args,
+            "Codex types exec tools from full schemas, so it never gets the stub list"
+        );
+        assert_eq!(
+            graph.get("env"),
+            None,
+            "an exec program cannot act on a repeat-read pointer"
         );
     }
 }

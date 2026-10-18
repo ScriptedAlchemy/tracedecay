@@ -4,8 +4,9 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::TcpListener;
@@ -16,6 +17,7 @@ use hyper_util::service::TowerToHyperService;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+use tracedecay_runtime_core::native_runtime::{NativeTaskOutcome, NativeTaskSet};
 
 use crate::state::config_error;
 use tracedecay_domain::errors::Result;
@@ -51,25 +53,31 @@ pub fn validate_dashboard_host(host: &str) -> Result<&str> {
 /// socket. The drain has no deadline because callers own one. Accept errors
 /// never end the loop. Dropping the future aborts every connection.
 pub async fn serve_loopback(
+    executor: ConnectionExecutor,
     listener: TcpListener,
     router: Router,
     shutdown: impl Future<Output = ()>,
 ) {
     let graceful = CancellationToken::new();
-    let mut connections = JoinSet::new();
+    let admission = Arc::new(tokio::sync::Semaphore::new(128));
+    let mut connections = Connections::new(executor);
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
             () = &mut shutdown => break,
-            Some(joined) = connections.join_next(), if !connections.is_empty() => {
-                observe_connection_join(joined);
-            }
+            Some(()) = connections.join_next(), if !connections.is_empty() => {}
             accepted = listener.accept() => match accepted {
                 Ok((stream, address)) => {
+                    let Ok(permit) = Arc::clone(&admission).try_acquire_owned() else {
+                        drop(stream);
+                        tracing::warn!("loopback HTTP connection capacity reached");
+                        continue;
+                    };
                     let router = router.clone();
                     let graceful = graceful.clone();
                     connections.spawn(async move {
+                        let _permit = permit;
                         if let Err(error) = serve_http_connection(stream, router, true, graceful).await {
                             tracing::trace!(%error, %address, "loopback HTTP connection stopped");
                         }
@@ -81,8 +89,69 @@ pub async fn serve_loopback(
     }
     drop(listener);
     graceful.cancel();
-    while let Some(joined) = connections.join_next().await {
-        observe_connection_join(joined);
+    while connections.join_next().await.is_some() {}
+}
+
+/// Where [`serve_loopback`] runs each connection.
+pub enum ConnectionExecutor {
+    Native,
+    /// For daemon routes that still reach `project_server_lifecycle` inside
+    /// their connection task.
+    Tokio(tokio::runtime::Handle),
+}
+
+enum Connections {
+    Native(NativeTaskSet<()>),
+    Tokio(tokio::runtime::Handle, JoinSet<()>),
+}
+
+impl Connections {
+    fn new(executor: ConnectionExecutor) -> Self {
+        match executor {
+            ConnectionExecutor::Native => Self::Native(NativeTaskSet::default()),
+            ConnectionExecutor::Tokio(runtime) => Self::Tokio(runtime, JoinSet::new()),
+        }
+    }
+
+    /// A refused connection's IO drops with it, closing the socket.
+    fn spawn(&mut self, connection: impl Future<Output = ()> + Send + 'static) {
+        match self {
+            Self::Native(set) => {
+                if let Err(error) = set.spawn(connection) {
+                    tracing::warn!(%error, "loopback HTTP connection not admitted");
+                }
+            }
+            Self::Tokio(runtime, set) => {
+                set.spawn_on(connection, runtime);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Native(set) => set.is_empty(),
+            Self::Tokio(_, set) => set.is_empty(),
+        }
+    }
+
+    /// Joins the next connection to end, logging a failed one; `None` once
+    /// none remain.
+    async fn join_next(&mut self) -> Option<()> {
+        match self {
+            Self::Native(set) => {
+                if let NativeTaskOutcome::Panicked(payload) = set.join_next().await? {
+                    tracing::warn!(?payload, "loopback HTTP connection task failed");
+                }
+            }
+            Self::Tokio(_, set) => {
+                if let Err(error) = set.join_next().await?
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(%error, "loopback HTTP connection task failed");
+                }
+            }
+        }
+        Some(())
     }
 }
 
@@ -101,17 +170,9 @@ async fn wait_after_accept_error(error: &io::Error) {
     Sleep::after(wall_now(), Duration::from_secs(1)).await;
 }
 
-fn observe_connection_join(joined: std::result::Result<(), tokio::task::JoinError>) {
-    if let Err(error) = joined
-        && !error.is_cancelled()
-    {
-        tracing::warn!(%error, "loopback HTTP connection task failed");
-    }
-}
-
 /// Serves one HTTP/1.1 connection with `router` and starts a graceful
-/// shutdown once `graceful` is cancelled. hyper runs without an executor or a
-/// timer, so the IO is the only runtime seam.
+/// shutdown once `graceful` is cancelled. Header reads, including idle
+/// keep-alive connections, use the native timer without limiting live SSE bodies.
 pub async fn serve_http_connection<T>(
     io: T,
     router: Router,
@@ -125,6 +186,8 @@ where
         router.map_request(|request: hyper::Request<hyper::body::Incoming>| request.map(Body::new));
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.keep_alive(keep_alive);
+    builder.timer(HttpTimer);
+    builder.header_read_timeout(Duration::from_secs(15));
     let connection = builder.serve_connection(HyperIo(io), TowerToHyperService::new(service));
     tokio::pin!(connection);
     tokio::select! {
@@ -133,6 +196,38 @@ where
             connection.as_mut().graceful_shutdown();
             connection.await
         }
+    }
+}
+
+#[derive(Clone)]
+struct HttpTimer;
+
+struct HttpSleep(Mutex<Pin<Box<Sleep>>>);
+
+impl Future for HttpSleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut sleep = match self.0.lock() {
+            Ok(sleep) => sleep,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        sleep.as_mut().poll(cx)
+    }
+}
+
+impl hyper::rt::Sleep for HttpSleep {}
+
+impl hyper::rt::Timer for HttpTimer {
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn hyper::rt::Sleep>> {
+        Box::pin(HttpSleep(Mutex::new(Box::pin(Sleep::after(
+            wall_now(),
+            duration,
+        )))))
+    }
+
+    fn sleep_until(&self, deadline: Instant) -> Pin<Box<dyn hyper::rt::Sleep>> {
+        self.sleep(deadline.saturating_duration_since(Instant::now()))
     }
 }
 

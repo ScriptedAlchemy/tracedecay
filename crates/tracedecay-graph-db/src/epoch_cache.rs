@@ -91,50 +91,6 @@ impl LabelKeyCache {
     }
 }
 
-#[cfg(test)]
-mod label_key_cache_tests {
-    use grafeo_core::graph::lpg::LpgStore;
-
-    use super::*;
-
-    #[test]
-    fn hits_share_one_list_and_invalidation_recomputes_without_revoking_it() {
-        let store = LpgStore::new().expect("in-memory store");
-        store.create_node(&["Entity"]);
-        let cache = LabelKeyCache::default();
-
-        let first = cache.keys(&store, "Entity").expect("first lookup");
-        let second = cache.keys(&store, "Entity").expect("cached lookup");
-        assert!(
-            Arc::ptr_eq(&first, &second),
-            "a hit shares the cached slice"
-        );
-        assert_eq!(&*first, ["Entity".to_owned()]);
-
-        let missing = cache.keys(&store, "Absent").expect("missing label");
-        assert_eq!(
-            &*missing,
-            ["Absent".to_owned()],
-            "a label the store lacks still resolves to itself"
-        );
-
-        cache.invalidate();
-        store.create_node(&["Entity|Fresh"]);
-        let refreshed = cache.keys(&store, "Fresh").expect("post-write lookup");
-        assert_eq!(&*refreshed, ["Entity|Fresh".to_owned()]);
-        let after_write = cache.keys(&store, "Entity").expect("recomputed lookup");
-        assert!(
-            !Arc::ptr_eq(&first, &after_write),
-            "a bumped epoch recomputes rather than serving the old list"
-        );
-        assert_eq!(
-            &*first,
-            ["Entity".to_owned()],
-            "the admitted old list is intact"
-        );
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct ProjectionApprovalCache {
     epoch: AtomicU64,
@@ -196,5 +152,49 @@ impl ProjectionApprovalCache {
             entries.approved.push(key);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod label_key_cache_tests {
+    use grafeo_core::graph::lpg::LpgStore;
+
+    use super::*;
+
+    #[test]
+    fn hits_share_one_list_and_invalidation_recomputes_without_revoking_it() {
+        let store = LpgStore::new().expect("in-memory store");
+        store.create_node(&["Entity"]);
+        let cache = LabelKeyCache::default();
+
+        let first = cache.keys(&store, "Entity").expect("first lookup");
+        let second = cache.keys(&store, "Entity").expect("cached lookup");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a hit shares the cached slice"
+        );
+        assert_eq!(&*first, ["Entity".to_owned()]);
+
+        let missing = cache.keys(&store, "Absent").expect("missing label");
+        assert_eq!(
+            &*missing,
+            ["Absent".to_owned()],
+            "a label the store lacks still resolves to itself"
+        );
+
+        cache.invalidate();
+        store.create_node(&["Entity|Fresh"]);
+        let refreshed = cache.keys(&store, "Fresh").expect("post-write lookup");
+        assert_eq!(&*refreshed, ["Entity|Fresh".to_owned()]);
+        let after_write = cache.keys(&store, "Entity").expect("recomputed lookup");
+        assert!(
+            !Arc::ptr_eq(&first, &after_write),
+            "a bumped epoch recomputes rather than serving the old list"
+        );
+        assert_eq!(
+            &*first,
+            ["Entity".to_owned()],
+            "the admitted old list is intact"
+        );
     }
 }

@@ -470,15 +470,24 @@ def test_skill_routing():
         check(f"routing: {condition} excluded from no-skill denominator",
               counts["no_skill_cases"] == 0 and counts["unmeasured_skill_cases"] == 1)
     codex = grade.load_transcript_lines([json.dumps({"type": "item.completed", "item": {
-        "type": "command_execution", "command": "cat /tmp/plugin/skills/tracing-functions/SKILL.md",
-        "aggregated_output": "# Tracing functions", "exit_code": 0}})], "codex")
-    unmeasured = grade.score_scenario(scn, codex, {}, {})
-    routing = unmeasured["details"]["skill_routing"]
-    check("routing: Codex native skill read is unmeasured, not missed",
-          routing["measured"] is False and routing["missed"] is None and routing["invoked"] is None)
-    codex_agg = grade.aggregate([unmeasured])["codex"]
-    check("routing: unsupported host excluded from routing denominator",
-          codex_agg["skill_routing"] == {} and codex_agg["unmeasured_skill_cases"] == 1)
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"sed -n '1,240p' /h/.codex/plugins/cache/personal/tracedecay/1.0.0/skills/tracing-functions/SKILL.md\"",
+        "aggregated_output": "# Tracing functions", "exit_code": 0}}), json.dumps({"type": "item.completed", "item": {
+        "type": "mcp_tool_call", "server": "tracedecay", "tool": "tracedecay_callers", "arguments": {}}})], "codex")
+    measured = grade.score_scenario(dict(scn, expected_tools={"required_first": ["tracedecay_callers"]}), codex, {}, {})
+    routing = measured["details"]["skill_routing"]
+    check("routing: Codex SKILL.md read is the skill invocation",
+          routing["measured"] and routing["invoked"] == ["tracing-functions"] and not routing["missed"])
+    check("routing: a skill load is not the first task tool",
+          measured["details"]["first_tool"] == "tracedecay_callers")
+    codex_agg = grade.aggregate([measured])["codex"]
+    check("routing: Codex counts in the routing denominator",
+          codex_agg["skill_routing"]["tracing-functions"] == {"tp": 1, "fn": 0, "fp": 0})
+    other = grade.load_transcript_lines([json.dumps({"type": "item.completed", "item": {
+        "type": "command_execution", "command": "cat ~/.codex/skills/.system/skill-creator/SKILL.md",
+        "exit_code": 0}})], "codex")
+    check("routing: another plugin's skill read is not a TraceDecay skill",
+          grade.invoked_skills(other) == [])
     prose = transcript([claude_result("Consider tracedecay:tracing-functions")])
     check("routing: prose is not invocation", grade.invoked_skills(prose) == [])
 

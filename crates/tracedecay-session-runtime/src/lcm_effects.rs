@@ -29,7 +29,7 @@ pub(super) struct DaemonLcmEffectService {
 #[derive(Clone)]
 struct LcmEffectControl {
     cancellation: Option<CancellationSignal>,
-    expires_at: tokio::time::Instant,
+    expires_at: std::time::Instant,
 }
 
 impl LcmEffectControl {
@@ -41,7 +41,7 @@ impl LcmEffectControl {
             });
         Self {
             cancellation: cancellation.cloned(),
-            expires_at: tokio::time::Instant::now() + budget,
+            expires_at: std::time::Instant::now() + budget,
         }
     }
 
@@ -53,7 +53,7 @@ impl LcmEffectControl {
         {
             return Err(LcmError::Cancelled);
         }
-        if tokio::time::Instant::now() >= self.expires_at {
+        if std::time::Instant::now() >= self.expires_at {
             return Err(LcmError::DeadlineExceeded);
         }
         Ok(())
@@ -73,8 +73,8 @@ impl LcmEffectControl {
     }
 
     fn execution_control(&self) -> ExecutionControl {
-        let control = ExecutionControl::new(Some(self.expires_at.into_std()))
-            .with_work_limit(LCM_EFFECT_WORK_LIMIT);
+        let control =
+            ExecutionControl::new(Some(self.expires_at)).with_work_limit(LCM_EFFECT_WORK_LIMIT);
         if self.checkpoint().is_err() {
             control.cancel();
         }
@@ -85,7 +85,7 @@ impl LcmEffectControl {
         self.checkpoint()?;
         Ok(self
             .expires_at
-            .saturating_duration_since(tokio::time::Instant::now()))
+            .saturating_duration_since(std::time::Instant::now()))
     }
 }
 

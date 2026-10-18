@@ -18,6 +18,7 @@ use super::failure::{
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, observation_catch_up_failure,
     scheduling_write_required, warn_transcript_catch_up_failure,
 };
+use super::quarantine::SourceSweep;
 use super::scheduler::{
     USER_CATCH_UP_PROVIDERS, USER_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
     finish_user_provider_coverage, plan_provider_rotation_admission, read_ingest_frontier,
@@ -138,6 +139,7 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
         cancellation,
         codex::CodexDiscoveryFrontier::initial(),
         None,
+        &mut SourceSweep::new("codex", None),
     )
     .await
     .map(|result| result.outcome)
@@ -158,6 +160,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
     cancellation: &ObservationCancellation,
     frontier: codex::CodexDiscoveryFrontier,
     discovery_state: Option<(&codex::CodexDiscoveryHub, &str)>,
+    sweep: &mut SourceSweep,
 ) -> source::TranscriptIngestResult<CodexUserIngestOutcome> {
     let Some(source) = codex::CodexSource::new() else {
         return Ok(CodexUserIngestOutcome {
@@ -222,14 +225,9 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         if cancellation.is_cancelled() {
             return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
-        let Some(pending) = codex::PendingTranscript::observe(discovery_state, path).await? else {
+        let Some(pending) = sweep.observe_file(path).await? else {
             continue;
         };
-        if let Some(failure) = pending.cached_source_failure(path) {
-            failures.push(failure);
-            frontier_committable = false;
-            continue;
-        }
         let progress = match codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
             path,
             session_id.as_deref(),
@@ -243,6 +241,10 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             Ok(progress) => progress,
             Err(error) if error.is_cancelled() => return Err(error),
             Err(error) => {
+                frontier_committable = false;
+                let Err(error) = sweep.refused(pending, error) else {
+                    continue;
+                };
                 let failure = warn_transcript_catch_up_failure(
                     "codex",
                     "observation",
@@ -252,13 +254,11 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 if failure.retryable {
                     return Err(error);
                 }
-                pending.record_source_failure(path, &error, failure)?;
                 failures.push(failure);
-                frontier_committable = false;
                 continue;
             }
         };
-        pending.admitted(path, progress.source_deferred, progress.covered_through)?;
+        pending.admitted(progress.source_deferred, progress.covered_through)?;
         deferred_by_byte_cap |= progress.source_deferred;
         frontier_committable &= !progress.source_deferred;
         bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);
@@ -339,6 +339,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> Result<BoundedProviderOutcome, BoundedProviderFailure> {
     if cancellation.is_cancelled() {
         return Ok(BoundedProviderOutcome {
@@ -355,6 +356,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                 max_new_bytes,
                 cancellation,
+                sweep,
             )
             .await
         {
@@ -376,12 +378,13 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     let jsonl_skip_session_ids = composer.jsonl_skip_session_ids();
     let remaining = max_new_bytes.map(|limit| limit.saturating_sub(composer.bytes_consumed));
     let composer_outcome = BoundedProviderOutcome::from_composer(&composer);
-    let sweep = cursor::try_ingest_cursor_user_sweep_capped_with_session_ids(
+    let jsonl = cursor::try_ingest_cursor_user_sweep_capped_with_session_ids(
         &registered_roots,
         admission,
         remaining,
         jsonl_skip_session_ids,
         cancellation,
+        sweep,
     )
     .await
     .map_err(|error| BoundedProviderFailure {
@@ -391,7 +394,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     Ok(merge_user_cursor_sweep(
         &composer,
         projected_session_ids,
-        sweep,
+        jsonl,
     ))
 }
 

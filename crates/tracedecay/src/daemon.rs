@@ -448,6 +448,8 @@ use project_open_handshake::{
 };
 mod project_open_orchestration;
 mod project_routing;
+// ambient-tokio: its Tokio timers run on Tokio tasks or inside the
+// native_runtime::on_tokio hops in project_server_lifecycle_hops.
 mod project_server_lifecycle;
 #[cfg(unix)]
 use project_open_orchestration::{
@@ -478,10 +480,11 @@ use project_routing::{
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
-use project_server_lifecycle::{
+use project_server_lifecycle::{schedule_project_server_retirement, shutdown_project_servers};
+mod project_server_lifecycle_hops;
+use project_server_lifecycle_hops::{
     await_user_profile_host_admission_replay_for_identity, cancel_retained_session_history,
-    schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
-    shutdown_project_servers,
+    schedule_user_profile_host_admission_replay_for_identity,
 };
 #[cfg(unix)]
 mod scheduler;

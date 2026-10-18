@@ -1,9 +1,15 @@
 use std::sync::Arc;
 
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
+
 use super::{
     DashboardTaskCompletion, RunningDashboard, get_manager, shutdown_dashboard_for_until,
     shutdown_dashboard_until,
 };
+
+fn native_task(work: impl Future<Output = ()> + Send + 'static) -> Arc<NativeTask<()>> {
+    Arc::new(NativeTask::spawn(work).expect("native dashboard task"))
+}
 
 /// The dashboard manager is process global, and these tests assert on its
 /// whole contents, so they must not observe each other's entries.
@@ -21,7 +27,7 @@ async fn shutdown_deadline_aborts_joins_and_clears_dashboard_task() {
     let (shutdown, _shutdown_requested) = tokio::sync::oneshot::channel();
     let completed = Arc::new(tokio::sync::Semaphore::new(0));
     let completion = DashboardTaskCompletion(Arc::clone(&completed));
-    let task = tokio::spawn(async move {
+    let task = native_task(async move {
         let _completion = completion;
         std::future::pending::<()>().await;
     });
@@ -47,7 +53,7 @@ async fn shutdown_deadline_aborts_joins_and_clears_dashboard_task() {
 
 /// A serving task signals its completion by dropping its
 /// [`DashboardTaskCompletion`], which happens strictly before the runtime
-/// marks the `JoinHandle` finished. A stop that starts inside that window
+/// marks the task finished. A stop that starts inside that window
 /// must still observe the completion: the server is already down, so
 /// reporting a missed deadline would fail a stop that in fact succeeded.
 #[tokio::test]
@@ -58,13 +64,16 @@ async fn shutdown_observes_a_completion_signalled_before_the_stop_began() {
     let completed = Arc::new(tokio::sync::Semaphore::new(0));
     let completion = DashboardTaskCompletion(Arc::clone(&completed));
     let (signalled, observe_signalled) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(async move {
+    let task = native_task(async move {
         drop(completion);
         let _ = signalled.send(());
         // Holds the task open well past the stop's deadline so that a stop
-        // which waits on the `JoinHandle` transition instead of the signal
+        // which waits on the task's join instead of the signal
         // reports a deadline miss.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let _ = native_runtime::sleep_until(
+            std::time::Instant::now() + std::time::Duration::from_millis(300),
+        )
+        .await;
     });
     get_manager().lock().await.insert(
         project_root.clone(),
@@ -101,7 +110,7 @@ async fn timed_out_shutdown_owner_aborts_the_dashboard_task() {
     let completed = Arc::new(tokio::sync::Semaphore::new(0));
     let completion = DashboardTaskCompletion(Arc::clone(&completed));
     let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
-    let task = tokio::spawn(async move {
+    let task = native_task(async move {
         let _completion = completion;
         let _alive = alive;
         std::future::pending::<()>().await;

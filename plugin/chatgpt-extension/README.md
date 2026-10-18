@@ -1,10 +1,9 @@
-# TraceDecay ChatGPT Extension
+# TraceDecay ChatGPT extension
 
-A ChatGPT plugin extension (MCP server + MCP App) that exposes the local
-TraceDecay daemon's semantic code intelligence to ChatGPT. It is a thin
-read-only bridge: every answer comes from the daemon's existing authority,
-project registry, generated contracts, and storage. This package adds no new
-DTOs, database, policy store, or write surface.
+This ChatGPT plugin extension provides an MCP server and MCP App for the
+local TraceDecay daemon's semantic code intelligence. The extension reads
+from the daemon's project registry and storage through its generated
+contracts. It adds no DTOs, database, policy store, or write API.
 
 ## What it does
 
@@ -23,7 +22,7 @@ From a ChatGPT conversation or the plugin's global entrypoint you can:
 The shared MCP App (`ui://tracedecay/code-explorer`,
 `text/html;profile=mcp-app`) renders loading, empty, stale, warming, partial,
 denied, not-found, disconnected, and unavailable states truthfully. Wrong or
-unregistered project ids surface the daemon's typed
+unregistered project ids return the daemon's typed
 not-found-or-not-authorized problem rather than an empty success.
 
 ## Architecture
@@ -38,8 +37,8 @@ not-found-or-not-authorized problem rather than an empty success.
   `Authorization: Bearer <token>`; pass `--token <value>` or read the
   generated token the server writes to
   `<profile-root>/chatgpt-loopback-bearer-token-<port>` (mode 0600) once
-  the listener binds — its path is printed to stderr, never the secret,
-  and shutdown removes it. Intended for
+  the listener binds. The server prints the path to stderr, never the secret,
+  and removes the file on shutdown. Use this transport for
   `tunnel-client --mcp-server-url` and browser testing.
 
 Inside the server a `DaemonBridge` reads through `@tracedecay/sdk` (the
@@ -87,17 +86,17 @@ staged bundle runs against the exact binary that installed it.
 
 ## Verification
 
-- `pnpm typecheck` — `tsc --noEmit` over server, app, and tests.
-- `pnpm test` — vitest integration suite against a real daemon: 10 tests
+- `pnpm typecheck` runs `tsc --noEmit` over server, app, and tests.
+- `pnpm test` runs the vitest integration suite against a real daemon,
   covering project registration, search, symbol inspection, callers/callees,
   denied/not-found/disconnected states, and the authority token never
   leaving the server. Requires `target/debug/tracedecay`
   (`cargo build -p tracedecay-cli --bin tracedecay`) or `TRACEDECAY_BIN`.
-- `pnpm test:browser` — Playwright suite driving the real `embedded` app
-  inside a sandboxed iframe on the maintained `AppBridge` host: connect
-  project → search → symbol → graph → evidence to chat → fullscreen, deep
-  links, and denied/not-found/disconnected rendering. Requires
-  `npx playwright install chromium` once.
+- `pnpm test:browser` runs the Playwright suite against the real `embedded` app
+  inside a sandboxed iframe on the maintained `AppBridge` host. It covers
+  project connection, search, symbol inspection, graph browsing, sending
+  evidence to chat, fullscreen, deep links, and denied/not-found/disconnected
+  rendering. Run `npx playwright install chromium` once before testing.
 
 ## Lifecycle
 
@@ -127,11 +126,9 @@ Verified locally: MCP initialize/tools/resources discovery and the full
 user journey over stdio and over the loopback Streamable HTTP transport,
 plus the packaged `embedded/server.mjs` entrypoint `plugin/mcp.json` launches.
 
-Externally blocked here, documented not claimed: reaching ChatGPT cloud
-requires either developer mode with a Secure MCP Tunnel
+Reaching ChatGPT cloud requires either developer mode with a Secure MCP Tunnel
 (`tunnel-client --mcp-command` for the stdio server or `--mcp-server-url`
 for the loopback HTTP server) or a public HTTPS endpoint for plugin
-submission. Both need OpenAI account/workspace credentials that are not
-available in this environment, so that leg is an explicit deployment
-prerequisite rather than a verified path. Desktop/local plugin loading uses
-the same portable `plugin.json` + `mcp.json` pair that is verified here.
+submission. Both need OpenAI account/workspace credentials. Cloud access has
+not been verified. Desktop/local plugin loading uses the same portable
+`plugin.json` + `mcp.json` pair that is verified here.

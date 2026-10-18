@@ -1,6 +1,8 @@
 ---
 name: assessing-impact
-description: Assess dependents and relevant tests for a proposed symbol, signature, file, or working-tree change.
+description: Use when the user asks what breaks, what to re-test, or which tests cover code before changing a function, signature, type, field, or file. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Assessing impact
@@ -19,3 +21,7 @@ indexed callers does not establish that a public API is unused.
 `run_affected_tests` runs the supported Rust selection; other languages use their
 native runner. Check the reported selection and nonzero executed count. A passing
 selection supports only the behavior it exercised, not every possible consumer.
+
+**Report:** the dependents and the tests to run, each with its file, plus the
+freshness line when it is not `fresh` and the consumers the graph cannot see. Do
+not call a caller safe because the index shows no edge to it.

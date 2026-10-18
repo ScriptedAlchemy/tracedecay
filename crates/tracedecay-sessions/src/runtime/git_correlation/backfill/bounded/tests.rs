@@ -7,6 +7,7 @@ use std::time::Duration;
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior, params,
 };
+use tracedecay_runtime_core::native_runtime;
 
 use super::*;
 use crate::runtime::git_correlation::{
@@ -285,6 +286,84 @@ async fn touch(store: &TestStore, session_id: &str) -> i64 {
     }
 }
 
+/// Real Git whose every read first takes two long polls, the way a large
+/// reflog or many worktrees do.
+struct SlowGit;
+
+impl SlowGit {
+    fn stall() {
+        std::thread::sleep(native_runtime::LONG_POLL * 2);
+    }
+}
+
+impl GitReflogSource for SlowGit {
+    fn reflog(&self, worktree: &Path) -> Option<String> {
+        Self::stall();
+        SystemGit.reflog(worktree)
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Option<String> {
+        Self::stall();
+        SystemGit.current_branch(worktree)
+    }
+
+    fn commit_reference_exists(
+        &self,
+        worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        Self::stall();
+        SystemGit.commit_reference_exists(worktree, reference)
+    }
+
+    fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
+        Self::stall();
+        SystemGit.commit_log(worktree, branch, since)
+    }
+}
+
+#[track_caller]
+fn spawned_here<T: Clone + Send + Sync + 'static>(
+    work: impl Future<Output = T> + Send + 'static,
+) -> (
+    native_runtime::NativeTask<T>,
+    &'static std::panic::Location<'static>,
+) {
+    (
+        native_runtime::NativeTask::spawn(work).expect("native task"),
+        std::panic::Location::caller(),
+    )
+}
+
+/// The session refresh worker runs this pass on a native task. Its Git reads
+/// wait on subprocess pipes, so they must wait on the blocking pool: on the
+/// worker they hold it for every read and stall every task queued behind it.
+#[tokio::test]
+async fn convergence_waits_for_git_off_the_native_worker() {
+    let repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
+
+    let (pass, site) = spawned_here(async move {
+        converge_git_evidence_pass(&store, Arc::new(SlowGit), None)
+            .await
+            .map(|outcome| outcome.pass.backfill)
+            .map_err(|error| error.to_string())
+    });
+    let native_runtime::NativeTaskOutcome::Completed(backfill) = pass.wait().await else {
+        panic!("the convergence task did not complete");
+    };
+    let backfill = backfill.unwrap();
+    assert!(backfill.spans_written > 0, "{backfill:?}");
+    assert!(backfill.commits_attributed > 0, "{backfill:?}");
+    assert_eq!(
+        native_runtime::long_native_polls().get(site),
+        None,
+        "a Git read held the native worker past {:?}",
+        native_runtime::LONG_POLL
+    );
+}
+
 /// The evidence rows, the attribution mark, and the history frontier commit
 /// in one transaction: a pass whose write fails leaves nothing behind, and a
 /// pass with nothing new installs no generation.
@@ -295,7 +374,7 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
     let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
     store.fail_next_write();
 
-    let failed = converge_git_evidence_pass(&store, &SystemGit, None)
+    let failed = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap_err();
     assert!(matches!(failed, GitCorrelationError::Db(_)));
@@ -314,7 +393,7 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
         "a failed pass must not leave evidence rows"
     );
 
-    let retried = converge_git_evidence_pass(&store, &SystemGit, None)
+    let retried = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(retried.later_failure, None);
@@ -334,7 +413,7 @@ async fn convergence_writes_evidence_and_frontier_atomically() {
         .expect("new evidence installs a generation");
     assert_eq!(installed.sequence, 1);
 
-    let settled = converge_git_evidence_pass(&store, &SystemGit, None)
+    let settled = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(settled.pass.backfill.sessions_scanned, 0);
@@ -479,7 +558,7 @@ async fn in_place_history_rewrites_revisit_and_retract_old_inference() {
             )
             .await
             .unwrap();
-        let initial = converge_git_evidence_pass(&store, &SystemGit, None)
+        let initial = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
             .await
             .unwrap()
             .pass;
@@ -513,7 +592,7 @@ async fn in_place_history_rewrites_revisit_and_retract_old_inference() {
             scalar(&store, "SELECT MAX(store_id) FROM lcm_raw_messages").await,
             message_identity
         );
-        let corrected = converge_git_evidence_pass(&store, &SystemGit, None)
+        let corrected = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
             .await
             .unwrap()
             .pass;
@@ -547,7 +626,7 @@ async fn in_place_history_rewrites_revisit_and_retract_old_inference() {
             scalar(&store, "SELECT COUNT(*) FROM git_evidence_commit").await,
             0
         );
-        let idle = converge_git_evidence_pass(&store, &SystemGit, None)
+        let idle = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
             .await
             .unwrap()
             .pass;
@@ -599,7 +678,7 @@ async fn reflog_inference_attributes_the_captured_span_and_retracts_alone() {
     writer.finish().await.unwrap();
     transaction.commit().await.unwrap();
 
-    converge_git_evidence_pass(&store, &SystemGit, None)
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(
@@ -651,7 +730,7 @@ async fn reflog_inference_attributes_the_captured_span_and_retracts_alone() {
         )
         .await
         .unwrap();
-    let revisited = converge_git_evidence_pass(&store, &SystemGit, None)
+    let revisited = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap()
         .pass;
@@ -727,7 +806,7 @@ async fn conflicting_captured_branch_keeps_the_inferred_span() {
     writer.finish().await.unwrap();
     transaction.commit().await.unwrap();
 
-    converge_git_evidence_pass(&store, &SystemGit, None)
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(
@@ -875,7 +954,7 @@ async fn branchless_capture_extension_retracts_and_requeues_inference() {
         )
         .await
         .unwrap();
-    converge_git_evidence_pass(&store, &SystemGit, None)
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(
@@ -931,7 +1010,7 @@ async fn branchless_capture_extension_retracts_and_requeues_inference() {
         crate::runtime::git_correlation::BranchProvenance::Captured
     );
     drop(view);
-    let revisited = converge_git_evidence_pass(&store, &SystemGit, None)
+    let revisited = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(
@@ -996,7 +1075,7 @@ async fn branchless_capture_beyond_an_inferred_window_opens_its_own_span() {
         )
         .await
         .unwrap();
-    converge_git_evidence_pass(&store, &SystemGit, None)
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(
@@ -1134,7 +1213,7 @@ async fn revisit_keeps_captured_commit_evidence_on_the_surviving_span() {
     writer.finish().await.unwrap();
     transaction.commit().await.unwrap();
 
-    converge_git_evidence_pass(&store, &SystemGit, None)
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
 
@@ -1148,7 +1227,7 @@ async fn revisit_keeps_captured_commit_evidence_on_the_surviving_span() {
         )
         .await
         .unwrap();
-    let revisited = converge_git_evidence_pass(&store, &SystemGit, None)
+    let revisited = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap()
         .pass;
@@ -1259,7 +1338,7 @@ async fn revisit_restores_the_capture_window_a_fold_unioned() {
         )
         .await
         .unwrap();
-    let revisited = converge_git_evidence_pass(&store, &SystemGit, None)
+    let revisited = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap()
         .pass;
@@ -1404,7 +1483,7 @@ async fn folded_span_keeps_capture_growth_through_revisit() {
         )
         .await
         .unwrap();
-    converge_git_evidence_pass(&store, &SystemGit, None)
+    converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
 
@@ -1438,7 +1517,7 @@ async fn never_recorded_evidence_converges_as_a_typed_no_op() {
         .await
         .unwrap();
 
-    let outcome = converge_git_evidence_pass(&store, &SystemGit, None)
+    let outcome = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(outcome.later_failure, None);
@@ -1462,10 +1541,28 @@ async fn never_recorded_evidence_converges_as_a_typed_no_op() {
 }
 
 #[test]
-fn unavailable_attribution_target_is_a_retryable_error() {
-    let span = stable_backfill_span("codex", "session-1", Some("main"), "/repo", 1, 2);
-    let error = attribute_commits(&[span], 0, |_| TargetScan::Unavailable).unwrap_err();
-    assert!(matches!(error, GitCorrelationError::Unavailable(_)));
+fn unscannable_targets_do_not_hold_back_the_rest() {
+    let spans = [
+        stable_backfill_span("codex", "gone", Some("main"), "/gone", 1, 2),
+        stable_backfill_span("codex", "flaky", Some("main"), "/flaky", 1, 2),
+        stable_backfill_span("codex", "live", Some("main"), "/live", 1, 2),
+    ];
+    let attribution = attribute_commits(&spans, 0, |target| match target.worktree.as_str() {
+        "/gone" => TargetScan::MissingWorktree,
+        "/flaky" => TargetScan::Unavailable,
+        _ => TargetScan::Scanned(vec![ScannedCommit {
+            sha: "c1".to_owned(),
+            committed_at: 1,
+        }]),
+    });
+    assert_eq!(attribution.unavailable_references, 1);
+    assert_eq!(attribution.retryable_targets, vec!["/flaky".to_owned()]);
+    let sessions: Vec<_> = attribution
+        .records
+        .iter()
+        .map(|record| record.session_id.as_str())
+        .collect();
+    assert_eq!(sessions, vec!["live"]);
 }
 
 #[tokio::test]
@@ -1514,12 +1611,200 @@ async fn archived_branch_is_limited_coverage_without_losing_observed_span() {
         .unwrap();
     let attribution = attribute_commits(&spans, DEFAULT_SPAN_MERGE_GAP_SECS, |target| {
         scan_span_target(&SystemGit, target, DEFAULT_SPAN_MERGE_GAP_SECS, usize::MAX)
-    })
-    .unwrap();
+    });
     assert_eq!(attribution.records, Vec::new());
     assert_eq!(attribution.unavailable_references, 1);
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].branch.as_deref(), Some("codex/archived"));
+}
+
+/// Counts span-target scans that reach Git. `unreadable_log` fails every
+/// `git log` the way a transient subprocess failure does.
+struct CountingGit {
+    scans: AtomicUsize,
+    unreadable_log: bool,
+}
+
+impl CountingGit {
+    fn new(unreadable_log: bool) -> Self {
+        Self {
+            scans: AtomicUsize::new(0),
+            unreadable_log,
+        }
+    }
+
+    fn scans(&self) -> usize {
+        self.scans.load(Ordering::SeqCst)
+    }
+}
+
+impl GitReflogSource for CountingGit {
+    fn reflog(&self, worktree: &Path) -> Option<String> {
+        SystemGit.reflog(worktree)
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Option<String> {
+        SystemGit.current_branch(worktree)
+    }
+
+    fn commit_reference_exists(
+        &self,
+        worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        SystemGit.commit_reference_exists(worktree, reference)
+    }
+
+    fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
+        if self.unreadable_log {
+            None
+        } else {
+            SystemGit.commit_log(worktree, branch, since)
+        }
+    }
+}
+
+/// A closed `main` span over the commits [`append_linear_history`] dates
+/// 1..=3.
+fn retained_span(
+    session_id: &str,
+    worktree: &Path,
+) -> crate::runtime::git_correlation::SessionGitSpan {
+    crate::runtime::git_correlation::SessionGitSpan {
+        span_id: format!("span-{session_id}"),
+        provider: "codex".to_owned(),
+        session_id: session_id.to_owned(),
+        thread_id: None,
+        branch: Some("main".to_owned()),
+        worktree: normalize_worktree(&worktree.to_string_lossy()),
+        first_ts: 1,
+        last_ts: 3,
+        event_count: 2,
+        source: crate::runtime::git_correlation::SpanSource::Ingest,
+        branch_provenance: crate::runtime::git_correlation::BranchProvenance::Captured,
+        capture_window: None,
+    }
+}
+
+/// A store that retains `spans` no attribution has covered yet, and no
+/// session rows for the backfill to scan.
+async fn store_retaining(
+    database: &Path,
+    spans: Vec<crate::runtime::git_correlation::SessionGitSpan>,
+) -> TestStore {
+    let unrelated = tempfile::tempdir().unwrap();
+    let store = prepare_store(database, unrelated.path()).await;
+    store
+        .connection
+        .execute_batch("DELETE FROM sessions")
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            spans,
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+    store
+}
+
+/// #3984: a retained span target whose Codex worktree was deleted failed
+/// attribution on every drain, so the whole pending set retried forever and
+/// the live targets beside it never attributed. A target that is gone or no
+/// longer a repository settles on the next pass, durably, and later passes
+/// scan nothing.
+#[tokio::test]
+async fn missing_span_worktrees_settle_attribution_without_rescans() {
+    let live = repository_fixture();
+    append_linear_history(live.path(), 3);
+    let deleted_parent = tempfile::tempdir().unwrap();
+    let deleted = deleted_parent.path().join("worktree");
+    std::fs::create_dir(&deleted).unwrap();
+    initialize_repository(&deleted);
+    let not_a_repository = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions.db");
+    let store = store_retaining(
+        &database,
+        vec![
+            retained_span("live", live.path()),
+            retained_span("deleted", &deleted),
+            retained_span("plain", not_a_repository.path()),
+        ],
+    )
+    .await;
+    std::fs::remove_dir_all(&deleted).unwrap();
+    let git = Arc::new(CountingGit::new(false));
+
+    let first = converge_git_evidence_pass(&store, git.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.later_failure, None,
+        "a missing worktree must not keep attribution retrying"
+    );
+    assert_eq!(first.pass.backfill.skipped_git_error, 0);
+    assert_eq!(first.pass.backfill.unavailable_attributions, 2);
+    assert_eq!(
+        first.pass.backfill.commits_attributed, 3,
+        "the live target attributes beside the missing ones"
+    );
+
+    drop(store);
+    let reopened = TestStore::open(&database);
+    let settled_scans = git.scans();
+    for tick in 1..=5 {
+        let outcome = converge_git_evidence_pass(&reopened, git.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.later_failure, None, "tick {tick}");
+        assert_eq!(outcome.pass.generation, None, "tick {tick}");
+    }
+    assert_eq!(
+        git.scans(),
+        settled_scans,
+        "settled targets must not be rescanned after a restart"
+    );
+}
+
+/// A Git failure in a worktree that still exists may clear, so it retries,
+/// but a bounded number of passes: a failure that never clears must not pin
+/// the drain the way #3984's deleted worktree did.
+#[tokio::test]
+async fn transient_span_scan_failure_retries_a_bounded_number_of_passes() {
+    let live = repository_fixture();
+    append_linear_history(live.path(), 3);
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_retaining(
+        &directory.path().join("sessions.db"),
+        vec![retained_span("live", live.path())],
+    )
+    .await;
+    let git = Arc::new(CountingGit::new(true));
+
+    let mut outcomes = Vec::new();
+    for _ in 0..10 {
+        outcomes.push(
+            converge_git_evidence_pass(&store, git.clone(), None)
+                .await
+                .unwrap(),
+        );
+    }
+    let retrying = outcomes
+        .iter()
+        .filter(|outcome| outcome.later_failure.is_some())
+        .count();
+    assert_eq!(retrying, 4, "{outcomes:#?}");
+    assert_eq!(outcomes[4].later_failure, None);
+    assert_eq!(outcomes[4].pass.backfill.unavailable_attributions, 1);
+    assert_eq!(git.scans(), 5, "no scan after the retry budget is spent");
 }
 
 #[tokio::test]
@@ -1532,7 +1817,7 @@ async fn convergence_permanent_exclusion_advances_frontier() {
     )
     .await;
 
-    let excluded = converge_git_evidence_pass(&store, &SystemGit, None)
+    let excluded = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap()
         .pass;
@@ -1639,7 +1924,7 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
         calls: AtomicUsize::new(0),
         fail_on: usize::MAX,
     };
-    let failed = converge_git_evidence_pass(&store, &source, None)
+    let failed = converge_git_evidence_pass(&store, Arc::new(source), None)
         .await
         .unwrap();
     assert_eq!(failed.pass.backfill.skipped_git_error, 1);
@@ -1651,7 +1936,7 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
         None
     );
 
-    let settled = converge_git_evidence_pass(&store, &SystemGit, None)
+    let settled = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(settled.later_failure, None);
@@ -1665,7 +1950,7 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
             .unwrap(),
         Some(2)
     );
-    let repeated = converge_git_evidence_pass(&store, &SystemGit, None)
+    let repeated = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(repeated.pass.backfill.sessions_scanned, 0);
@@ -1707,7 +1992,7 @@ async fn incremental_unborn_history_settles_without_masking_source_failures() {
         .await
         .unwrap();
     let sequence = touch(&store, "session-1").await;
-    let settled = converge_git_evidence_pass(&store, &SystemGit, None)
+    let settled = converge_git_evidence_pass(&store, Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(settled.later_failure, None);

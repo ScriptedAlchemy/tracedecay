@@ -76,7 +76,6 @@ fn entry(
         store_id: store_id.to_string(),
         canonical_root,
         display_root,
-        git_common_dir: None,
         alias_roots: Vec::new(),
         manifest_readable: true,
         data_root,
@@ -265,28 +264,6 @@ fn an_owner_root_spelled_through_a_symlink_keeps_its_vanished_store_live() {
         &BTreeSet::from([alias.join("retired-checkout")]),
     );
     assert_eq!(owned[0].disposition, StoreDisposition::Live);
-}
-
-#[test]
-fn live_git_common_dir_keeps_a_linked_worktree_store_live() {
-    // A linked worktree's own root can vanish while the repository stays live,
-    // including every other checkout sharing its common directory.
-    let gone_worktree = PathBuf::from("/definitely/not/here/linked-worktree");
-    let shared_common_dir = std::env::current_dir().unwrap();
-    let mut census_entry = entry(
-        "worktree",
-        gone_worktree,
-        None,
-        None,
-        PathBuf::from("/profile/stores/worktree"),
-        0,
-        4096,
-    );
-    census_entry.git_common_dir = Some(shared_common_dir);
-
-    let findings = classify_stores(&[census_entry], 1_000 * DAY, &BTreeSet::new());
-    assert_eq!(findings[0].disposition, StoreDisposition::Live);
-    assert_eq!(plan_collection(findings, 0).collect.len(), 0);
 }
 
 #[test]

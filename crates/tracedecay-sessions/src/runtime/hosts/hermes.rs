@@ -36,6 +36,7 @@ pub use ingest::{
     HermesSweepOutcome, ingest_for_project_capped_with_admission_and_cancellation,
     ingest_user_sessions_capped_with_admission,
 };
+pub(crate) use ingest::{ingest_project_with_sweep, ingest_user_with_sweep};
 
 #[cfg(test)]
 use observation::{

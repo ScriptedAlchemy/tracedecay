@@ -102,7 +102,11 @@ fn assert_family_mount(binding: StoreRuntimeBindingV1, path: &std::path::Path) {
     assert_eq!(snapshot.reader_handles, 3);
 
     let (request, probe) = health_request(binding);
-    let outcome = attachment.dispatch_read(request, &probe).unwrap();
+    let outcome = tracedecay_rusqlite_runtime::native_runtime::block_on(
+        attachment.dispatch_read(request, std::sync::Arc::new(probe)),
+    )
+    .expect("a plain test thread may block on the native runtime")
+    .unwrap();
     assert!(matches!(
         outcome.value(),
         Some(RuntimeReadResultV1::TemporalHealth { healthy: true })

@@ -491,7 +491,11 @@ async fn shutdown_close_drains_every_idle_runtime_concurrently() {
     let closing = registry.clone();
     let mut close = asupersync::Cx::current()
         .unwrap()
-        .spawn(move |_| async move { closing.close_idle_for_shutdown().await })
+        .spawn(move |_| async move {
+            closing
+                .close_idle_for_shutdown(std::time::Instant::now())
+                .await
+        })
         .unwrap();
     // A close that ran one runtime at a time would hold the second runtime's
     // drain behind the first, which stays blocked until both have entered.

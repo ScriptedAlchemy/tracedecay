@@ -102,6 +102,7 @@ pub async fn settle_owned_blocking_task<T, O>(
 
 /// Starts `work` on the native runtime and detaches it. For work that never
 /// reaches Tokio. A refused start is logged, and `work` is dropped.
+#[track_caller]
 pub(crate) fn spawn_detached(event: &'static str, work: impl Future<Output = ()> + Send + 'static) {
     if let Err(error) = native_runtime::NativeTask::spawn(work) {
         tracing::warn!(event, %error, "native task did not start");

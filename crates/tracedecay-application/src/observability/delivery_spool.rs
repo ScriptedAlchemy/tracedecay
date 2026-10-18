@@ -87,6 +87,8 @@ pub(super) enum DeliveryRecorderSpoolError {
     UnsafePath,
     #[error("delivery recorder receipt spool is corrupt")]
     Corrupt,
+    #[error("delivery recorder receipt spool directory was removed")]
+    Removed,
     #[error("delivery recorder receipt spool I/O failed")]
     Io,
     #[error("delivery recorder receipt spool lock is poisoned")]
@@ -195,7 +197,7 @@ impl DeliveryRecorderSpoolV1 {
         {
             let bytes = read_bounded(path, MAX_RECEIPT_BYTES)
                 .map_err(map_read_error)?
-                .ok_or(DeliveryRecorderSpoolError::Corrupt)?;
+                .ok_or_else(|| self.missing_receipt())?;
             let receipt = decode_receipt(&bytes)?;
             if self.receipt_path(receipt.receipt_id) != *path {
                 return Err(DeliveryRecorderSpoolError::Corrupt);
@@ -228,7 +230,11 @@ impl DeliveryRecorderSpoolV1 {
         for receipt_id in receipt_ids {
             let path = self.receipt_path(*receipt_id);
             let tracked = state.receipt_paths.contains(&path);
-            if validate_regular_or_missing(&path).map_err(map_read_error)? != tracked {
+            let present = validate_regular_or_missing(&path).map_err(map_read_error)?;
+            if tracked && !present {
+                return Err(self.missing_receipt());
+            }
+            if present && !tracked {
                 return Err(DeliveryRecorderSpoolError::Corrupt);
             }
             if !tracked {
@@ -243,6 +249,16 @@ impl DeliveryRecorderSpoolV1 {
                 .map_err(|_| DeliveryRecorderSpoolError::Io)?;
         }
         Ok(removed)
+    }
+
+    /// A tracked receipt that is gone is corruption, unless the whole root is
+    /// gone: its project directory was removed under the running recorder.
+    fn missing_receipt(&self) -> DeliveryRecorderSpoolError {
+        if matches!(self.root.try_exists(), Ok(false)) {
+            DeliveryRecorderSpoolError::Removed
+        } else {
+            DeliveryRecorderSpoolError::Corrupt
+        }
     }
 
     fn receipt_path(&self, receipt_id: [u8; 16]) -> PathBuf {
@@ -456,6 +472,29 @@ mod tests {
         drop(spool);
         let reopened = DeliveryRecorderSpoolV1::open(root.path().to_path_buf()).expect("reopen");
         assert_eq!(reopened.len(), Ok(0));
+    }
+
+    /// Removing a project directory under a running recorder takes the spool
+    /// root with it. That is a removed spool, not a corrupt one; a single
+    /// tracked receipt missing from a present root is still corruption.
+    #[test]
+    fn a_removed_spool_root_is_reported_as_removed_not_corrupt() {
+        let root = tempfile::tempdir().expect("spool root");
+        let spool_root = root.path().join("spool");
+        let spool = DeliveryRecorderSpoolV1::open(spool_root.clone()).expect("open");
+        let receipt =
+            DeliveryRecorderSourceReceiptV1::new(settlement(), identity()).expect("receipt");
+        assert!(spool.append(&receipt).expect("append receipt"));
+
+        std::fs::remove_dir_all(&spool_root).expect("remove the spool root");
+        assert_eq!(spool.pending(8), Err(DeliveryRecorderSpoolError::Removed));
+        assert_eq!(
+            spool.acknowledge(&[receipt.receipt_id]),
+            Err(DeliveryRecorderSpoolError::Removed)
+        );
+
+        std::fs::create_dir(&spool_root).expect("recreate an empty spool root");
+        assert_eq!(spool.pending(8), Err(DeliveryRecorderSpoolError::Corrupt));
     }
 
     /// A publisher killed between staging and rename leaves its `.tmp` behind.

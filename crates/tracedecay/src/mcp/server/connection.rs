@@ -232,7 +232,7 @@ impl McpServer {
     /// explicitly afterwards without re-running the persistence logic.
     pub async fn shutdown(self: &Arc<Self>) {
         let deadline =
-            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+            std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
         let status = self.shutdown_until(deadline).await;
         if !status.is_clean() {
             tracing::warn!(?status, "MCP server shutdown did not complete cleanly");
@@ -242,14 +242,15 @@ impl McpServer {
     #[tracing::instrument(name = "mcp.server.shutdown", level = "trace", skip_all)]
     pub(crate) async fn shutdown_until(
         self: &Arc<Self>,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<std::time::Instant>,
     ) -> ShutdownStatus {
+        let deadline = deadline.into();
         self.shutdown
             .coordinate_until(deadline, Arc::clone(self).run_shutdown(deadline))
             .await
     }
 
-    async fn run_shutdown(self: Arc<Self>, deadline: tokio::time::Instant) -> ShutdownStatus {
+    async fn run_shutdown(self: Arc<Self>, deadline: std::time::Instant) -> ShutdownStatus {
         let mut failures = self.shutdown_background_tasks_until(deadline).await;
 
         let uptime = self.stats.started_at.elapsed();
@@ -295,11 +296,22 @@ impl McpServer {
                                 .to_owned(),
                         ),
                         (Ok(upload_enabled), Some(profile)) => {
-                            if let Err(error) = super::ledger::persist_worldwide_delta(
-                                profile.data_dir(),
-                                delta,
-                                upload_enabled,
-                            ) {
+                            // The upload is a blocking HTTP call; it stays off
+                            // the native worker that runs shutdown.
+                            let profile_root = profile.data_dir().to_path_buf();
+                            let saved = tracedecay_runtime_core::native_runtime::spawn_blocking(
+                                move || {
+                                    super::ledger::persist_worldwide_delta(
+                                        &profile_root,
+                                        delta,
+                                        upload_enabled,
+                                    )
+                                    .map_err(|error| error.to_string())
+                                },
+                            )
+                            .await
+                            .and_then(std::convert::identity);
+                            if let Err(error) = saved {
                                 failures
                                     .push(format!("worldwide counter delta not saved: {error}"));
                             }
@@ -332,7 +344,7 @@ impl McpServer {
     pub(crate) async fn shutdown_background_tasks(&self) {
         let failures = self
             .shutdown_background_tasks_until(
-                tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+                std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
             )
             .await;
         if !failures.is_empty() {
@@ -343,10 +355,7 @@ impl McpServer {
         }
     }
 
-    async fn shutdown_background_tasks_until(
-        &self,
-        _deadline: tokio::time::Instant,
-    ) -> Vec<String> {
+    async fn shutdown_background_tasks_until(&self, _deadline: std::time::Instant) -> Vec<String> {
         let mut failures = Vec::new();
         // The hosted dashboard is daemon-process state (`DASHBOARD_MANAGER`),
         // not project-server state. `tracedecay_dashboard` starts against the

@@ -65,13 +65,22 @@ fn disagreeing_scope_pair() -> (ResolvedScope, ResolvedScope) {
 }
 
 fn grant(scope: &ResolvedScope, suffix: &str) -> CapabilityGrantSnapshot {
+    grant_issued(scope, suffix, UtcMicros(1), UtcMicros(10_000))
+}
+
+fn grant_issued(
+    scope: &ResolvedScope,
+    suffix: &str,
+    issued_at: UtcMicros,
+    expires_at: UtcMicros,
+) -> CapabilityGrantSnapshot {
     CapabilityGrantSnapshot::new(
         CapabilityGrantId::new(format!("grant.federated-pairing.{suffix}")).expect("grant id"),
         1,
         canonical_sha256(&("grant.federated-pairing", suffix)).expect("grant digest"),
         tracedecay_domain::ActorId::new("actor.federated-pairing").expect("actor"),
-        UtcMicros(1),
-        UtcMicros(10_000),
+        issued_at,
+        expires_at,
         scope.clone(),
         BTreeSet::from([
             CapabilityId::new(super::LSP_WORKSPACE_CAPABILITY_ID_V1).expect("capability")
@@ -103,6 +112,15 @@ async fn install_root(
     scope: &ResolvedScope,
     suffix: &str,
 ) -> (PathBuf, String, ResolvedScope, RegisteredRootLocatorV1) {
+    install_root_with_grant(service, scope, suffix, grant(scope, suffix)).await
+}
+
+async fn install_root_with_grant(
+    service: &DaemonInvocationService,
+    scope: &ResolvedScope,
+    suffix: &str,
+    scope_grant: CapabilityGrantSnapshot,
+) -> (PathBuf, String, ResolvedScope, RegisteredRootLocatorV1) {
     let project_root = fixture_root(&format!("federated-pairing-{suffix}"));
     let uri = fixture_root_uri(&project_root);
     service
@@ -114,7 +132,7 @@ async fn install_root(
                 scope.project_id.clone(),
                 project_root.clone(),
             )
-            .with_scope_grant(grant(scope, suffix)),
+            .with_scope_grant(scope_grant),
         )
         .await
         .expect("install the LSP owner");
@@ -245,6 +263,39 @@ async fn federated_workspace_authority_pairs_by_scope_digest_not_list_position()
             .await
             .is_none(),
         "a root missing from the authorized scope set must refuse the workspace"
+    );
+}
+
+/// Project open mints each LSP owner's scope grant once and nothing renews it,
+/// so owners registered one horizon and one hour ago must still admit a
+/// federated workspace and multi-root reads.
+#[tokio::test]
+async fn lsp_owners_admit_past_the_registration_horizon() {
+    let service = DaemonInvocationService::default();
+    let now = tracedecay_contracts::now_micros();
+    let horizon = i64::try_from(crate::GRANT_HORIZON.as_micros()).expect("grant horizon");
+    let opened_at = UtcMicros(now.0 - horizon - 3_600_000_000);
+    let (left_scope, right_scope) = disagreeing_scope_pair();
+    let mut roots = Vec::new();
+    for (scope, suffix) in [(&left_scope, "left"), (&right_scope, "right")] {
+        let day_old = grant_issued(scope, suffix, opened_at, UtcMicros(opened_at.0 + horizon));
+        roots.push(install_root_with_grant(&service, scope, suffix, day_old).await);
+    }
+
+    assert!(
+        service
+            .authorize_lsp_workspace(roots.clone(), now)
+            .await
+            .is_some(),
+        "day-old LSP owners must still admit a federated workspace"
+    );
+    let (context, _) = service
+        .multi_root_query_context(&roots[0].0, &roots[0].2, 0, now)
+        .await
+        .expect("a day-old LSP owner's multi-root query context");
+    assert_eq!(
+        context.admission_at(now),
+        tracedecay_contracts::RequestAdmission::Admitted
     );
 }
 

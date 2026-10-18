@@ -6,10 +6,11 @@ use tracedecay_application::work::RegisteredWorkflowApplicationServicesV1;
 use tracedecay_contracts::{
     ApplicationProblem, CancellationContext, Deadline, TaskHandoffScope, TaskHandoffToken,
     WorkflowDefinitionLifecycleCommand, WorkflowDefinitionLifecycleState, WorkflowEffectPreparedV1,
-    WorkflowLifecycleOperation, WorkflowRunStoragePort, prepare_task_handoff_issue,
+    WorkflowLifecycleOperation, WorkflowRunReadPort, prepare_task_handoff_issue,
     prepare_task_handoff_redeem, prepare_workflow_definition_registration,
 };
 use tracedecay_domain::{UtcMicros, canonical_sha256};
+use tracing::Instrument;
 
 use tracedecay_daemon_protocol::{
     DaemonInvocationResponse, WorkflowApplicationInvocation, WorkflowApplicationOutcome,
@@ -30,8 +31,41 @@ use super::workflow_run_control::{
 use super::{RegisteredWorkRuntime, work_request_context, workflow_census};
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(name = "daemon.service.workflow.execute", level = "trace", skip_all)]
 pub(crate) async fn execute_workflow_application(
+    registered: RegisteredWorkRuntime,
+    attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
+    observability_producer: Option<
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
+    >,
+    project_root: PathBuf,
+    request_id: String,
+    request: WorkflowApplicationInvocation,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+    worktree_holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
+) -> DaemonInvocationResponse {
+    super::dispatch_outliving_caller(
+        request_id.clone(),
+        Box::pin(workflow_application(
+            registered,
+            attempt_processes,
+            observability_producer,
+            project_root,
+            request_id,
+            request,
+            observed_at,
+            deadline,
+            cancellation,
+            worktree_holder_admission,
+        )),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[tracing::instrument(name = "daemon.service.workflow.execute", level = "trace", skip_all)]
+async fn workflow_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<
@@ -98,76 +132,72 @@ pub(crate) async fn execute_workflow_application(
             );
         }
     };
-    let services =
-        match tracedecay_application::work::RegisteredWorkflowApplicationServicesV1::attach(
-            &registered.database,
-        ) {
-            Ok(services) => services,
-            Err(error) => {
-                return DaemonInvocationResponse::application_problem(
-                    request_id,
-                    workflow_storage_problem(&error),
-                );
-            }
-        };
+    let services = match RegisteredWorkflowApplicationServicesV1::attach(&registered.database).await
+    {
+        Ok(services) => services,
+        Err(error) => {
+            return DaemonInvocationResponse::application_problem(
+                request_id,
+                workflow_storage_problem(&error),
+            );
+        }
+    };
 
     match request {
         WorkflowApplicationInvocation::RegisterDefinition(request) => {
-            let _span =
-                tracing::trace_span!("daemon.service.workflow.register_definition").entered();
-            {
-                let prepared =
-                    match prepare_workflow_definition_registration(&context, request.definition) {
-                        Ok(definition) => WorkflowEffectPreparedV1::register_definition(
-                            input_digest.clone(),
-                            definition,
-                        ),
-                        Err(error) => match prepared_refusal(
-                            &input_digest,
-                            workflow_coordination_problem(error),
-                        ) {
+            let prepared =
+                match prepare_workflow_definition_registration(&context, request.definition) {
+                    Ok(definition) => WorkflowEffectPreparedV1::register_definition(
+                        input_digest.clone(),
+                        definition,
+                    ),
+                    Err(error) => {
+                        match prepared_refusal(&input_digest, workflow_coordination_problem(error))
+                        {
                             Ok(prepared) => prepared,
                             Err(problem) => {
                                 return DaemonInvocationResponse::application_problem(
                                     request_id, problem,
                                 );
                             }
-                        },
-                    };
-                execute_journaled_workflow_effect(
-                    &registered,
-                    services.effects(),
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    prepared,
-                    observed_at,
-                    deadline,
-                )
-            }
+                        }
+                    }
+                };
+            execute_journaled_workflow_effect(
+                &registered,
+                &services,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+            )
+            .instrument(tracing::trace_span!(
+                "daemon.service.workflow.register_definition"
+            ))
+            .await
         }
         WorkflowApplicationInvocation::ActivateDefinition(request) => {
-            {
-                let _span =
-                    tracing::trace_span!("daemon.service.workflow.activate_definition").entered();
-                {
-                    // Catalog and environment-pin admission reject before the
-                    // lifecycle command is journaled; a denial is the same canonical
-                    // problem effect every other refused mutation records. Run
-                    // admission compares the same environment pins, so activation
-                    // must refuse here rather than publish an Active definition no
-                    // run could ever start.
-                    let admitted = services
-                        .definitions()
-                        .admit_activation(&request.definition_id, request.definition_version)
-                        .map_err(workflow_coordination_problem)
-                        .and_then(|()| {
+            async {
+                let admitted = {
+                    let (registered, definition_id, definition_version) = (
+                        registered.clone(),
+                        request.definition_id.clone(),
+                        request.definition_version,
+                    );
+                    services
+                        .read(move |services| {
+                            services
+                                .definitions()
+                                .admit_activation(&definition_id, definition_version)
+                                .map_err(workflow_coordination_problem)?;
                             let definition = services
                                 .definitions()
-                                .get(&request.definition_id, request.definition_version)
+                                .get(&definition_id, definition_version)
                                 .map_err(workflow_coordination_problem)?;
                             admit_workflow_environment_pins(&registered, &definition).map_err(
                                 |diagnostic| {
@@ -177,203 +207,215 @@ pub(crate) async fn execute_workflow_application(
                                     )
                                 },
                             )
-                        });
-                    let prepared = match admitted {
-                        Ok(()) => WorkflowEffectPreparedV1::activate_definition(
-                            input_digest.clone(),
-                            WorkflowDefinitionLifecycleCommand {
-                                definition_id: request.definition_id,
-                                definition_version: request.definition_version,
-                                operation: WorkflowLifecycleOperation::Activate,
-                                expected_revision: request.expected_revision,
-                                transitioned_at: observed_at,
-                            },
-                        ),
-                        Err(problem) => match prepared_refusal(&input_digest, problem) {
-                            Ok(prepared) => prepared,
-                            Err(problem) => {
-                                return DaemonInvocationResponse::application_problem(
-                                    request_id, problem,
-                                );
-                            }
+                        })
+                        .await
+                };
+                let prepared = match admitted {
+                    Ok(()) => WorkflowEffectPreparedV1::activate_definition(
+                        input_digest.clone(),
+                        WorkflowDefinitionLifecycleCommand {
+                            definition_id: request.definition_id,
+                            definition_version: request.definition_version,
+                            operation: WorkflowLifecycleOperation::Activate,
+                            expected_revision: request.expected_revision,
+                            transitioned_at: observed_at,
                         },
-                    };
-                    execute_journaled_workflow_effect(
-                        &registered,
-                        services.effects(),
-                        request_id,
-                        &context,
-                        canonical_request_id,
-                        operation_key,
-                        use_case,
-                        input_digest,
-                        prepared,
-                        observed_at,
-                        deadline,
-                    )
-                }
+                    ),
+                    Err(problem) => match prepared_refusal(&input_digest, problem) {
+                        Ok(prepared) => prepared,
+                        Err(problem) => {
+                            return DaemonInvocationResponse::application_problem(
+                                request_id, problem,
+                            );
+                        }
+                    },
+                };
+                execute_journaled_workflow_effect(
+                    &registered,
+                    &services,
+                    request_id,
+                    &context,
+                    canonical_request_id,
+                    operation_key,
+                    use_case,
+                    input_digest,
+                    prepared,
+                    observed_at,
+                    deadline,
+                )
+                .await
             }
+            .instrument(tracing::trace_span!(
+                "daemon.service.workflow.activate_definition"
+            ))
+            .await
         }
         WorkflowApplicationInvocation::RetireDefinition(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.retire_definition").entered();
-            {
-                let prepared = WorkflowEffectPreparedV1::retire_definition(
-                    input_digest.clone(),
-                    WorkflowDefinitionLifecycleCommand {
-                        definition_id: request.definition_id,
-                        definition_version: request.definition_version,
-                        operation: WorkflowLifecycleOperation::Retire,
-                        expected_revision: request.expected_revision,
-                        transitioned_at: observed_at,
-                    },
-                );
-                execute_journaled_workflow_effect(
-                    &registered,
-                    services.effects(),
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    prepared,
-                    observed_at,
-                    deadline,
-                )
-            }
+            let prepared = WorkflowEffectPreparedV1::retire_definition(
+                input_digest.clone(),
+                WorkflowDefinitionLifecycleCommand {
+                    definition_id: request.definition_id,
+                    definition_version: request.definition_version,
+                    operation: WorkflowLifecycleOperation::Retire,
+                    expected_revision: request.expected_revision,
+                    transitioned_at: observed_at,
+                },
+            );
+            execute_journaled_workflow_effect(
+                &registered,
+                &services,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+            )
+            .instrument(tracing::trace_span!(
+                "daemon.service.workflow.retire_definition"
+            ))
+            .await
         }
         WorkflowApplicationInvocation::RejectDefinition(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.reject_definition").entered();
-            {
-                let prepared = WorkflowEffectPreparedV1::reject_definition(
-                    input_digest.clone(),
-                    WorkflowDefinitionLifecycleCommand {
-                        definition_id: request.definition_id,
-                        definition_version: request.definition_version,
-                        operation: WorkflowLifecycleOperation::Reject,
-                        expected_revision: request.expected_revision,
-                        transitioned_at: observed_at,
-                    },
-                );
-                execute_journaled_workflow_effect(
-                    &registered,
-                    services.effects(),
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    prepared,
-                    observed_at,
-                    deadline,
-                )
-            }
+            let prepared = WorkflowEffectPreparedV1::reject_definition(
+                input_digest.clone(),
+                WorkflowDefinitionLifecycleCommand {
+                    definition_id: request.definition_id,
+                    definition_version: request.definition_version,
+                    operation: WorkflowLifecycleOperation::Reject,
+                    expected_revision: request.expected_revision,
+                    transitioned_at: observed_at,
+                },
+            );
+            execute_journaled_workflow_effect(
+                &registered,
+                &services,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+            )
+            .instrument(tracing::trace_span!(
+                "daemon.service.workflow.reject_definition"
+            ))
+            .await
         }
         WorkflowApplicationInvocation::ValidateDefinition(request) => {
             let _span =
                 tracing::trace_span!("daemon.service.workflow.validate_definition").entered();
+            let validation = services.definitions().validate(request.definition);
+            if let Ok(validated) = &validation
+                && let Err(diagnostic) =
+                    admit_workflow_environment_pins(&registered, &validated.definition)
             {
-                let validation = services.definitions().validate(request.definition);
-                if let Ok(validated) = &validation
-                    && let Err(diagnostic) =
-                        admit_workflow_environment_pins(&registered, &validated.definition)
-                {
-                    return DaemonInvocationResponse::application_problem(
-                        request_id,
-                        ApplicationProblem::invalid_request(diagnostic.code, diagnostic.message),
-                    );
-                }
-                complete_workflow_read(
-                    &registered,
+                return DaemonInvocationResponse::application_problem(
                     request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    validation.map_err(workflow_coordination_problem),
-                    observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::ValidateDefinition,
-                )
+                    ApplicationProblem::invalid_request(diagnostic.code, diagnostic.message),
+                );
             }
+            complete_workflow_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                validation.map_err(workflow_coordination_problem),
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::ValidateDefinition,
+            )
         }
         WorkflowApplicationInvocation::GetDefinition(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.get_definition").entered();
-            {
-                complete_workflow_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
+            let definition = services
+                .read(move |services| {
                     services
                         .definitions()
                         .get(&request.definition_id, request.definition_version)
-                        .map_err(workflow_coordination_problem),
-                    observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::GetDefinition,
-                )
-            }
+                        .map_err(workflow_coordination_problem)
+                })
+                .instrument(tracing::trace_span!(
+                    "daemon.service.workflow.get_definition"
+                ))
+                .await;
+            complete_workflow_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                definition,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::GetDefinition,
+            )
         }
         WorkflowApplicationInvocation::ListDefinitions(_) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.list_definitions").entered();
-            {
-                complete_workflow_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
+            let definitions = services
+                .read(|services| {
                     services
                         .definitions()
                         .list()
-                        .map_err(workflow_coordination_problem),
-                    observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::ListDefinitions,
-                )
-            }
+                        .map_err(workflow_coordination_problem)
+                })
+                .instrument(tracing::trace_span!(
+                    "daemon.service.workflow.list_definitions"
+                ))
+                .await;
+            complete_workflow_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                definitions,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::ListDefinitions,
+            )
         }
         WorkflowApplicationInvocation::DefinitionHistory(request) => {
-            let _span =
-                tracing::trace_span!("daemon.service.workflow.definition_history").entered();
-            {
-                complete_workflow_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
+            let history = services
+                .read(move |services| {
                     services
                         .definitions()
                         .history(&request.definition_id)
-                        .map_err(workflow_coordination_problem),
-                    observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::DefinitionHistory,
-                )
-            }
+                        .map_err(workflow_coordination_problem)
+                })
+                .instrument(tracing::trace_span!(
+                    "daemon.service.workflow.definition_history"
+                ))
+                .await;
+            complete_workflow_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                history,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::DefinitionHistory,
+            )
         }
         WorkflowApplicationInvocation::DiffDefinition(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.diff_definition").entered();
-            {
-                complete_workflow_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
+            let diff = services
+                .read(move |services| {
                     services
                         .definitions()
                         .diff(
@@ -381,17 +423,33 @@ pub(crate) async fn execute_workflow_application(
                             request.from_version,
                             request.to_version,
                         )
-                        .map_err(workflow_coordination_problem),
-                    observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::DiffDefinition,
-                )
-            }
+                        .map_err(workflow_coordination_problem)
+                })
+                .instrument(tracing::trace_span!(
+                    "daemon.service.workflow.diff_definition"
+                ))
+                .await;
+            complete_workflow_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                diff,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::DiffDefinition,
+            )
         }
         WorkflowApplicationInvocation::HandoffIssue(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.handoff_issue").entered();
-            {
-                if let Err(problem) = resolve_handoff_scope(&services, &request.scope) {
+            async {
+                let scope = request.scope.clone();
+                if let Err(problem) = services
+                    .read(move |services| resolve_handoff_scope(services, &scope))
+                    .await
+                {
                     return DaemonInvocationResponse::application_problem(request_id, problem);
                 }
                 let prepared = match TaskHandoffToken::new(request.secret).and_then(|token| {
@@ -419,7 +477,7 @@ pub(crate) async fn execute_workflow_application(
                 };
                 execute_journaled_workflow_effect(
                     &registered,
-                    services.effects(),
+                    &services,
                     request_id,
                     &context,
                     canonical_request_id,
@@ -430,80 +488,80 @@ pub(crate) async fn execute_workflow_application(
                     observed_at,
                     deadline,
                 )
+                .await
             }
+            .instrument(tracing::trace_span!(
+                "daemon.service.workflow.handoff_issue"
+            ))
+            .await
         }
         WorkflowApplicationInvocation::HandoffRedeem(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.handoff_redeem").entered();
+            let scope = request.expected_scope;
+            let prepared = match TaskHandoffToken::new(request.secret)
+                .and_then(|token| prepare_task_handoff_redeem(&context, &token, &scope))
             {
-                let scope = request.expected_scope;
-                let prepared = match TaskHandoffToken::new(request.secret)
-                    .and_then(|token| prepare_task_handoff_redeem(&context, &token, &scope))
-                {
-                    Ok(token_digest) => WorkflowEffectPreparedV1::handoff_redeem(
-                        input_digest.clone(),
-                        token_digest,
-                        scope,
-                        observed_at,
-                    ),
-                    Err(error) => {
-                        match prepared_refusal(&input_digest, task_handoff_refusal(error)) {
-                            Ok(prepared) => prepared,
-                            Err(problem) => {
-                                return DaemonInvocationResponse::application_problem(
-                                    request_id, problem,
-                                );
-                            }
-                        }
-                    }
-                };
-                execute_journaled_workflow_effect(
-                    &registered,
-                    services.effects(),
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    prepared,
+                Ok(token_digest) => WorkflowEffectPreparedV1::handoff_redeem(
+                    input_digest.clone(),
+                    token_digest,
+                    scope,
                     observed_at,
-                    deadline,
-                )
-            }
+                ),
+                Err(error) => match prepared_refusal(&input_digest, task_handoff_refusal(error)) {
+                    Ok(prepared) => prepared,
+                    Err(problem) => {
+                        return DaemonInvocationResponse::application_problem(request_id, problem);
+                    }
+                },
+            };
+            execute_journaled_workflow_effect(
+                &registered,
+                &services,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+            )
+            .instrument(tracing::trace_span!(
+                "daemon.service.workflow.handoff_redeem"
+            ))
+            .await
         }
         WorkflowApplicationInvocation::StartRun(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.start_run").entered();
-            {
-                let result = start_workflow_run(
-                    &registered,
-                    &services,
-                    &context,
-                    *request,
-                    &input_digest,
-                    observed_at,
-                    Arc::clone(&attempt_processes),
-                    &project_root,
-                    observability_producer.clone(),
-                );
-                complete_workflow_run_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    result,
-                    observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::StartRun,
-                )
-            }
+            let result = start_workflow_run(
+                &registered,
+                &services,
+                &context,
+                *request,
+                &input_digest,
+                observed_at,
+                Arc::clone(&attempt_processes),
+                &project_root,
+                observability_producer.clone(),
+            )
+            .instrument(tracing::trace_span!("daemon.service.workflow.start_run"))
+            .await;
+            complete_workflow_run_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::StartRun,
+            )
         }
         WorkflowApplicationInvocation::PauseRun(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.pause_run").entered();
-            {
-                let result = apply_workflow_run_command(
+            let result = async {
+                let projection = apply_workflow_run_command(
                     &services,
                     &request.run_id,
                     request.expected_sequence,
@@ -512,43 +570,45 @@ pub(crate) async fn execute_workflow_application(
                     &input_digest,
                     observed_at,
                 )
-                .and_then(|projection| {
-                    synchronize_fan_out_run_controls(
-                        &registered,
-                        &context,
-                        &projection,
-                        true,
-                        observed_at,
-                    )?;
-                    workflow_census::persist_workflow_fan_out_census(
-                        &registered,
-                        &services,
-                        &context,
-                        &projection,
-                        observed_at,
-                        observability_producer.clone(),
-                    );
-                    Ok(projection)
-                });
-                complete_workflow_run_effect(
+                .await?;
+                synchronize_fan_out_run_controls(
                     &registered,
-                    request_id,
                     &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    result,
+                    &projection,
+                    true,
                     observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::PauseRun,
                 )
+                .await?;
+                workflow_census::persist_workflow_fan_out_census(
+                    &registered,
+                    &services,
+                    &context,
+                    &projection,
+                    observed_at,
+                    observability_producer.clone(),
+                )
+                .await;
+                Ok(projection)
             }
+            .instrument(tracing::trace_span!("daemon.service.workflow.pause_run"))
+            .await;
+            complete_workflow_run_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::PauseRun,
+            )
         }
         WorkflowApplicationInvocation::ResumeRun(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.resume_run").entered();
-            {
-                let result = apply_workflow_run_command(
+            let result = async {
+                let projection = apply_workflow_run_command(
                     &services,
                     &request.run_id,
                     request.expected_sequence,
@@ -557,87 +617,94 @@ pub(crate) async fn execute_workflow_application(
                     &input_digest,
                     observed_at,
                 )
-                .and_then(|projection| {
-                    synchronize_fan_out_run_controls(
-                        &registered,
-                        &context,
-                        &projection,
-                        false,
-                        observed_at,
-                    )?;
-                    reconcile_workflow_fan_out(
-                        &registered,
-                        &services,
-                        &context,
-                        projection,
-                        observed_at,
-                        Arc::clone(&attempt_processes),
-                        &project_root,
-                        observability_producer.clone(),
-                    )
-                });
-                complete_workflow_run_effect(
+                .await?;
+                synchronize_fan_out_run_controls(
                     &registered,
-                    request_id,
                     &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    result,
+                    &projection,
+                    false,
                     observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::ResumeRun,
                 )
-            }
-        }
-        WorkflowApplicationInvocation::CancelRun(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.cancel_run").entered();
-            {
-                let result = cancel_workflow_run(
+                .await?;
+                reconcile_workflow_fan_out(
                     &registered,
                     &services,
                     &context,
-                    request,
-                    &input_digest,
+                    projection,
                     observed_at,
                     Arc::clone(&attempt_processes),
                     &project_root,
                     observability_producer.clone(),
-                );
-                complete_workflow_run_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    result,
-                    observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::CancelRun,
                 )
+                .await
             }
+            .instrument(tracing::trace_span!("daemon.service.workflow.resume_run"))
+            .await;
+            complete_workflow_run_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::ResumeRun,
+            )
+        }
+        WorkflowApplicationInvocation::CancelRun(request) => {
+            let result = cancel_workflow_run(
+                &registered,
+                &services,
+                &context,
+                request,
+                &input_digest,
+                observed_at,
+                Arc::clone(&attempt_processes),
+                &project_root,
+                observability_producer.clone(),
+            )
+            .instrument(tracing::trace_span!("daemon.service.workflow.cancel_run"))
+            .await;
+            complete_workflow_run_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::CancelRun,
+            )
         }
         WorkflowApplicationInvocation::GetRun(request) => {
-            let _span = tracing::trace_span!("daemon.service.workflow.get_run").entered();
-            {
-                complete_workflow_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    WorkflowRunStoragePort::projection(services.effects(), &request.run_id)
-                        .map_err(workflow_run_storage_problem),
-                    observed_at,
-                    deadline,
-                    WorkflowApplicationOutcome::GetRun,
-                )
-            }
+            let run = services
+                .read(move |services| {
+                    services
+                        .effects()
+                        .projection(&request.run_id)
+                        .map_err(workflow_run_storage_problem)
+                })
+                .instrument(tracing::trace_span!("daemon.service.workflow.get_run"))
+                .await;
+            complete_workflow_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                run,
+                observed_at,
+                deadline,
+                WorkflowApplicationOutcome::GetRun,
+            )
         }
     }
 }

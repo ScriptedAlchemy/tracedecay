@@ -14,11 +14,11 @@ use tracedecay_contracts::{
     Deadline, DisclosureClass, ExecutionTopologyViewV1, GenerateProposalRequest, RequestContext,
     RequestId, ResolvedScope, StartWorkAttemptCommand, WorkAttemptListCoverageV1,
     WorkAttemptService, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
-    WorkIntelligenceServiceV1, WorkPlacementReadingV1, WorkPlacementService,
-    WorkPlacementStorageError, WorkPlacementStoragePort, WorkProductAttemptServiceV1,
-    WorkProductAuthorizedRelationScopeV1, WorkProductSelectionScopeV1, WorkRoutingSnapshotErrorV1,
-    WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkTopologyViewRequestV1,
-    execution_topology_view,
+    WorkIntelligenceServiceV1, WorkPlacementPublicationPort, WorkPlacementReadingV1,
+    WorkPlacementService, WorkPlacementStorageError, WorkPlacementStoragePort,
+    WorkProductAttemptServiceV1, WorkProductAuthorizedRelationScopeV1, WorkProductSelectionScopeV1,
+    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1,
+    WorkTopologyViewRequestV1, execution_topology_view,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
@@ -122,7 +122,9 @@ impl WorkPlacementStoragePort for PlacementStore {
             })
             .map(|((_, identity), _)| identity.clone()))
     }
+}
 
+impl WorkPlacementPublicationPort for PlacementStore {
     fn publish_placement(
         &self,
         authority: &WorkAuthority,

@@ -113,17 +113,34 @@ pub fn project_open_backoff(consecutive_failures: u32) -> std::time::Duration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutomationScheduleDecision {
     skip_reason: Option<AutomationSkipReasonV1>,
+    activity_gate: Option<SessionActivityGate>,
+}
+
+/// The two timestamps a `no_new_session_activity` skip compared, so a starved
+/// gate is visible from the scheduler journal instead of looking idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionActivityGate {
+    pub last_activity_secs: Option<i64>,
+    pub cadence_started_at: Option<i64>,
 }
 
 impl AutomationScheduleDecision {
     pub fn due() -> Self {
-        Self { skip_reason: None }
+        Self {
+            skip_reason: None,
+            activity_gate: None,
+        }
     }
 
     pub fn skipped(reason: AutomationSkipReasonV1) -> Self {
         Self {
             skip_reason: Some(reason),
+            activity_gate: None,
         }
+    }
+
+    pub const fn activity_gate(&self) -> Option<SessionActivityGate> {
+        self.activity_gate
     }
 
     pub const fn skip_reason(&self) -> Option<AutomationSkipReasonV1> {
@@ -627,9 +644,15 @@ fn schedule_decision_for_trigger(
         let has_activity_authority = activity.last_activity_secs.is_some();
         let requires_fresh_activity = latest_cadence.is_some() && !retryable_cadence_terminal;
         if !has_activity_authority || (requires_fresh_activity && !fresh_session_activity) {
-            return Ok(AutomationScheduleDecision::skipped(
-                AutomationSkipReasonV1::NoNewSessionActivity,
-            ));
+            return Ok(AutomationScheduleDecision {
+                skip_reason: Some(AutomationSkipReasonV1::NoNewSessionActivity),
+                activity_gate: Some(SessionActivityGate {
+                    last_activity_secs: activity.last_activity_secs,
+                    cadence_started_at: latest_cadence
+                        .map(|(record, _)| parse_started_at(record))
+                        .transpose()?,
+                }),
+            });
         }
     }
 
@@ -2206,6 +2229,37 @@ evidence about it",
             .map(AutomationSkipReasonV1::as_str),
             Some("no_new_session_activity"),
             "cancellation remains an effectful skip that needs fresh activity",
+        );
+    }
+
+    #[test]
+    fn no_new_activity_skip_reports_the_timestamps_it_compared() {
+        let config = session_evidence_config();
+        let anchor = scheduler_ledger_record(
+            "run-anchor",
+            AgentTaskKind::SessionReflector,
+            AutomationRunStatus::Succeeded,
+            None,
+            2_000,
+        );
+        let decision = schedule_decision(
+            &config,
+            None,
+            AgentTaskKind::SessionReflector,
+            &[anchor],
+            SessionActivity::at(1_500),
+            10_000,
+        );
+        assert_eq!(
+            decision.skip_reason(),
+            Some(AutomationSkipReasonV1::NoNewSessionActivity)
+        );
+        assert_eq!(
+            decision.activity_gate(),
+            Some(SessionActivityGate {
+                last_activity_secs: Some(1_500),
+                cadence_started_at: Some(2_000),
+            })
         );
     }
 

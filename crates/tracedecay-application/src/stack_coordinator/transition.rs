@@ -185,25 +185,27 @@ pub trait StackCoordinatorStore: Send + Sync {
         &self,
         signal: StackSignalV1,
         recipients: Vec<ActorId>,
-    ) -> Result<(), StackCoordinatorErrorV1>;
+    ) -> impl Future<Output = Result<(), StackCoordinatorErrorV1>> + Send;
     fn pending_deliveries(
         &self,
-    ) -> Result<Vec<(StackPendingDeliveryV1, StackSignalV1)>, StackCoordinatorErrorV1>;
+    ) -> impl Future<
+        Output = Result<Vec<(StackPendingDeliveryV1, StackSignalV1)>, StackCoordinatorErrorV1>,
+    > + Send;
     fn acknowledge(
         &self,
         watermark_id: &StackDeliveryWatermarkId,
         deliveries: &[StackPendingDeliveryV1],
-    ) -> Result<(), StackCoordinatorErrorV1>;
+    ) -> impl Future<Output = Result<(), StackCoordinatorErrorV1>> + Send;
     fn signal(
         &self,
         signal_id: &StackSignalId,
-    ) -> Result<Option<StackSignalV1>, StackCoordinatorErrorV1>;
+    ) -> impl Future<Output = Result<Option<StackSignalV1>, StackCoordinatorErrorV1>> + Send;
     fn record_authorization_loss(
         &self,
         signal: &StackSignalV1,
         recipient: &ActorId,
         outcome: StackDeliveryAuthorizationV1,
-    ) -> Result<(), StackCoordinatorErrorV1>;
+    ) -> impl Future<Output = Result<(), StackCoordinatorErrorV1>> + Send;
 }
 
 pub trait StackDeliveryAuthorizationPort: Send + Sync {
@@ -217,11 +219,14 @@ pub trait StackDeliveryAuthorizationPort: Send + Sync {
         &self,
         recipient: &ActorId,
         signal: &StackSignalV1,
-    ) -> StackDeliveryAuthorizationV1;
+    ) -> impl Future<Output = StackDeliveryAuthorizationV1> + Send;
 }
 
 pub trait StackDeliveryPort: Send + Sync {
-    fn deliver(&self, batch: &StackDeliveryBatchV1) -> Result<(), StackCoordinatorErrorV1>;
+    fn deliver(
+        &self,
+        batch: &StackDeliveryBatchV1,
+    ) -> impl Future<Output = Result<(), StackCoordinatorErrorV1>> + Send;
 }
 
 pub trait OptionalStackPreflightPort: Send + Sync {
@@ -229,7 +234,7 @@ pub trait OptionalStackPreflightPort: Send + Sync {
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
-    ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>;
+    ) -> impl Future<Output = Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>> + Send;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

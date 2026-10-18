@@ -27,7 +27,7 @@ use super::{project_memory_owner, test_automation_run_control};
 /// `project_registry::ephemeral_root_rejection` refuses ("project root
 /// '/tmp/.tmpXXXX' is under the OS temporary directory and cannot be
 /// registered as a durable authority in profile '...'"), and every fixture in
-/// this binary would additionally serialize on that one profile's exclusive
+/// this binary would also serialize on that one profile's exclusive
 /// lifecycle lease. The hermetic escape hatch
 /// (`TraceDecay::standalone_test_open_options`) is `cfg(test)`/`test-transport`
 /// gated, so it is inactive for this integration binary and cannot be relied

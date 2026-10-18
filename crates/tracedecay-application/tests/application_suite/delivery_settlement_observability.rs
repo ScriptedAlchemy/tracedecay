@@ -408,3 +408,51 @@ async fn recorder_replays_retained_receipt_after_transient_db_failure_and_restar
         restarted_identity.configuration_revision
     );
 }
+
+#[tokio::test]
+async fn dropping_the_recorder_without_shutdown_ends_its_worker() {
+    let profile_dir = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let project_id = ProjectId::new("project.delivery.dropped").expect("project id");
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        profile_dir.path().to_path_buf(),
+        project.path(),
+        project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let db = runtime.project_database_arc().expect("project database");
+    let identity = ObservabilityProducerIdentityV1 {
+        authorized_scope_ref: project_id.as_str().to_owned(),
+        process_boot_id: "boot:delivery-dropped".to_owned(),
+        producer_revision: "delivery-dropped-producer.v1".to_owned(),
+        configuration_revision: "delivery-dropped-config.v1".to_owned(),
+        policy_revision: "delivery-dropped-policy.v1".to_owned(),
+    };
+    let producer = Arc::new(
+        BoundedObservabilityProducerV1::start(db.clone(), identity.clone(), 8).expect("producer"),
+    );
+    let authority = Arc::new(
+        DeliverySettlementAuthorityV1::new(db.clone(), Arc::clone(&producer), identity)
+            .expect("settlement authority"),
+    );
+    let recorder =
+        BoundedDeliverySettlementRecorderV1::start(Arc::clone(&authority), 1).expect("recorder");
+    // The worker is the only other holder of the authority.
+    let worker_authority = Arc::downgrade(&authority);
+    drop(authority);
+
+    drop(recorder);
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while worker_authority.strong_count() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the worker of a dropped recorder must end and release its authority");
+    let producer = match Arc::try_unwrap(producer) {
+        Ok(producer) => producer,
+        Err(_) => panic!("a dropped recorder must release the producer"),
+    };
+    producer.shutdown().await.expect("flush producer");
+}

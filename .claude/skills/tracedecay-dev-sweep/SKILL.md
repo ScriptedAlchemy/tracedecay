@@ -18,10 +18,10 @@ do not invalidate historical usage or static evidence.
 - Hook relevance and repetition: `evaluating-hook-hints`.
 - Implementation hotspots: `tracedecay:code-health`.
 
-For a full sweep, cover each lane without duplicating evidence collection:
+For a full sweep, cover each area without duplicating evidence collection:
 usage owns aggregate metrics, transcript mining owns concrete task examples,
-and the other lanes investigate their respective behavior. Parallel agents may
-inspect independent bounded lanes with disjoint ownership; the lead combines
+and the other areas investigate their respective behavior. Parallel agents may
+inspect independent bounded areas with disjoint ownership; the lead combines
 findings. Read only each selected skill's relevant references.
 
 ## Synthesize and act
@@ -45,5 +45,5 @@ Verify each change through the narrowest relevant behavior or packaging check.
 Reuse passing evidence; run affected suites when the change requires them.
 Record durable facts only when useful and authorized under the memory workflow.
 
-Finish with evidence per examined lane, applied fixes and verification,
+Finish with evidence for each area examined, applied fixes and verification,
 recommendations or deferred findings, and material coverage limitations.

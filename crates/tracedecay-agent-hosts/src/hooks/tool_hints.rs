@@ -777,6 +777,50 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
         category: HintCategory::SemanticSearch,
         matches: |facts| is_semantic_search_tool(facts.input),
     },
+    // Tool-action rules precede the free-text rules: on a tool event the text
+    // is the tool's own arguments (a grep pattern, a shell command), so a
+    // pattern such as "impact" must not outrank the search the tool performed.
+    ClassificationRule {
+        category: HintCategory::MemoryStore,
+        matches: |facts| is_memory_store_edit(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::EditRedundancy,
+        matches: |facts| is_redundancy_candidate_edit(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::FileLookup,
+        matches: |facts| {
+            facts
+                .tool_name
+                .is_some_and(|name| matches_normalized(name, &["glob", "listdir", "list_dir"]))
+                || facts.command.is_some_and(is_file_lookup_command)
+        },
+    },
+    ClassificationRule {
+        category: HintCategory::FileRead,
+        matches: |facts| facts.command.is_some_and(is_shell_file_read_command),
+    },
+    ClassificationRule {
+        category: HintCategory::Search,
+        matches: |facts| facts.command.is_some_and(is_shell_search_command),
+    },
+    ClassificationRule {
+        category: HintCategory::Search,
+        matches: |facts| {
+            facts
+                .tool_name
+                .is_some_and(|name| matches_normalized(name, &["grep", "search"]))
+        },
+    },
+    ClassificationRule {
+        category: HintCategory::ToolDescriptorRead,
+        matches: |facts| is_tracedecay_tool_descriptor_read(facts.input),
+    },
+    ClassificationRule {
+        category: HintCategory::FileRead,
+        matches: |facts| is_single_file_read(facts.input),
+    },
     ClassificationRule {
         category: HintCategory::UnexpectedChanges,
         matches: |facts| signals_unexpected_change(&facts.text),
@@ -829,47 +873,6 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
     ClassificationRule {
         category: HintCategory::Search,
         matches: |facts| asks_for_text_search(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::MemoryStore,
-        matches: |facts| is_memory_store_edit(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::EditRedundancy,
-        matches: |facts| is_redundancy_candidate_edit(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::FileLookup,
-        matches: |facts| {
-            facts
-                .tool_name
-                .is_some_and(|name| matches_normalized(name, &["glob", "listdir", "list_dir"]))
-                || facts.command.is_some_and(is_file_lookup_command)
-        },
-    },
-    ClassificationRule {
-        category: HintCategory::FileRead,
-        matches: |facts| facts.command.is_some_and(is_shell_file_read_command),
-    },
-    ClassificationRule {
-        category: HintCategory::Search,
-        matches: |facts| facts.command.is_some_and(is_shell_search_command),
-    },
-    ClassificationRule {
-        category: HintCategory::Search,
-        matches: |facts| {
-            facts
-                .tool_name
-                .is_some_and(|name| matches_normalized(name, &["grep", "search"]))
-        },
-    },
-    ClassificationRule {
-        category: HintCategory::ToolDescriptorRead,
-        matches: |facts| is_tracedecay_tool_descriptor_read(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::FileRead,
-        matches: |facts| is_single_file_read(facts.input),
     },
     ClassificationRule {
         category: HintCategory::BroadRead,

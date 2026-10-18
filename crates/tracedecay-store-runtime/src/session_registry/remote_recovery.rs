@@ -1,23 +1,23 @@
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock, mpsc};
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
 
 use tracedecay_contracts::RequestId;
 use tracedecay_contracts::remote::recovery::{
     PromotionCasReceiptV1, RecoveryAuthorityExpectationV1, RemoteRecoveryCallerV1,
     RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1,
 };
-use tracedecay_domain::{ProjectId, RemoteWriterFenceV1, canonical_sha256};
-use tracedecay_rusqlite_runtime::native_runtime;
+use tracedecay_domain::{
+    CurrentRemoteAuthorityV1, ProjectId, RemoteWriterFenceV1, canonical_sha256,
+};
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
-    RemoteRecoveryPhysicalEffectsV1, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
+    RemoteRecoveryPhysicalEffectFutureV1, RemoteRecoveryPhysicalEffectsV1,
+    RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
 };
 use tracedecay_store::RemoteWriterFenceInstallV1;
 
 use super::{Result, session_registry_error};
 
-const CONTROL_POLL: Duration = Duration::from_millis(10);
 const INTERRUPTION_NONE: u8 = 0;
 const INTERRUPTION_CANCELLED: u8 = 1;
 const INTERRUPTION_DEADLINE: u8 = 2;
@@ -68,39 +68,39 @@ impl DaemonRemoteRecoveryPhysicalEffectsV1 {
 }
 
 impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
-    fn current_authority(
-        &self,
-        expected: &RecoveryAuthorityExpectationV1,
-        caller: &RemoteRecoveryCallerV1,
-    ) -> std::result::Result<
-        (tracedecay_domain::CurrentRemoteAuthorityV1, u64),
-        RemoteRecoveryPhysicalEffectErrorV1,
-    > {
-        let writer = self
-            .storage
-            .recovery_writer(expected)
-            .map_err(map_writer_lookup_error)?;
-        if writer.scope != caller.scope {
-            return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
-        }
-        let project_id = writer
-            .target_project_id()
-            .cloned()
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let _recovery_admission =
-            native_runtime::block_on(self.authorize_project_recovery(&project_id))
-                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?
-                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
-        let authority_key = authority_key(expected)?;
-        match self
-            .replay
-            .current_writer_fence(project_id, authority_key)?
-        {
-            Some((fence, frontier)) if fence == writer.authority.fence => {
-                Ok((writer.authority, frontier))
+    fn current_authority<'a>(
+        &'a self,
+        expected: &'a RecoveryAuthorityExpectationV1,
+        caller: &'a RemoteRecoveryCallerV1,
+    ) -> RemoteRecoveryPhysicalEffectFutureV1<'a, (CurrentRemoteAuthorityV1, u64)> {
+        Box::pin(async move {
+            let writer = self
+                .storage
+                .recovery_writer(expected)
+                .map_err(map_writer_lookup_error)?;
+            if writer.scope != caller.scope {
+                return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
             }
-            _ => Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption),
-        }
+            let project_id = writer
+                .target_project_id()
+                .cloned()
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+            let _recovery_admission = self
+                .authorize_project_recovery(&project_id)
+                .await
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            let authority_key = authority_key(expected)?;
+            match self
+                .replay
+                .current_writer_fence(project_id, authority_key)
+                .await?
+            {
+                Some((fence, frontier)) if fence == writer.authority.fence => {
+                    Ok((writer.authority, frontier))
+                }
+                _ => Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption),
+            }
+        })
     }
 
     fn required_promotion_sink_ids(
@@ -120,99 +120,102 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         level = "trace",
         skip_all
     )]
-    fn promote(
-        &self,
-        operation_id: &str,
-        expected: &RecoveryAuthorityExpectationV1,
-        replacement: &RemoteWriterFenceV1,
-        required_sink_ids: &[String],
-        caller: &RemoteRecoveryCallerV1,
-        control: &dyn RemoteRecoveryControlPortV1,
-        request_id: &RequestId,
-    ) -> std::result::Result<
+    fn promote<'a>(
+        &'a self,
+        operation_id: &'a str,
+        expected: &'a RecoveryAuthorityExpectationV1,
+        replacement: &'a RemoteWriterFenceV1,
+        required_sink_ids: &'a [String],
+        caller: &'a RemoteRecoveryCallerV1,
+        control: Arc<dyn RemoteRecoveryControlPortV1>,
+        request_id: &'a RequestId,
+    ) -> RemoteRecoveryPhysicalEffectFutureV1<
+        'a,
         RemoteRecoveryPhysicalCommitV1<PromotionCasReceiptV1>,
-        RemoteRecoveryPhysicalEffectErrorV1,
     > {
-        let writer = self
-            .storage
-            .recovery_writer_for_lineage(expected)
-            .map_err(map_writer_lookup_error)?;
-        if writer.scope != caller.scope {
-            return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
-        }
-        let project_id = writer
-            .target_project_id()
-            .cloned()
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let _recovery_admission =
-            native_runtime::block_on(self.authorize_project_recovery(&project_id))
-                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?
+        Box::pin(async move {
+            let writer = self
+                .storage
+                .recovery_writer_for_lineage(expected)
+                .map_err(map_writer_lookup_error)?;
+            if writer.scope != caller.scope {
+                return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
+            }
+            let project_id = writer
+                .target_project_id()
+                .cloned()
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+            let _recovery_admission = self
+                .authorize_project_recovery(&project_id)
+                .await
                 .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
-        let expected_sinks = self.required_promotion_sink_ids(expected)?;
-        if expected_sinks != required_sink_ids {
-            return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
-        }
-        let policy_digest = self
-            .storage
-            .recovery_policy_digest(&caller.scope)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
-        let authority_key = authority_key(expected)?;
-        let current = remote_fence(expected)?;
-        let installed_at = tracedecay_contracts::clock::now_micros();
-        let (binding, _) = self
-            .replay
-            .target_descriptor(&project_id)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
-        let install = RemoteWriterFenceInstallV1 {
-            project_id: project_id.clone(),
-            target_binding: binding,
-            authority_key: authority_key.clone(),
-            expected: Some(current),
-            replacement: replacement.clone(),
-            installed_at,
-        };
-        let interruption = Arc::new(AtomicU8::new(INTERRUPTION_NONE));
-        let probe = Arc::new(RecoveryRuntimeProbeV1::new(
-            request_id,
-            Arc::clone(&interruption),
-        )?);
-        let replay = Arc::clone(&self.replay);
-        let project_for_install = project_id.clone();
-        let receipt = run_controlled(control, request_id, &interruption, move || {
-            replay.install_writer_fence(project_for_install, install, probe)
-        })??;
-        let (_, published_frontier_sequence) = self
-            .replay
-            .current_writer_fence(project_id, authority_key)?
-            .filter(|(fence, _)| fence == replacement)
-            .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let receipt_id = format!("remote.promotion.{}", safe_suffix(operation_id)?);
-        let output = PromotionCasReceiptV1 {
-            receipt_id,
-            preview_id: operation_id.to_owned(),
-            previous_epoch: expected.authority_epoch,
-            installed_epoch: replacement.authority_epoch.0,
-            installed_placement_revision: replacement.placement_revision.get(),
-            installed_sink_ids: required_sink_ids.to_vec(),
-            published_frontier_sequence,
-            old_authority_fenced: true,
-        };
-        let bytes_consumed = u64::try_from(
-            serde_json::to_vec(&(&output, &receipt))
-                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?
-                .len(),
-        )
-        .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?
-        .max(1);
-        Ok(RemoteRecoveryPhysicalCommitV1 {
-            committed_state_digest: canonical_sha256(&(&output, &receipt))
-                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?,
-            output,
-            policy_digest,
-            committed_at: receipt.committed_at,
-            units_consumed: 1,
-            bytes_consumed,
-            interruption_observed_after_commit: interruption_value(&interruption),
+            let expected_sinks = self.required_promotion_sink_ids(expected)?;
+            if expected_sinks != required_sink_ids {
+                return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
+            }
+            let policy_digest = self
+                .storage
+                .recovery_policy_digest(&caller.scope)
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            let authority_key = authority_key(expected)?;
+            let current = remote_fence(expected)?;
+            let installed_at = tracedecay_contracts::clock::now_micros();
+            let (binding, _) = self
+                .replay
+                .target_descriptor(&project_id)
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+            let install = RemoteWriterFenceInstallV1 {
+                project_id: project_id.clone(),
+                target_binding: binding,
+                authority_key: authority_key.clone(),
+                expected: Some(current),
+                replacement: replacement.clone(),
+                installed_at,
+            };
+            let interruption = Arc::new(AtomicU8::new(INTERRUPTION_NONE));
+            let probe = Arc::new(
+                RecoveryRuntimeProbeV1::new(request_id, Arc::clone(&interruption))?
+                    .observing(Arc::clone(&control), request_id.clone()),
+            );
+            let receipt = self
+                .replay
+                .install_writer_fence(project_id.clone(), install, probe)
+                .await?;
+            observe_control(control.as_ref(), request_id, &interruption);
+            let (_, published_frontier_sequence) = self
+                .replay
+                .current_writer_fence(project_id, authority_key)
+                .await?
+                .filter(|(fence, _)| fence == replacement)
+                .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+            let receipt_id = format!("remote.promotion.{}", safe_suffix(operation_id)?);
+            let output = PromotionCasReceiptV1 {
+                receipt_id,
+                preview_id: operation_id.to_owned(),
+                previous_epoch: expected.authority_epoch,
+                installed_epoch: replacement.authority_epoch.0,
+                installed_placement_revision: replacement.placement_revision.get(),
+                installed_sink_ids: required_sink_ids.to_vec(),
+                published_frontier_sequence,
+                old_authority_fenced: true,
+            };
+            let bytes_consumed = u64::try_from(
+                serde_json::to_vec(&(&output, &receipt))
+                    .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?
+                    .len(),
+            )
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?
+            .max(1);
+            Ok(RemoteRecoveryPhysicalCommitV1 {
+                committed_state_digest: canonical_sha256(&(&output, &receipt))
+                    .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?,
+                output,
+                policy_digest,
+                committed_at: receipt.committed_at,
+                units_consumed: 1,
+                bytes_consumed,
+                interruption_observed_after_commit: interruption_value(&interruption),
+            })
         })
     }
 }
@@ -226,36 +229,6 @@ fn map_writer_lookup_error(
         }
         _ => RemoteRecoveryPhysicalEffectErrorV1::Unavailable,
     }
-}
-
-fn run_controlled<T: Send>(
-    control: &dyn RemoteRecoveryControlPortV1,
-    request_id: &RequestId,
-    interruption: &Arc<AtomicU8>,
-    operation: impl FnOnce() -> T + Send,
-) -> std::result::Result<T, RemoteRecoveryPhysicalEffectErrorV1> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::scope(|scope| {
-        scope.spawn(move || {
-            if sender.send(operation()).is_err() {
-                tracing::debug!("remote recovery caller ended before physical effect reply");
-            }
-        });
-        loop {
-            match receiver.recv_timeout(CONTROL_POLL) {
-                Ok(result) => {
-                    observe_control(control, request_id, interruption);
-                    return Ok(result);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    observe_control(control, request_id, interruption);
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(RemoteRecoveryPhysicalEffectErrorV1::Unavailable);
-                }
-            }
-        }
-    })
 }
 
 fn observe_control(

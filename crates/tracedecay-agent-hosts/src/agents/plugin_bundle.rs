@@ -16,9 +16,11 @@
 //!   These provide the explicit workflow dispatch (no dispatcher *skills*).
 //! - `plugin/agents/*.md`, canonical subagents. Claude deploys them verbatim;
 //!   build.rs derives Cursor markdown and Codex TOML adapters from them.
-//! - `plugin/commands/*.md`, Claude slash commands. `build.rs` embeds every
-//!   file in that directory and the paired Cursor overlay. Adding a command is
-//!   adding the two Markdown files; there is no second list in this module.
+//! - `plugin/commands/*.md`, Claude slash commands for workflows no skill
+//!   triggers on; a skill is already invocable by name on every host that
+//!   ships commands. `build.rs` embeds every file in that directory and the
+//!   paired Cursor overlay. Adding a command is adding the two Markdown files;
+//!   there is no second list in this module.
 //! - `plugin/rules/*.mdc`, Cursor rules.
 //! - `plugin/hooks/hooks-<host>.json`, per-host hook wiring; each deploys to
 //!   `hooks/hooks.json`.

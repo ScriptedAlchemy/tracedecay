@@ -227,7 +227,7 @@ The request only queues the reconcile; follow its progress with
 
 TraceDecay never creates files inside your repository's working tree, so
 `init` leaves `git status` untouched and nothing needs a `.gitignore` entry:
-all project data lives under `~/.tracedecay`, and a git repository additionally
+all project data lives under `~/.tracedecay`, and a git repository also
 carries an identity marker inside `.git/` (never committed). If a project was
 enrolled by an older TraceDecay, it may still have a leftover
 `.tracedecay/enrollment.json` in the repository. Nothing reads that file any
@@ -427,7 +427,7 @@ Current Codex limitations: TraceDecay drives `codex plugin add` / `remove` but
 cannot reload an active Codex session or trust plugin command hooks for you
 (use `/hooks` after install or recopy). Uninstall drives `codex plugin remove
 tracedecay@personal` and then removes the staged source. The legacy Codex
-config surfaces are intentionally left alone.
+configuration files are left unchanged.
 
 Kimi's first global install is also two-step: TraceDecay stages source, then
 Kimi Code's `/plugins install <staged-path>` registers it after Kimi's trust
@@ -446,7 +446,7 @@ uninstall --agent kimi` to remove the staged source. TraceDecay never writes
 Kimi's managed plugin directory or `installed.json`; only Kimi's installer
 does.
 
-ChatGPT registers plugins inside its own interactive surfaces. TraceDecay
+ChatGPT registers plugins through its own UI. TraceDecay
 stages the portable bundle and reports the host registration as
 `unverifiable`, with informational guidance rather than a standing pending
 action. Successful `install`, `update-plugin`, and `update` exit 0; `doctor`
@@ -1005,7 +1005,7 @@ Marked functions are excluded from `tracedecay_test_risk` attribution calculatio
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_module_api` | Public API surface of a file or directory. |
+| `tracedecay_module_api` | Public API of a file or directory. |
 | `tracedecay_coupling` | Rank files by coupling (fan-in or fan-out). |
 | `tracedecay_inheritance_depth` | Find the deepest class inheritance hierarchies. |
 | `tracedecay_type_hierarchy` | Recursive type hierarchy tree for traits, interfaces, and classes. |
@@ -1040,7 +1040,7 @@ The holographic memory tools store durable facts linked to entities:
 | `tracedecay_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
 | `tracedecay_memory_status` | Read-only report of project/profile fact and entity counts, trust-score buckets, feedback counts, coverage, and missing-vector state. It never repairs or mutates storage. |
 
-Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. Update old prompts and permissions to use the exact `tracedecay_fact_store_*` tools, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
+Entity recall finds facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. Update old prompts and permissions to use the exact `tracedecay_fact_store_*` tools, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
 
 Common exact fact-tool payloads (in add/search/probe order):
 
@@ -1335,7 +1335,7 @@ user-preference writes here; projectless Codex and Cursor hooks recall from it.
 
 Projects enroll one daemon-owned project authority. Profile-backed storage
 keeps the final Grafeo/SQLite stores under the private profile root
-(`~/.tracedecay/projects/<project-id>`); a git repository additionally carries
+(`~/.tracedecay/projects/<project-id>`); a git repository also carries
 its identity in `.git/tracedecay-project.json`. Nothing is written into the
 visible working tree. Project facts, sessions, and lossless LCM are
 project-wide across branches and linked worktrees. Code graphs are indexed as

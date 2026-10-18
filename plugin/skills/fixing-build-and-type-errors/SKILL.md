@@ -1,29 +1,30 @@
 ---
 name: fixing-build-and-type-errors
-description: Diagnose build and type errors that span symbols or files with TraceDecay dependency evidence.
+description: Use when a build, compile, or type check fails and the error spans several symbols or files. Skip when one compiler message already names the line to fix. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Fixing build and type errors
 
-When compiler output already exists, `diagnose` can map it to symbols without
-rerunning the build. Retained diagnostics belong to their clean generation;
-reading them does not run producers or refresh stale evidence. Each TypeScript
-project (every package `tsconfig.json` in a monorepo, and the configs they
-reference) whose package or workspace root has `node_modules/.bin/tsc` is
-checked by the daemon after each complete generation, so `diagnostics` is
-populated without a paste; any other toolchain publishes through `diagnose`. A
-file read reports on the tsconfig that owns the file. A read with
-no publication returns a typed problem whose message names the exact next step
-(install the compiler, paste output, or retry while the producer runs). Use the
-native build check when fresh compiler evidence is required.
+Follow these steps in order. Report a step you skip as `skip: <reason>`.
 
-Follow the failing contract: signatures to callers, missing fields to constructor
-and field sites, trait bounds to implementations, and broken module paths to
-file dependents. These graph links narrow investigation; the compiler remains
-the authority on whether the fix type-checks. Rust constructor discovery is
-best-effort and does not replace compiling affected targets.
+1. Map the errors to symbols: `tracedecay_diagnose` for compiler output you
+   already have, `tracedecay_diagnostics` for retained diagnostics. Read
+   [diagnostics sources](references/diagnostics-sources.md) when a read
+   returns a typed problem instead of diagnostics.
+2. Pick the root error, not the dependent errors it causes.
+3. Follow its failing contract: signatures to callers, missing fields to
+   constructor and field sites, trait bounds to implementations, and broken
+   module paths to file dependents. Graph links narrow the search; Rust
+   constructor discovery is best-effort.
+4. Apply the smallest complete fix.
+5. Run the native build or typecheck for the affected targets. The compiler,
+   not the graph or retained diagnostics, decides whether the fix type-checks.
+   skip: no toolchain can run here; say so.
+6. Repeat from step 2 only for errors the fresh run still reports, rather than
+   rebuilding broadly for every dependent error.
 
-LSP server inspection is informational: listing a server neither installs nor
-starts it. Preserve unavailable producer states instead of reporting an empty
-successful diagnostic result. Verify the root error first, then the affected
-behavior rather than repeatedly running a broad build for every dependent error.
+**Report:** the root error, the fix, and the fresh native build or typecheck
+that passed, or why none could run. Do not cite retained diagnostics as
+verification.

@@ -1,20 +1,20 @@
 ---
 name: tracedecay-cli
-description: Use the shared TraceDecay code graph from Pi for repository exploration, symbol lookup, call tracing, impact analysis, affected-test selection, diagnostics, and change review. Use before grep, broad file reads, new helpers, signature changes, test runs, cargo check, Clippy, or raw diff review in a TraceDecay project.
+description: Use when a Pi task in a TraceDecay project explores code, traces calls, adds a helper or changes a signature, selects or runs tests, runs cargo check or Clippy, or reviews a diff. Skip when you can already name the file to read or the edit stays inside one file. Load this skill before the first tool call.
 ---
 
 # TraceDecay in Pi
 
 Pi registers one native `tracedecay_*` tool per TraceDecay catalog tool, plus
 `/tracedecay` commands (see the `tracedecay` extension in
-`~/.pi/agent/extensions/`). They bridge the same tool surface that the Codex
+`~/.pi/agent/extensions/`). They bridge the same tool interface that the Codex
 and Cursor plugins expose over MCP, through the supported CLI. Tools that
 change project state ask for approval first and refuse an explicit project
 selector. Do not read `.tracedecay` databases directly.
 
-## Preferred routes
+## Routes
 
-Native tools first, one per task:
+Make the one call for the moment, then stop when it answers the question:
 
 - Concept or architecture: `tracedecay_context`
 - Symbol discovery: `tracedecay_search` or `tracedecay_find_exact_symbol`
@@ -23,13 +23,16 @@ Native tools first, one per task:
 - Source detail: `tracedecay_source_outline`, then `tracedecay_source_body`
 - Calls: `tracedecay_callers` or `tracedecay_callees`
 - New helper or structural edit: `tracedecay_search`, then `tracedecay_impact`
-- Tests: `tracedecay_affected` or `tracedecay_test_map`
+- Tests: `tracedecay_affected` or `tracedecay_test_map`, before any broad test run
 - Compiler work: `tracedecay_diagnostics` before a build; `tracedecay_diagnose` after an error
 - Review: `tracedecay_diff_context` before a raw diff
 - Index state: `tracedecay_status` and `tracedecay_active_project`
 
-Reuse returned node IDs and continuation handles. An empty index result does
-not prove absence; report partial coverage instead of assuming.
+Reuse returned node IDs and continuation handles. Preserve exact
+project/worktree selectors; cross-project operations use the selected
+registered store, not whichever project is active. A preview or read does not
+grant mutation authority: apply, cancellation, and rollback consume their
+returned identities, and committed effects are reconciled before a retry.
 
 ## CLI fallback
 
@@ -46,7 +49,9 @@ JSON
 List all tools with `tracedecay tool`. Read a schema with
 `tracedecay tool <name> --help`. The `/tracedecay` command shows project
 status, `/tracedecay-sync` forces an incremental sync, and
-`/tracedecay-version` shows the binary version.
+`/tracedecay-version` shows the binary version. If no daemon is running, the
+tools report TraceDecay as unavailable and do not start one: a stopped daemon
+may be an intentional hold, and `tracedecay daemon status` shows the state.
 
 ## Worktrees
 
@@ -63,25 +68,7 @@ Create branch indexes only when a long-lived worktree has diverged enough that
 source-project context is stale. Do not run manual sync after each edit. The
 Pi extension hooks keep an initialized project current.
 
-## Operational boundaries
-
-Use TraceDecay when its graph, durable memory, or session evidence answers the
-task. Known-file reads, ordinary local edits, nonindexed material, and
-clarification questions can use the native workflow directly.
-
-Preserve exact project/worktree selectors and opaque continuation or mutation
-identities. Cross-project operations must use the selected registered store,
-not whichever project is active. Preview and read results do not grant
-mutation authority. Apply, cancellation, and rollback consume their returned
-identities; reconcile committed effects before retrying an interrupted
-operation.
-
-## Limits
-
-- Do not dump broad files into prompts when graph results answer the question.
-- Do not run broad test suites before affected-test selection.
-- Do not expose secrets or store transient task progress as memory facts.
-- If a tool fails, read its corrective error and retry with the stated schema.
-- If no daemon is running, the tools report TraceDecay as unavailable and do
-  not start one: a stopped daemon may be an intentional hold. Report the
-  limitation; `tracedecay daemon status` shows the state.
+**Report:** the answer with the file and symbol behind each claim, the coverage
+when a result is partial, and the limitation when TraceDecay was unavailable.
+Do not claim absence from an empty index result, dump broad files when a graph
+result answers, or store secrets or transient progress as memory facts.

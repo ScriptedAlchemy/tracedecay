@@ -34,7 +34,7 @@ pub fn register_github_stack_hook_runtime(
 /// Returns only whether an authenticated `CursorDesktop` hook should wake its
 /// user. Store failures suppress a wakeup; durable `host_pending` rows remain
 /// available for a later hook admission and MCP expansion.
-pub fn github_stack_hook_available(project_id: [u8; 16], worktree_id: [u8; 16]) -> bool {
+pub async fn github_stack_hook_available(project_id: [u8; 16], worktree_id: [u8; 16]) -> bool {
     let runtime = runtime_registry().lock().ok().and_then(|mut registry| {
         let runtime = registry
             .get(&(project_id, worktree_id))
@@ -44,7 +44,11 @@ pub fn github_stack_hook_available(project_id: [u8; 16], worktree_id: [u8; 16]) 
         }
         runtime
     });
+    let Some(runtime) = runtime else {
+        return false;
+    };
     runtime
-        .and_then(|runtime| runtime.pending_host_deliveries().ok())
-        .is_some_and(|deliveries| !deliveries.is_empty())
+        .pending_host_deliveries()
+        .await
+        .is_ok_and(|deliveries| !deliveries.is_empty())
 }

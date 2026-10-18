@@ -8,6 +8,7 @@ use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, Proje
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_sqlite::SqliteReadConn;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::source::run_blocking_transcript_section;
@@ -414,6 +415,8 @@ async fn open_state_source(
 #[allow(clippy::too_many_arguments)]
 async fn ingest_bounded_pages<F, R>(
     admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
+    state_db: &Path,
     conn: &SqliteReadConn,
     select_sql: &HermesReadSql,
     scope: ObservationScopeV1,
@@ -460,6 +463,8 @@ where
         route_page = next_route_page;
         let admitted = admit_rows_with_admission_and_cancellation(
             admission,
+            sweep,
+            state_db,
             &bounded,
             scope.clone(),
             generation,
@@ -496,6 +501,7 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
     project_root: &Path,
     project_id: ProjectId,
     admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
     budget: &mut IngestByteBudget,
     cancellation: &ObservationCancellation,
 ) -> Result<TranscriptIngestStats, String> {
@@ -509,6 +515,8 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
     let source = source.clone();
     ingest_bounded_pages(
         admission,
+        sweep,
+        &source.state_db,
         &conn,
         &select_sql,
         scope,
@@ -537,6 +545,7 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
 
 pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
     admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
     source: &HermesProfileSource,
     _registered_roots: &[PathBuf],
     budget: &mut IngestByteBudget,
@@ -549,6 +558,8 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
         open_state_source(source).await?;
     ingest_bounded_pages(
         admission,
+        sweep,
+        &source.state_db,
         &conn,
         &select_sql,
         ObservationScopeV1::Profile,

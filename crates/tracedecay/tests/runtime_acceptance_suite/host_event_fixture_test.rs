@@ -706,7 +706,6 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
                 },
                 None,
                 &ObservationCancellation::default(),
-                None,
             )
             .await
             .unwrap();
@@ -774,6 +773,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     assert_external_source_contract(provider, &scope, &project_id, observations[0].observation());
     let committed = runtime
         .external_source_receipt_for_test(scope, observations[0].commit_receipt())
+        .await
         .unwrap()
         .expect("sanitized host observation must reach the canonical external-source store");
     let outcome = facade.probe(provider, scope);
@@ -787,6 +787,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     assert_eq!(
         reopened
             .external_source_receipt_for_test(scope, observations[0].commit_receipt())
+            .await
             .unwrap(),
         Some(committed),
         "external-source receipt and its published projection must survive runtime restart"
@@ -794,8 +795,12 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     outcome
 }
 
+/// Current Codex writes every prompt twice: a `response_item` message and an
+/// `item_completed/UserMessage` event of the same turn. Replies are written as
+/// an `item_completed/AgentMessage` event and a `response_item` message. Each
+/// is one logical turn in projection and search.
 #[tokio::test]
-async fn current_codex_user_pair_projects_each_record_and_rejects_malformed_items() {
+async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -825,6 +830,7 @@ async fn current_codex_user_pair_projects_each_record_and_rejects_malformed_item
     let facade = runtime.facade();
     let transcript = tmp.path().join("codex-current-user-pair.jsonl");
     let prompt = "Find the callers of publish_generation.";
+    let reply = "publish_generation is called from the sealing worker.";
     let lines = [
         json!({
             "timestamp": "2026-09-04T12:00:00.000Z",
@@ -838,7 +844,8 @@ async fn current_codex_user_pair_projects_each_record_and_rejects_malformed_item
                 "type": "message",
                 "id": "msg-user-1",
                 "role": "user",
-                "content": [{"type": "input_text", "text": prompt}]
+                "content": [{"type": "input_text", "text": prompt}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
             }
         }),
         json!({
@@ -853,6 +860,31 @@ async fn current_codex_user_pair_projects_each_record_and_rejects_malformed_item
                     "id": "user-item-1",
                     "content": [{"type": "text", "text": prompt}]
                 }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.500Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "msg-assistant-1",
+                    "content": [{"type": "Text", "text": reply}]
+                }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.501Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-assistant-1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": reply}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
             }
         }),
         json!({
@@ -904,26 +936,15 @@ async fn current_codex_user_pair_projects_each_record_and_rejects_malformed_item
             .project_observation_table_count_for_test("observations")
             .await
             .unwrap(),
-        3,
+        5,
         "every valid native record stays durable until transactional projection"
     );
     let scope = ObservationScopeV1::Project { project_id };
-    let projection = facade
+    facade
         .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
         .await
         .unwrap();
 
-    // a2a0cb1c53 (#3884) made a user `response_item` message a turn of its
-    // own beside its `item_completed` echo. The two malformed items still
-    // project nothing.
-    assert_eq!(projection.projected_outputs, 2);
-    assert_eq!(
-        runtime
-            .session_message_count_for_test(HostAdmissionScope::Project, None)
-            .await
-            .unwrap(),
-        2
-    );
     let messages = runtime
         .search_session_messages_for_test(
             HostAdmissionScope::Project,
@@ -934,18 +955,25 @@ async fn current_codex_user_pair_projects_each_record_and_rejects_malformed_item
         )
         .await
         .unwrap();
-    assert_eq!(messages.len(), 2);
+    let mut turns = messages
+        .iter()
+        .map(|hit| hit.message.role.as_str())
+        .collect::<Vec<_>>();
+    turns.sort_unstable();
+    assert_eq!(turns, ["assistant", "user"], "{messages:?}");
     assert!(
         messages
             .iter()
-            .all(|hit| hit.message.role == "user" && hit.message.text == prompt),
-        "{messages:?}"
+            .any(|hit| hit.message.role == "user" && hit.message.message_id == "user-item-1"),
+        "the prompt keeps its native item identity: {messages:?}"
     );
-    assert!(
-        messages
-            .iter()
-            .any(|hit| hit.message.message_id == "user-item-1"),
-        "{messages:?}"
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        2,
+        "one prompt and one reply are two turns"
     );
 }
 
@@ -1735,6 +1763,7 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
             HostAdmissionScope::Project,
             project_rows[0].commit_receipt(),
         )
+        .await
         .unwrap()
         .unwrap();
     let advanced_source_commit = runtime
@@ -1742,6 +1771,7 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
             HostAdmissionScope::Project,
             project_rows[2].commit_receipt(),
         )
+        .await
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -1765,6 +1795,7 @@ async fn canonical_and_linked_worktree_events_share_retained_project_authority()
                 HostAdmissionScope::Project,
                 project_rows[2].commit_receipt(),
             )
+            .await
             .unwrap(),
         Some(advanced_source_commit),
         "exact replay must preserve the committed frontier and projection receipt"

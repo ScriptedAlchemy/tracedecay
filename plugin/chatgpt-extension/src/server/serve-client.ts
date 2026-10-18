@@ -1,7 +1,19 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { Client, ProtocolError, SdkError, type CallToolResult } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import type { Failure, FailureKind } from "../shared/view.js";
+
+const REPEATED_QUERY_HINT_PREFIX = "tracedecay_repeated_query:";
+
+/**
+ * Collects the repeated-query hints `tracedecay serve` attaches to the daemon
+ * reads made while handling one explorer tool call. Serve keeps the hint
+ * window for its session, and the explorer holds one serve session per
+ * project for its host, so the explorer relays serve's hint instead of
+ * keeping a window of its own.
+ */
+export const relayedHints = new AsyncLocalStorage<string[]>();
 
 /**
  * One `tracedecay serve` stdio session. The daemon scopes project tools to
@@ -188,6 +200,9 @@ export class ServeSession {
     const result = await this.#client.callTool({ name: toolName, arguments: { ...args, format: "json" } }, {
       ...(signal === undefined ? {} : { signal }),
     });
+    for (const item of result.content) {
+      if (item.type === "text" && item.text.startsWith(REPEATED_QUERY_HINT_PREFIX)) relayedHints.getStore()?.push(item.text);
+    }
     let payload = payloadOf(result, toolName);
     const handle = ResponseHandleSchema.safeParse(payload);
     if (handle.success) {

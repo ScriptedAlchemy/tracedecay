@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 use crate::agents::host_bundle::HostComponentV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::{CODEX_MCP_SERVER_ENV, codex_config_path};
+use super::{CODEX_SERVE_TAIL, codex_config_path};
 use crate::agents::serve_args::ServeArgs;
 
 /// Name of Codex's own CLI, which owns the MCP registry.
@@ -134,7 +134,7 @@ pub(super) fn standalone_mcp_route(
                 .map(toml::Value::as_str)
                 .collect::<Option<Vec<_>>>()
         })
-        .is_some_and(|args| serve_args.matches(&args, &[]));
+        .is_some_and(|args| serve_args.matches(&args, CODEX_SERVE_TAIL));
     Ok(args_match
         && tracedecay_bin
             .is_none_or(|bin| server.get("command").and_then(toml::Value::as_str) == Some(bin)))
@@ -177,12 +177,12 @@ pub(super) fn require_codex_cli() -> Result<PathBuf> {
 /// Split from the trait method so tests can supply a fake CLI and an isolated
 /// `HOME` without mutating the process environment.
 ///
-/// The launch contract (`--env` pairs, `--`, then command and arguments) is
-/// built from [`CODEX_MCP_SERVER_ENV`] and the [`ServeArgs`] launch args, the same
-/// values the plugin bundle's `.mcp.json` writer consumes, so the two
-/// spellings of the same server cannot drift apart.
+/// The launch contract (`--`, then command and arguments) is built from the
+/// [`ServeArgs`] launch args and [`CODEX_SERVE_TAIL`], the same values the
+/// plugin bundle's `.mcp.json` writer consumes, so the two spellings of the
+/// same server cannot drift apart.
 ///
-/// The bundle additionally pins `startup_timeout_sec`/`tool_timeout_sec`, which
+/// The bundle also pins `startup_timeout_sec`/`tool_timeout_sec`, which
 /// `codex mcp add` exposes no flag for. Those are deliberately *not* emulated by
 /// writing the config afterwards: the registered server takes Codex's own
 /// defaults, and an operator who wants the bundle's longer bounds installs the
@@ -194,19 +194,12 @@ pub(super) fn codex_mcp_add_with(
     tracedecay_bin: &str,
     serve_args: &ServeArgs,
 ) -> Result<()> {
-    let env = CODEX_MCP_SERVER_ENV
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>();
     let mut args = vec!["mcp", "add", CODEX_MCP_SERVER_NAME];
-    for assignment in &env {
-        args.extend(["--env", assignment.as_str()]);
-    }
     // Everything after `--` is the server's own launch command, so a launch
     // argument can never be re-read as a `codex mcp add` option.
     args.push("--");
     args.push(tracedecay_bin);
-    let launch = serve_args.to_vec(&[]);
+    let launch = serve_args.to_vec(CODEX_SERVE_TAIL);
     args.extend(launch.iter().map(String::as_str));
     run_codex_mcp_step(codex_cli, &args, home)
 }
@@ -384,7 +377,7 @@ mod tests {
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(
             &config_path,
-            "[mcp_servers.tracedecay]\ncommand = \"/bin/td\"\nargs = [\"serve\"]\n",
+            "[mcp_servers.tracedecay]\ncommand = \"/bin/td\"\nargs = [\"serve\", \"--full-tool-list\"]\n",
         )
         .unwrap();
         let catalog =
@@ -407,6 +400,16 @@ mod tests {
         };
         assert!(route(&ServeArgs::default()));
         assert!(!route(&compact));
+
+        std::fs::write(
+            &config_path,
+            "[mcp_servers.tracedecay]\ncommand = \"/bin/td\"\nargs = [\"serve\"]\n",
+        )
+        .unwrap();
+        assert!(
+            !route(&ServeArgs::default()),
+            "a server registered without --full-tool-list needs repair"
+        );
     }
 
     /// Install a fake `codex` that appends each invocation's argv to `log` and
@@ -443,7 +446,7 @@ fi
 case "$1 $2" in
   "mcp add")
     /bin/mkdir -p "$HOME/.codex"
-    printf '%s[mcp_servers.tracedecay]\ncommand = "/bin/tracedecay"\nargs = ["serve"]\n%s' "$peer" "$kept" > "$config"
+    printf '%s[mcp_servers.tracedecay]\ncommand = "/bin/tracedecay"\nargs = ["serve", "--full-tool-list"]\n%s' "$peer" "$kept" > "$config"
     ;;
   "mcp remove")
     if [ -n "$peer" ] || [ -n "$kept" ]; then
@@ -493,7 +496,7 @@ exit 0"#;
     /// invocation assertion below compares against this exact string.
     #[cfg(unix)]
     const EXPECTED_ADD_INVOCATION: &str =
-        "mcp add tracedecay --env TRACEDECAY_MCP_REPEAT_READ_POINTERS=1 -- /bin/tracedecay serve";
+        "mcp add tracedecay -- /bin/tracedecay serve --full-tool-list";
 
     #[cfg(unix)]
     #[test]
@@ -650,7 +653,7 @@ exit 0"#;
 : >> "$config"
 /usr/bin/awk '/^\[/ { owned = ($0 == "[mcp_servers.tracedecay]") } !owned' "$config" > "$config.next"
 if [ "$1 $2" = "mcp add" ]; then
-  printf '[mcp_servers.tracedecay]\ncommand = "%s"\nargs = ["serve"]\n' "$7" >> "$config.next"
+  printf '[mcp_servers.tracedecay]\ncommand = "%s"\nargs = ["serve", "--full-tool-list"]\n' "$5" >> "$config.next"
 fi
 /bin/mv "$config.next" "$config"
 exit 0"#;
@@ -870,7 +873,7 @@ exit 0"#;
         format!(
             r#"config="$HOME/.codex/config.toml"
 /usr/bin/awk '/^\[/ {{ dropped = index($0, "{region}") == 1 }} !dropped' "$config" > "$config.next"
-printf '[mcp_servers.tracedecay]\ncommand = "%s"\n' "$7" >> "$config.next"
+printf '[mcp_servers.tracedecay]\ncommand = "%s"\n' "$5" >> "$config.next"
 /bin/mv "$config.next" "$config"
 exit 0"#
         )

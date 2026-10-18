@@ -9,6 +9,9 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
 test-transport = []
+# Starts a default native runtime on first use when the host never called
+# `native_runtime::install`. Tests only; production hosts install at startup.
+test-runtime = []
 
 [dependencies]
 async-channel = "2.5.0"
@@ -21,15 +24,22 @@ ring = "0.17.14"
 sha2 = "0.11.0"
 thiserror = "2"
 asupersync.workspace = true
-# Synchronous storage ports wait on the writer from Tokio daemon workers; see
-# `recv_writer_reply`.
-tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread"] }
+# `native_runtime::tokio_handle` hands the daemon's Tokio runtime to the sites
+# that still need one.
+tokio = { version = "1", default-features = false, features = ["rt"] }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracing = "0.1"
 
+# Thread CPU time for the long-poll count on native tasks.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+# Self dev-dependency: every workspace test build shares one resolution, so
+# this gives each test the lazy default runtime.
+tracedecay-rusqlite-runtime = { path = ".", features = ["test-runtime"] }
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tempfile = "3"

@@ -109,15 +109,6 @@ impl WorkflowLifecycleOperation {
         }
     }
 
-    pub fn from_operation_key(key: &str) -> Option<Self> {
-        match key {
-            "activate" => Some(Self::Activate),
-            "retire" => Some(Self::Retire),
-            "reject" => Some(Self::Reject),
-            _ => None,
-        }
-    }
-
     /// Canonical edge table shared by every authority implementation.
     ///
     /// Plan 32: the retained lifecycle is `candidate -> validated -> active`

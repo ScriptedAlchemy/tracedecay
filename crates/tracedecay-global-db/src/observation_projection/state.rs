@@ -443,78 +443,33 @@ fn output_owner_lookup_sql(select_expr: &str, ordering: &str) -> String {
     )
 }
 
-/// The one definition of the projected-output ownership aggregation that
-/// populates `temp.observation_projection_output_state`: for every
-/// `(projector_version, output_provider, output_message_id)` group in the
-/// (optionally filtered) provenance authority it derives the canonical owner
+/// Ownership of the one output keyed `(?1 projector_version, ?2 provider,
+/// ?3 message_id)`, aggregated from the provenance authority through
+/// `idx_observation_projection_provenance_output`: the canonical owner
 /// (newest row when the projector owns the output, oldest otherwise), the
-/// newest owner row and its sequence, and the group's ownership counts.
-/// Whole-cache initialization and per-output re-aggregation both render
-/// their statement from this single spelling so the aggregation cannot
-/// drift; `provenance_filter` scopes only the grouped rows (the correlated
-/// owner lookups constrain themselves to each group's exact key).
-fn output_state_aggregation_sql(provenance_filter: &str) -> String {
+/// newest owner and its sequence, and the group's ownership counts. Yields
+/// no row for an output nothing owns.
+pub(super) fn output_ownership_sql() -> String {
     let newest_id = output_owner_lookup_sql("provenance.observation_id", "DESC");
     let oldest_id = output_owner_lookup_sql("provenance.observation_id", "ASC");
     let newest_sequence = output_owner_lookup_sql("observation.sequence", "DESC");
     format!(
-        "INSERT INTO temp.observation_projection_output_state (
-            projector_version, output_provider, output_message_id,
-            canonical_observation_id, latest_observation_id, latest_sequence,
-            projector_owned, owner_count
-         )
-         SELECT groups.projector_version, groups.output_provider, groups.output_message_id,
-                CASE WHEN groups.projector_owned = 1 THEN {newest_id} ELSE {oldest_id} END,
-                {newest_id},
-                {newest_sequence},
-                groups.projector_owned, groups.owner_count
+        "SELECT CASE WHEN groups.projector_owned = 1 THEN {newest_id} ELSE {oldest_id} END
+                  AS canonical_observation_id,
+                {newest_id} AS latest_observation_id,
+                {newest_sequence} AS latest_sequence,
+                groups.projector_owned AS projector_owned,
+                groups.owner_count AS owner_count
          FROM (
             SELECT projector_version, output_provider, output_message_id,
                    MAX(message_created) AS projector_owned,
                    COUNT(*) AS owner_count
             FROM observation_projection_provenance
-            {provenance_filter}
+            WHERE projector_version = ?1
+              AND output_provider = ?2 AND output_message_id = ?3
             GROUP BY projector_version, output_provider, output_message_id
          ) AS groups"
     )
-}
-
-/// Re-aggregates the ownership cache for one exact output from the
-/// provenance authority: the output's cached row is removed and rebuilt
-/// through the canonical aggregation ([`output_state_aggregation_sql`]), so
-/// convergence paths (e.g. collided-provenance reconciliation) share the
-/// initialization's single definition.
-pub(super) async fn reaggregate_output_state_for_output(
-    conn: &impl Executor,
-    output_provider: &str,
-    output_message_id: &str,
-) -> ProjectionStoreResult<()> {
-    conn.execute(
-        "DELETE FROM temp.observation_projection_output_state
-         WHERE projector_version = ?1
-           AND output_provider = ?2 AND output_message_id = ?3",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            output_provider,
-            output_message_id,
-        ],
-    )
-    .await
-    .map_err(|error| storage("reset collided projection output state", error))?;
-    conn.execute(
-        &output_state_aggregation_sql(
-            "WHERE projector_version = ?1
-               AND output_provider = ?2 AND output_message_id = ?3",
-        ),
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            output_provider,
-            output_message_id,
-        ],
-    )
-    .await
-    .map_err(|error| storage("reaggregate collided projection output state", error))?;
-    Ok(())
 }
 
 pub(super) struct ProjectionOutputOwner {
@@ -529,153 +484,6 @@ pub(super) struct ProjectionOutputState {
     pub(super) owner_count: u64,
 }
 
-async fn projection_cache_tokens(conn: &impl Executor) -> ProjectionStoreResult<(i64, i64)> {
-    let mut version_rows = conn
-        .query("PRAGMA data_version", ())
-        .await
-        .map_err(|error| storage("read projection cache data version", error))?;
-    let data_version = version_rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection cache data version", error))?
-        .ok_or_else(|| storage_message("read projection cache data version", "no row"))?
-        .get::<i64>(0)
-        .map_err(|error| storage("read projection cache data version", error))?;
-    drop(version_rows);
-    let mut rowid_rows = conn
-        .query(
-            "SELECT COALESCE(MAX(rowid), 0) FROM observation_projection_provenance",
-            (),
-        )
-        .await
-        .map_err(|error| storage("read projection cache provenance rowid", error))?;
-    let provenance_rowid = rowid_rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection cache provenance rowid", error))?
-        .ok_or_else(|| storage_message("read projection cache provenance rowid", "no row"))?
-        .get::<i64>(0)
-        .map_err(|error| storage("read projection cache provenance rowid", error))?;
-    Ok((data_version, provenance_rowid))
-}
-
-pub(in super::super) async fn ensure_projection_output_state_cache(
-    conn: &impl Executor,
-) -> ProjectionStoreResult<()> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state (
-            projector_version TEXT NOT NULL,
-            output_provider TEXT NOT NULL,
-            output_message_id TEXT NOT NULL,
-            canonical_observation_id TEXT NOT NULL,
-            latest_observation_id TEXT NOT NULL,
-            latest_sequence INTEGER NOT NULL CHECK(latest_sequence >= 0),
-            projector_owned INTEGER NOT NULL CHECK(projector_owned IN (0, 1)),
-            owner_count INTEGER NOT NULL CHECK(owner_count > 0),
-            PRIMARY KEY(projector_version, output_provider, output_message_id)
-        ) WITHOUT ROWID;
-        CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state_meta (
-            initialized INTEGER PRIMARY KEY CHECK(initialized = 1),
-            data_version INTEGER NOT NULL CHECK(data_version >= 0),
-            provenance_rowid INTEGER NOT NULL CHECK(provenance_rowid >= 0)
-        ) WITHOUT ROWID;",
-    )
-    .await
-    .map_err(|error| storage("create projection output state cache", error))?;
-    let (data_version, provenance_rowid) = projection_cache_tokens(conn).await?;
-
-    let mut rows = conn
-        .query(
-            "SELECT data_version, provenance_rowid
-             FROM temp.observation_projection_output_state_meta
-             WHERE initialized = 1",
-            (),
-        )
-        .await
-        .map_err(|error| storage("read projection output state cache", error))?;
-    let cached = rows
-        .next()
-        .await
-        .map_err(|error| storage("read projection output state cache", error))?
-        .map(|row| -> ProjectionStoreResult<(i64, i64)> {
-            Ok((
-                row.get(0)
-                    .map_err(|error| storage("read projection output state cache", error))?,
-                row.get(1)
-                    .map_err(|error| storage("read projection output state cache", error))?,
-            ))
-        })
-        .transpose()?;
-    drop(rows);
-    if let Some((stored_version, stored_rowid)) = cached
-        && (stored_rowid == provenance_rowid || stored_version == data_version)
-    {
-        // `data_version` moves when any other connection commits, including
-        // session rows that do not touch provenance. Rebuilding here scans the
-        // whole ownership table once per queued observation. This writer keeps
-        // the temp rows current itself; a foreign provenance insert changes
-        // `MAX(rowid)` and still rebuilds.
-        if stored_version != data_version || stored_rowid != provenance_rowid {
-            conn.execute(
-                "UPDATE temp.observation_projection_output_state_meta
-                 SET data_version = ?1, provenance_rowid = ?2
-                 WHERE initialized = 1",
-                params![data_version, provenance_rowid],
-            )
-            .await
-            .map_err(|error| storage("refresh projection cache token", error))?;
-        }
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        "DELETE FROM temp.observation_projection_output_state;
-         DELETE FROM temp.observation_projection_output_state_meta;",
-    )
-    .await
-    .map_err(|error| storage("initialize projection output state cache", error))?;
-    conn.execute(&output_state_aggregation_sql(""), ())
-        .await
-        .map_err(|error| storage("initialize projection output state cache", error))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_output_state_meta(
-            initialized, data_version, provenance_rowid
-         ) VALUES (1, ?1, ?2)",
-        params![data_version, provenance_rowid],
-    )
-    .await
-    .map_err(|error| storage("record projection cache data version", error))?;
-
-    let mut rows = conn
-        .query(
-            "SELECT
-                (SELECT COUNT(*) FROM observation_projection_provenance),
-                (SELECT COALESCE(SUM(owner_count), 0)
-                 FROM temp.observation_projection_output_state)",
-            (),
-        )
-        .await
-        .map_err(|error| storage("verify projection output state cache", error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| storage("verify projection output state cache", error))?
-        .ok_or_else(|| storage_message("verify projection output state cache", "no row"))?;
-    let provenance_count = row
-        .get::<i64>(0)
-        .map_err(|error| storage("verify projection output state cache", error))?;
-    let cached_count = row
-        .get::<i64>(1)
-        .map_err(|error| storage("verify projection output state cache", error))?;
-    if provenance_count != cached_count {
-        return Err(storage_message(
-            "verify projection output state cache",
-            "provenance aggregate mismatch",
-        ));
-    }
-    Ok(())
-}
-
 pub(super) async fn read_output_state(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
@@ -683,17 +491,17 @@ pub(super) async fn read_output_state(
     let message = projection.message();
     let mut rows = conn
         .query(
-            "SELECT state.latest_sequence, latest.observation_json,
-                    canonical.observation_json, state.projector_owned, state.owner_count,
-                    state.latest_observation_id, state.canonical_observation_id
-             FROM temp.observation_projection_output_state AS state
-             JOIN observations AS latest
-               ON latest.observation_id = state.latest_observation_id
-             JOIN observations AS canonical
-               ON canonical.observation_id = state.canonical_observation_id
-             WHERE state.projector_version = ?1
-               AND state.output_provider = ?2
-               AND state.output_message_id = ?3",
+            &format!(
+                "SELECT state.latest_sequence, latest.observation_json,
+                        canonical.observation_json, state.projector_owned, state.owner_count,
+                        state.latest_observation_id, state.canonical_observation_id
+                 FROM ({}) AS state
+                 JOIN observations AS latest
+                   ON latest.observation_id = state.latest_observation_id
+                 JOIN observations AS canonical
+                   ON canonical.observation_id = state.canonical_observation_id",
+                output_ownership_sql()
+            ),
             params![
                 SESSION_MESSAGE_PROJECTOR_VERSION,
                 message.provider.as_str(),
@@ -1116,7 +924,7 @@ pub(in super::super) async fn read_projection_rows_batch(
 /// The grouped aggregate (`MAX(message_created)`, `COUNT(*)`) and the owner
 /// selection both reuse [`output_owner_lookup_sql`], the one definition of the
 /// projector's ordering, so the batched path cannot drift from the per-output
-/// and whole-cache spellings. A requested key whose group is absent, whose
+/// spelling ([`output_ownership_sql`]). A requested key whose group is absent, whose
 /// ownership aggregate is NULL or empty, or whose canonical owner has no
 /// `observations` row simply yields no row: the caller maps that absence to
 /// [`ProjectionStoreError::ProvenanceCollision`], exactly as the single-output

@@ -77,12 +77,13 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
                 "Work blocked-interval recovery producer scope mismatch".to_owned(),
             ));
         }
-        let context = work_blocked_interval_recovery_context(&actor, &grant)?;
+        work_blocked_interval_recovery_context(&actor, &grant)?;
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let task = NativeTask::spawn(run_recovery(
             database,
-            context,
+            actor,
+            grant,
             producer,
             signal,
             worker_cancellation,
@@ -145,7 +146,8 @@ impl Drop for WorkBlockedIntervalObservationRecoveryInnerV1 {
 
 async fn run_recovery(
     database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    context: RequestContext,
+    actor: ActorId,
+    grant: CapabilityGrantSnapshot,
     producer: Arc<BoundedObservabilityProducerV1>,
     signal: tokio::sync::watch::Receiver<u64>,
     cancellation: CancellationToken,
@@ -159,11 +161,15 @@ async fn run_recovery(
         "Work blocked-interval recovery",
         move |_| {
             let database = database.clone();
-            let context = context.clone();
+            // Each cycle runs under its own request. One minted at mount
+            // expired with its deadline and grant a day later.
+            let context = work_blocked_interval_recovery_context(&actor, &grant);
             let producer = Arc::clone(&producer);
             let cancellation = scan_cancellation.clone();
             let receipt_warnings = Arc::clone(&receipt_warnings);
             async move {
+                let context =
+                    context.map_err(|error| format!("recovery authority failed: {error}"))?;
                 recover_once(database, context, producer, cancellation, receipt_warnings).await
             }
         },
@@ -351,9 +357,6 @@ mod tests {
         let profile = tempfile::tempdir().expect("profile root");
         let project = tempfile::tempdir().expect("project root");
         let tokio_misses = native_runtime::tokio_runtime_missing_count(site);
-        let _probe = crate::invocation::NATIVE_WRITER_WAITS_PROBE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
         native_runtime::block_on(async {
             assert!(tokio::runtime::Handle::try_current().is_err());

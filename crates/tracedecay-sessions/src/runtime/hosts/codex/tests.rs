@@ -1217,6 +1217,9 @@ mod recent_first_discovery_tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tracedecay_domain::ProjectId;
+    use tracedecay_runtime_core::native_runtime::{
+        LONG_POLL, NativeTask, NativeTaskOutcome, block_on, long_native_polls,
+    };
 
     use super::CodexSource;
     use crate::admission::test_support::MemoryHostAdmission;
@@ -1230,7 +1233,10 @@ mod recent_first_discovery_tests {
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
-    use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
+    use crate::runtime::ingest::quarantine::SourceSweep;
+    use crate::runtime::jsonl_observation_admission::{
+        SHARED_JSONL_PIN_GATES, install_test_shared_jsonl_preparation_authority,
+    };
     use crate::runtime::source::spin_until_jsonl_change_settled;
     use crate::runtime::source::{
         HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
@@ -1480,6 +1486,46 @@ mod recent_first_discovery_tests {
             .await
             .unwrap();
         assert!(released.has_changed());
+    }
+
+    /// An idle scan one consumer ran is queued for every other consumer. A
+    /// consumer polling after a rollout grew must see that growth, not the
+    /// empty pass a scan from before the growth left in its queue.
+    #[tokio::test]
+    async fn a_poll_after_growth_is_not_answered_by_an_earlier_empty_scan() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let rollout = write_dated_rollout(home, ("2026", "08", "23"), "streamed");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("profile", Some(home));
+        hub.register("project", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let initial = CodexDiscoveryFrontier::initial();
+
+        let (project_paths, converged) =
+            drain_hub_consumer(&hub, "project", &source, bounds, initial).await;
+        assert_eq!(project_paths, vec![rollout.clone()]);
+        let (profile_paths, _) =
+            drain_hub_consumer(&hub, "profile", &source, bounds, initial).await;
+        assert_eq!(profile_paths, vec![rollout.clone()]);
+        let (idle_paths, _) = drain_hub_consumer(&hub, "profile", &source, bounds, converged).await;
+        assert!(idle_paths.is_empty(), "nothing changed before the growth");
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"{}\n").unwrap();
+        drop(file);
+        spin_until_jsonl_change_settled(&rollout);
+
+        let (grown, _) = drain_hub_consumer(&hub, "project", &source, bounds, converged).await;
+        assert!(
+            grown.contains(&rollout),
+            "the grown rollout must be rediscovered: {grown:?}"
+        );
     }
 
     #[tokio::test]
@@ -1868,6 +1914,107 @@ mod recent_first_discovery_tests {
             result,
             Err(TranscriptIngestError::InvalidCodexDiscoveryFrontier { .. })
         ));
+    }
+
+    /// Spawns an ingest worker's source-ledger read as a native task and names
+    /// the site its long polls are counted against.
+    #[track_caller]
+    fn native_ledger_read(
+        hub: &CodexDiscoveryHub,
+    ) -> (NativeTask<bool>, &'static std::panic::Location<'static>) {
+        let hub = hub.clone();
+        (
+            NativeTask::spawn(async move {
+                SourceSweep::new("codex", Some((&hub, "reader")))
+                    .ledger()
+                    .is_some()
+            })
+            .unwrap(),
+            std::panic::Location::caller(),
+        )
+    }
+
+    /// Holds `discover`'s page pin of `gated` open while a native worker reads
+    /// the `reader` consumer's source ledger. Long polls count against the
+    /// caller's line, so concurrent tests never share a count.
+    #[track_caller]
+    fn assert_ledger_read_never_waits_on_pinning(
+        hub: &CodexDiscoveryHub,
+        gated: &Path,
+        discover: impl FnOnce() + Send + 'static,
+    ) {
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        SHARED_JSONL_PIN_GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(gated.to_path_buf(), Arc::clone(&gate));
+        let discovery = std::thread::spawn(discover);
+        gate.wait();
+        let (read, site) = native_ledger_read(hub);
+        std::thread::sleep(LONG_POLL * 3);
+        gate.wait();
+        discovery.join().unwrap();
+        assert_eq!(
+            block_on(read.wait()).unwrap(),
+            NativeTaskOutcome::Completed(true)
+        );
+        assert_eq!(
+            long_native_polls().get(site),
+            None,
+            "the ledger read held its native worker while discovery pinned pages"
+        );
+    }
+
+    #[test]
+    fn a_ledger_read_never_waits_on_a_shared_scan_pinning_pages() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().to_path_buf();
+        let rollout = write_dated_rollout(&home, ("2026", "08", "23"), "pinned");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("scanner", Some(&home));
+        hub.register("reader", Some(&home));
+
+        let scanner = hub.clone();
+        assert_ledger_read_never_waits_on_pinning(&hub, &rollout, move || {
+            scanner
+                .discover_blocking(
+                    "scanner",
+                    &CodexSource::with_home(&home),
+                    TranscriptDiscoveryBounds::from_discovered_units(8),
+                    CodexDiscoveryFrontier::initial(),
+                )
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn a_ledger_read_never_waits_on_a_replay_delivery_pinning_pages() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().to_path_buf();
+        let rollout = write_dated_rollout(&home, ("2026", "08", "23"), "replayed");
+        let hub = CodexDiscoveryHub::default();
+        let source = CodexSource::with_home(&home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let initial = CodexDiscoveryFrontier::initial();
+        hub.register("profile", Some(&home));
+        block_on(drain_hub_consumer(
+            &hub, "profile", &source, bounds, initial,
+        ))
+        .unwrap();
+        // Joining after shared discovery began, these consumers replay.
+        hub.register("replayer", Some(&home));
+        hub.register("reader", Some(&home));
+
+        let replayer = hub.clone();
+        assert_ledger_read_never_waits_on_pinning(&hub, &rollout, move || {
+            while let CodexDiscoveryDelivery::Waiting = replayer
+                .discover_blocking("replayer", &source, bounds, initial)
+                .unwrap()
+            {}
+        });
     }
 
     #[test]
@@ -2904,6 +3051,135 @@ mod recent_first_discovery_tests {
         assert!(
             !admission.observations().is_empty(),
             "the returned rollout must be admitted"
+        );
+    }
+
+    /// #4012: the store kept answering one rollout with a permanent
+    /// `CursorAdvanceLedgerDisagreement`, and every catch-up pass re-read and
+    /// re-reported it while the unacknowledged pass held back every rollout
+    /// written after it.
+    #[tokio::test]
+    async fn a_permanently_refused_rollout_is_reported_once_and_does_not_stall_catch_up() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let stuck = write_project_rollout(&home, &project, "stuck");
+        let healthy = write_project_rollout(&home, &project, "healthy");
+        spin_until_jsonl_change_settled(&stuck);
+        spin_until_jsonl_change_settled(&healthy);
+
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(&home));
+        let project_id = ProjectId::new("project-quarantined-rollout").unwrap();
+        let scope = tracedecay_domain::ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        admission.fail_captures_for_session(
+            "stuck",
+            crate::admission::HostAdmissionOutcome {
+                status: crate::admission::HostAdmissionStatus::Degraded,
+                retryable: false,
+                reason_code: Some("observation_cursor_advance_ledger_disagreement"),
+                recovery: None,
+                cause: None,
+            },
+        );
+        let cancellation = ObservationCancellation::default();
+        let run = || {
+            crate::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                crate::runtime::ingest::project_provider::ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: crate::runtime::SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: Some((&hub, "project")),
+                }
+                .run_codex(),
+            )
+        };
+        let admitted = |session: &str| {
+            admission.observations().iter().any(|stored| {
+                let envelope: tracedecay_domain::CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.relations().session_id().as_str() == session
+            })
+        };
+
+        let first = run().await;
+        let reasons = first
+            .failures
+            .iter()
+            .map(|failure| (failure.reason_code, failure.retryable))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            [("observation_cursor_advance_ledger_disagreement", false)]
+        );
+        assert!(admitted("healthy"), "the healthy rollout must be admitted");
+        assert_eq!(admission.failed_session_capture_attempts(), 1);
+
+        let late = write_project_rollout(&home, &project, "late");
+        spin_until_jsonl_change_settled(&late);
+        for pass in 0..8 {
+            let outcome = run().await;
+            assert!(
+                outcome.failures.is_empty(),
+                "pass {pass} re-reported the refused rollout: {:?}",
+                outcome.failures
+            );
+            assert_eq!(
+                admission.failed_session_capture_attempts(),
+                1,
+                "pass {pass} re-read the unchanged refused rollout"
+            );
+            if admitted("late") {
+                break;
+            }
+        }
+        assert!(
+            admitted("late"),
+            "a rollout written after the refusal must still be admitted"
+        );
+
+        let mut appended = std::fs::read(&stuck).unwrap();
+        appended.extend_from_slice(
+            format!(
+                "{}\n",
+                json!({
+                    "timestamp": "2026-09-28T00:00:02.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "after the refusal"}
+                })
+            )
+            .as_bytes(),
+        );
+        let replacement = stuck.with_extension("tmp");
+        std::fs::write(&replacement, appended).unwrap();
+        std::fs::rename(&replacement, &stuck).unwrap();
+        spin_until_jsonl_change_settled(&stuck);
+        let mut reports = Vec::new();
+        for _ in 0..8 {
+            reports.extend(run().await.failures);
+            if admission.failed_session_capture_attempts() > 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            admission.failed_session_capture_attempts(),
+            2,
+            "a changed rollout must leave quarantine and be read again"
+        );
+        assert_eq!(
+            reports.len(),
+            1,
+            "the changed rollout is reported once: {reports:?}"
         );
     }
 }

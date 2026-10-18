@@ -117,6 +117,11 @@ fn prepare_evidence_for_publication<T>(
                     observed_at: evidence.finished_at,
                 }),
             )),
+            RequestAdmission::GrantExpired => Some((
+                OperationTermination::Unavailable,
+                OmissionReason::Unavailable,
+                None,
+            )),
             RequestAdmission::Admitted => {
                 requires_recheck = true;
                 None

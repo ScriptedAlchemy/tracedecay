@@ -24,7 +24,10 @@ Claude Code.
   `PostCompact`, `SubagentStart`, and saved-edit `PostToolUse` events. Each
   handler submits one bounded native envelope to the daemon and may return
   daemon-approved guidance through Claude Code's
-  documented `additionalContext` response. The daemon owns follow-up capture,
+  documented `additionalContext` response. In a registered project,
+  `SessionStart` leads that context with the skill mandate from
+  `plugin/hooks/session-start-context.md`: which tasks load a skill first, the
+  entry skill, and the direct-entry skills. The daemon owns follow-up capture,
   indexing, staleness work, and any advisory delivery; hooks never read stores,
   route tools, or run a model.
 

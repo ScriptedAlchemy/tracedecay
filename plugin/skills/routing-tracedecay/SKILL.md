@@ -1,6 +1,8 @@
 ---
 name: routing-tracedecay
-description: Pick the one TraceDecay tool for the moment you are in, then stop.
+description: Use when you know the kind of code question but not which TraceDecay tool answers it; names the one call to make. Skip when the task administers TraceDecay itself (projects, configuration, storage). Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Routing TraceDecay
@@ -30,3 +32,6 @@ not already located.
 
 A name you already have is a lookup, not a tour of the repository. A question
 one `grep` in a file you can already name would answer does not need the graph.
+
+**Report:** the answer the one call returned, plus its freshness line when it is
+not `fresh`. Do not chain calls the row did not name.

@@ -3,11 +3,12 @@
 //! Storage, shard lifecycle, and session-memory paths spawn their settlement
 //! work on an Asupersync runtime so accepted work outlives a cancelled request.
 //! Callers that already run on a native runtime use it. Every other caller
-//! (the Tokio daemon, CLI commands, and Tokio tests) shares one process
-//! runtime: the one the host [`install`]s at startup, or a default one started
-//! on first use when the host never installs. Callers only await native join handles and
-//! channel receivers, which wake through ordinary `Waker`s, so a foreign
-//! executor never blocks on the native runtime.
+//! (the daemon's Tokio sites, CLI commands, and tests) shares one process
+//! runtime: the one the host [`install`]s at startup. Without an install every
+//! helper here refuses with [`NOT_INSTALLED`]; the `test-runtime` feature
+//! instead starts a default runtime on first use, for tests. Callers only
+//! await native join handles and channel receivers, which wake through
+//! ordinary `Waker`s, so a foreign executor never blocks on the native runtime.
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -18,24 +19,28 @@ use std::time::{Duration, Instant};
 use asupersync::runtime::{JoinError, RuntimeHandle};
 pub use asupersync::runtime::{Runtime, RuntimeBuilder};
 
-pub use crate::exact_sql::native_thread_writer_waits;
+pub use crate::exact_sql::{native_thread_reader_waits, native_thread_writer_waits};
 use asupersync::types::PanicPayload;
 use asupersync::{Budget, Cx};
 use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, abortable};
 
-/// Tokio's default blocking-pool ceiling. Shard closes and SQL reads park a
-/// blocking thread for their whole duration.
+/// The native blocking pool's thread ceiling. Shard closes, SQL reads, and
+/// [`off_native_thread`] handlers each hold a pool thread for their whole
+/// duration, mostly parked, so this bounds concurrent waits rather than CPU
+/// use. The value matches Tokio's `max_blocking_threads` default.
 pub const MAX_BLOCKING_THREADS: usize = 512;
 
 static PROCESS_RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
+/// Why a helper refused when the host never called [`install`].
+pub const NOT_INSTALLED: &str = "native execution runtime not installed";
+
 /// The runtime the caller runs on, or the process runtime.
 ///
-/// `None` only when the process runtime failed to start; the failure is
-/// logged once.
+/// `None` when no runtime was installed or the installed one failed to start.
 #[must_use]
 pub fn handle() -> Option<RuntimeHandle> {
-    Runtime::current_handle().or_else(|| process_runtime().ok())
+    Runtime::current_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
 }
 
 /// The caller's task context, or a request context on the process runtime.
@@ -44,15 +49,10 @@ pub fn cx() -> Option<Cx> {
     Cx::current().or_else(|| {
         process_runtime()
             .ok()?
+            .handle()
             .try_request_cx_with_budget(Budget::INFINITE)
             .ok()
     })
-}
-
-/// Starts the process runtime, so a daemon fails at startup rather than on
-/// its first storage operation.
-pub fn process_runtime() -> Result<RuntimeHandle, String> {
-    started_process_runtime().map(Runtime::handle)
 }
 
 /// Runs `future` to completion on the calling thread, with the tasks it
@@ -63,7 +63,7 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
     if Runtime::current_handle().is_some() {
         return Err("native block_on called from a native runtime thread".to_owned());
     }
-    Ok(started_process_runtime()?.block_on(future))
+    Ok(process_runtime()?.block_on(future))
 }
 
 /// Queues `work` on the runtime's blocking pool now, at the call, and returns
@@ -75,6 +75,11 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
 /// be cancelled with that region before it starts, which would strand anything
 /// the caller had already queued for it.
 ///
+/// Called on a blocking-pool thread that already runs work queued here (an
+/// [`off_native_thread`] handler, say), it runs `work` inline at the call:
+/// queuing would hold this pool thread while waiting for another, and a full
+/// pool would deadlock on that wait.
+///
 /// Boxed so callers prove the context and channel wait `Send` once, here,
 /// instead of inside every future that awaits blocking work
 /// (rust-lang/rust#159228).
@@ -83,6 +88,11 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    if ON_BLOCKING_POOL.get() {
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .map_err(|_| "native blocking work panicked".to_owned());
+        return Box::pin(std::future::ready(ran));
+    }
     let queued = queue_blocking(work);
     Box::pin(async move {
         let (cx, mut receiver) = queued?;
@@ -91,6 +101,81 @@ where
             .await
             .map_err(|error| format!("native blocking work ended without a result: {error}"))
     })
+}
+
+tokio::task_local! {
+    /// Answers for the effects of blocking work its scope queues through
+    /// [`spawn_owned_blocking`]. Each such work holds a clone until it
+    /// returns, so an owner that signals on its last drop (a project open's
+    /// completion) settles after that work, not when its wait is abandoned.
+    pub static BLOCKING_WORK_OWNER: std::sync::Arc<dyn Send + Sync>;
+}
+
+/// [`spawn_blocking`] for work whose effects belong to the enclosing
+/// [`BLOCKING_WORK_OWNER`]: dropping the returned future still abandons only
+/// the wait, but the owner stays held until the work returns.
+pub fn spawn_owned_blocking<T, F>(work: F) -> BoxFuture<'static, Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let owner = BLOCKING_WORK_OWNER.try_with(std::sync::Arc::clone).ok();
+    spawn_blocking(move || {
+        let _owner = owner;
+        work()
+    })
+}
+
+/// Runs `future` where a thread may park: from a native runtime thread it
+/// moves the whole future to one blocking-pool thread and polls it there;
+/// anywhere else it polls in place.
+///
+/// For request handlers that call synchronous storage ports, which wait on
+/// the writer by parking their thread. Native wakes reach the pool thread
+/// through an ordinary `Waker`, so the handler's awaits still work. As with
+/// [`spawn_blocking`], dropping the returned future abandons only the wait:
+/// a moved future runs to completion.
+pub fn off_native_thread<F>(future: F) -> BoxFuture<'static, Result<F::Output, String>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    if Runtime::current_handle().is_none() {
+        return Box::pin(future.map(Ok));
+    }
+    spawn_blocking(move || poll_on_current_thread(future))
+}
+
+/// Polls `future` on one blocking-pool thread wherever the caller runs.
+///
+/// For futures that interleave awaits with synchronous work (native Git, a
+/// synchronous port) that must not hold any async worker: unlike
+/// [`off_native_thread`], a caller on a Tokio or other foreign executor does
+/// not poll in place. Dropping the returned future abandons only the wait.
+pub fn on_blocking_pool<F>(future: F) -> BoxFuture<'static, Result<F::Output, String>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    spawn_blocking(move || poll_on_current_thread(future))
+}
+
+fn poll_on_current_thread<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        std::thread::park();
+    }
 }
 
 fn queue_blocking<T, F>(work: F) -> Result<(Cx, asupersync::channel::oneshot::Receiver<T>), String>
@@ -103,10 +188,18 @@ where
     let (sender, receiver) = asupersync::channel::oneshot::channel();
     runtime
         .spawn_blocking(move || {
+            ON_BLOCKING_POOL.set(true);
             let _ = sender.send_blocking(work());
         })
         .ok_or("native blocking pool unavailable")?;
     Ok((cx, receiver))
+}
+
+thread_local! {
+    /// Set for good once a blocking-pool thread runs work [`queue_blocking`]
+    /// or [`NativeTask::spawn_off_native_thread`] queued; such a thread serves
+    /// the pool for its whole life.
+    static ON_BLOCKING_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Drives `settlement` on the caller's executor. A caller that stops waiting
@@ -245,6 +338,154 @@ impl<F: Future> Future for Timeout<F> {
     }
 }
 
+/// The wall time past which one poll of a [`NativeTask`] counts as long.
+///
+/// While a worker is inside a poll, no other task queued on that worker runs.
+/// A one-worker runtime also has no follower to take the reactor, and a
+/// `block_on` root never turns it, so there every socket wake and timer waits
+/// for the poll to return (#3994, upstream Dicklesworthstone/asupersync#83,
+/// whose multi-worker half Bazel patches in). The waiters see wall time,
+/// whether the poll computed, parked on a lock or a writer reply, or was
+/// descheduled, so wall time decides what counts; thread CPU time is logged
+/// beside it on unix to tell computing from parking.
+///
+/// 100 ms is where a reply delayed behind the poll becomes noticeable to the
+/// person waiting on a hook or MCP call. A poll's cost moves with host load
+/// and opt level (a 7 ms fastbuild dispatch measured 490-590 ms of CPU at load
+/// average ~1000), so this bound sets the floor of a latency report, not a
+/// correctness line: a long poll is logged and counted, never failed.
+pub const LONG_POLL: Duration = Duration::from_millis(100);
+
+static LONG_POLLS: Mutex<BTreeMap<&'static std::panic::Location<'static>, u64>> =
+    Mutex::new(BTreeMap::new());
+
+/// Long native-task polls this process ran, by the site that spawned the
+/// task. Each entry names work that held a native worker past [`LONG_POLL`]
+/// and is a candidate for [`spawn_blocking`] when its latency matters.
+#[must_use]
+pub fn long_native_polls() -> BTreeMap<&'static std::panic::Location<'static>, u64> {
+    LONG_POLLS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Times every poll of a [`NativeTask`] and counts the ones past
+/// [`LONG_POLL`] against the task's spawn site. It never alters the poll's
+/// result. Per poll it reads the monotonic clock twice and the thread CPU
+/// clock once, plus once more after a long poll.
+struct LongPollGuard<F> {
+    work: F,
+    site: &'static std::panic::Location<'static>,
+}
+
+impl<F: Future + Unpin> Future for LongPollGuard<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<F::Output> {
+        let started = Instant::now();
+        let cpu_started = thread_cpu_time();
+        let poll = Pin::new(&mut self.work).poll(task);
+        let wall = started.elapsed();
+        if wall >= LONG_POLL {
+            let cpu = cpu_started
+                .zip(thread_cpu_time())
+                .map(|(started, ended)| ended.saturating_sub(started));
+            *LONG_POLLS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(self.site)
+                .or_default() += 1;
+            tracing::warn!(
+                spawn_site = %self.site,
+                ?wall,
+                ?cpu,
+                "native task held its worker for one poll past {LONG_POLL:?}; \
+                 native_runtime::spawn_blocking keeps that work off the worker"
+            );
+        }
+        poll
+    }
+}
+
+#[cfg(unix)]
+fn thread_cpu_time() -> Option<Duration> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid, exclusively borrowed `timespec` for the call.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) };
+    (status == 0).then(|| {
+        Duration::new(
+            u64::try_from(now.tv_sec).unwrap_or(0),
+            u32::try_from(now.tv_nsec).unwrap_or(0),
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn thread_cpu_time() -> Option<Duration> {
+    None
+}
+
+/// How long the scheduling-lateness canary sleeps between wakes.
+const CANARY_TICK: Duration = Duration::from_millis(100);
+
+/// What the scheduling-lateness canary measured in this process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchedulingLateness {
+    pub ticks: u64,
+    /// Wakes that ran [`LONG_POLL`] or more past their deadline.
+    pub late_ticks: u64,
+    pub worst: Duration,
+}
+
+static SCHEDULING_LATENESS: Mutex<SchedulingLateness> = Mutex::new(SchedulingLateness {
+    ticks: 0,
+    late_ticks: 0,
+    worst: Duration::ZERO,
+});
+
+#[must_use]
+pub fn scheduling_lateness() -> SchedulingLateness {
+    *SCHEDULING_LATENESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Starts a native task that sleeps on a native timer again and again and
+/// records how late each wake runs. A wake runs late when no worker turns the
+/// timer or picks up the woken task: a long poll on a one-worker runtime, or
+/// every worker busy. That is the delay a socket reply waits behind, measured
+/// directly rather than inferred from [`long_native_polls`]. A wake
+/// [`LONG_POLL`] late or worse is logged. Abort the task to stop it.
+#[track_caller]
+pub fn spawn_lateness_canary() -> Result<NativeTask<()>, String> {
+    NativeTask::spawn(async {
+        loop {
+            let deadline = Instant::now() + CANARY_TICK;
+            if let Err(error) = sleep_until(deadline).await {
+                tracing::warn!(%error, "scheduling-lateness canary stopped");
+                return;
+            }
+            let late = deadline.elapsed();
+            let mut lateness = SCHEDULING_LATENESS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            lateness.ticks += 1;
+            lateness.worst = lateness.worst.max(late);
+            if late >= LONG_POLL {
+                lateness.late_ticks += 1;
+                tracing::warn!(
+                    ?late,
+                    "native runtime woke a timer late; a long poll or busy workers held it"
+                );
+            }
+        }
+    })
+}
+
 /// How a [`NativeTask`] ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeTaskOutcome<T> {
@@ -270,6 +511,11 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
     /// Spawns `work` on the runtime the caller runs on, or the process
     /// runtime. The runtime owns it, not the caller's region, so it outlives
     /// the request that started it.
+    ///
+    /// A poll of `work` past [`LONG_POLL`] is logged and counted against the
+    /// caller's location in [`long_native_polls`]. Queue blocking or
+    /// CPU-heavy parts with [`spawn_blocking`] when their latency matters.
+    #[track_caller]
     pub fn spawn<F>(work: F) -> Result<Self, String>
     where
         F: Future<Output = T> + Send + 'static,
@@ -278,6 +524,10 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         // Boxed so the runtime's own spawn wrappers do not nest `work` in
         // their `Send` proof (rust-lang/rust#159228).
         let work: BoxFuture<'static, T> = Box::pin(work);
+        let work = LongPollGuard {
+            work,
+            site: std::panic::Location::caller(),
+        };
         let (work, abort) = abortable(work);
         let join = runtime
             .try_spawn_checked(work)
@@ -291,6 +541,45 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
                 | Err(JoinError::Cancelled(_) | JoinError::PolledAfterCompletion) => {
                     NativeTaskOutcome::Cancelled
                 }
+            }
+        };
+        Ok(Self {
+            outcome: outcome.boxed().shared(),
+            abort,
+        })
+    }
+
+    /// [`Self::spawn`] for work that calls synchronous storage ports: `work`
+    /// is polled on one blocking-pool thread, as [`off_native_thread`] does,
+    /// so a writer wait parks only that thread. [`Self::abort`] drops it there
+    /// at its next poll.
+    pub fn spawn_off_native_thread<F>(work: F) -> Result<Self, String>
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let (work, abort) = abortable(work);
+        let (sender, receiver) = async_channel::bounded(1);
+        handle()
+            .ok_or("native execution runtime unavailable")?
+            .spawn_blocking(move || {
+                ON_BLOCKING_POOL.set(true);
+                let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    poll_on_current_thread(work)
+                }));
+                let _ = sender.send_blocking(polled);
+            })
+            .ok_or("native blocking pool unavailable")?;
+        let outcome = async move {
+            match receiver.recv().await {
+                Ok(Ok(Ok(value))) => NativeTaskOutcome::Completed(value),
+                Ok(Err(panic)) => NativeTaskOutcome::Panicked(PanicPayload::new(
+                    panic
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_owned())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_default(),
+                )),
+                Ok(Ok(Err(Aborted))) | Err(_) => NativeTaskOutcome::Cancelled,
             }
         };
         Ok(Self {
@@ -320,6 +609,74 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
     }
 }
 
+/// Awaiting the handle itself yields the outcome once; it must not be polled
+/// again after that.
+impl<T: Clone> Future for NativeTask<T> {
+    type Output = NativeTaskOutcome<T>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.outcome.poll_unpin(context)
+    }
+}
+
+/// Native tasks joined in completion order, like Tokio's `JoinSet`. Dropping
+/// the set aborts every task still running.
+pub struct NativeTaskSet<T: Clone>(futures_util::stream::FuturesUnordered<NativeTask<T>>);
+
+impl<T: Clone> Default for NativeTaskSet<T> {
+    fn default() -> Self {
+        Self(futures_util::stream::FuturesUnordered::new())
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> NativeTaskSet<T> {
+    #[track_caller]
+    pub fn spawn<F>(&mut self, work: F) -> Result<(), String>
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        self.0.push(NativeTask::spawn(work)?);
+        Ok(())
+    }
+
+    /// The next task to end, or `None` when the set is empty. Cancel-safe.
+    pub async fn join_next(&mut self) -> Option<NativeTaskOutcome<T>> {
+        futures_util::StreamExt::next(&mut self.0).await
+    }
+
+    /// A task that has already ended, without waiting for one that has not.
+    pub fn try_join_next(&mut self) -> Option<NativeTaskOutcome<T>> {
+        futures_util::StreamExt::next(&mut self.0)
+            .now_or_never()
+            .flatten()
+    }
+}
+
+impl<T: Clone> NativeTaskSet<T> {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Tasks not yet joined, including ended ones.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn abort_all(&self) {
+        for task in &self.0 {
+            task.abort.abort();
+        }
+    }
+}
+
+impl<T: Clone> Drop for NativeTaskSet<T> {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
+}
+
 /// Why [`install`] refused a runtime.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InstallError {
@@ -333,8 +690,7 @@ pub enum InstallError {
 }
 
 /// Builds `builder` and makes it the process runtime every helper here uses.
-/// A host installs it at startup, before any native helper runs; a host that
-/// never installs gets a default runtime on first use.
+/// A host installs it at startup, before any native helper runs.
 pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError> {
     let mut installed = false;
     let runtime = PROCESS_RUNTIME.get_or_init(|| {
@@ -351,13 +707,42 @@ pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError
 
 static TOKIO_RUNTIME_MISSING: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
 
-/// The Tokio runtime entered on this thread, for a `site` whose work still
-/// needs one. A miss is logged and counted against `site`: the caller skips
-/// that work, which would otherwise stop silently once the caller runs on the
+static TOKIO_RUNTIME: Mutex<Option<tokio::runtime::Handle>> = Mutex::new(None);
+
+/// Makes `handle` the Tokio runtime [`tokio_handle`] returns on a thread that
+/// has none entered, such as a native worker. The foreground daemon installs
+/// the one Tokio runtime it still owns; no other host installs one.
+pub fn install_tokio_runtime(handle: tokio::runtime::Handle) -> Result<(), InstallError> {
+    let mut installed = TOKIO_RUNTIME.lock().unwrap_or_else(PoisonError::into_inner);
+    if installed.is_some() {
+        return Err(InstallError::AlreadyStarted);
+    }
+    *installed = Some(handle);
+    Ok(())
+}
+
+/// Removes the installed Tokio runtime before its owner shuts it down, so a
+/// later [`tokio_handle`] is a counted miss rather than a dead runtime.
+pub fn uninstall_tokio_runtime() -> Option<tokio::runtime::Handle> {
+    TOKIO_RUNTIME
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+}
+
+/// The Tokio runtime for a `site` whose work still needs one: the runtime
+/// entered on this thread, else the one installed by
+/// [`install_tokio_runtime`]. A miss is logged and counted against `site`:
+/// the caller skips that work, which would otherwise stop silently on the
 /// native runtime.
 #[must_use]
 pub fn tokio_handle(site: &'static str) -> Option<tokio::runtime::Handle> {
-    let handle = tokio::runtime::Handle::try_current().ok();
+    let handle = tokio::runtime::Handle::try_current().ok().or_else(|| {
+        TOKIO_RUNTIME
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    });
     if handle.is_none() {
         *TOKIO_RUNTIME_MISSING
             .lock()
@@ -367,6 +752,50 @@ pub fn tokio_handle(site: &'static str) -> Option<tokio::runtime::Handle> {
         tracing::error!(site, "Tokio runtime missing; path skipped");
     }
     handle
+}
+
+/// `work` in the caller's own task with the Tokio runtime [`tokio_handle`]
+/// resolves for `site` entered, for work that polls Tokio timers or spawns on
+/// Tokio while its caller may run on a native thread. `None` is a counted miss.
+pub fn on_tokio<F: Future>(site: &'static str, work: F) -> Option<InTokioContext<F>> {
+    tokio_handle(site).map(|runtime| in_tokio_context(runtime, work))
+}
+
+/// `work` polled and dropped with `runtime` entered. It stays in the caller's
+/// task, so dropping the caller drops it, and everything it holds, at once.
+pub fn in_tokio_context<F: Future>(runtime: tokio::runtime::Handle, work: F) -> InTokioContext<F> {
+    InTokioContext {
+        runtime,
+        work: Some(Box::pin(work)),
+    }
+}
+
+/// The future [`on_tokio`] and [`in_tokio_context`] return.
+pub struct InTokioContext<F> {
+    runtime: tokio::runtime::Handle,
+    work: Option<Pin<Box<F>>>,
+}
+
+impl<F: Future> Future for InTokioContext<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
+        let this = &mut *self;
+        let _entered = this.runtime.enter();
+        this.work
+            .as_mut()
+            .expect("work is present until drop")
+            .as_mut()
+            .poll(context)
+    }
+}
+
+impl<F> Drop for InTokioContext<F> {
+    fn drop(&mut self) {
+        // Tokio resources the work holds may need the runtime to deregister.
+        let _entered = self.runtime.enter();
+        drop(self.work.take());
+    }
 }
 
 /// How many times [`tokio_handle`] found no Tokio runtime for `site` in this
@@ -392,15 +821,22 @@ pub fn tokio_runtime_missing_total() -> u64 {
         .sum()
 }
 
-fn started_process_runtime() -> Result<&'static Runtime, String> {
-    PROCESS_RUNTIME
-        .get_or_init(|| {
-            start(
-                RuntimeBuilder::multi_thread()
-                    .thread_name_prefix("tracedecay-native")
-                    .blocking_threads(1, MAX_BLOCKING_THREADS),
-            )
-        })
+/// The runtime a host without its own sizing installs: the CLI's thread name
+/// and blocking ceiling, Asupersync's default worker count.
+#[must_use]
+pub fn default_builder() -> RuntimeBuilder {
+    RuntimeBuilder::multi_thread()
+        .thread_name_prefix("tracedecay-native")
+        .blocking_threads(1, MAX_BLOCKING_THREADS)
+}
+
+fn process_runtime() -> Result<&'static Runtime, String> {
+    #[cfg(feature = "test-runtime")]
+    let runtime = Some(PROCESS_RUNTIME.get_or_init(|| start(default_builder())));
+    #[cfg(not(feature = "test-runtime"))]
+    let runtime = PROCESS_RUNTIME.get();
+    runtime
+        .ok_or_else(|| NOT_INSTALLED.to_owned())?
         .as_ref()
         .map_err(Clone::clone)
 }
@@ -422,6 +858,130 @@ mod tests {
 
     const HANG_GUARD: Duration = Duration::from_secs(10);
 
+    fn hop_test_tokio_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("hop-test-tokio")
+            .enable_time()
+            .build()
+            .expect("tokio runtime")
+    }
+
+    #[test]
+    fn a_native_task_uses_tokio_timers_and_spawns_in_tokio_context() {
+        let runtime = hop_test_tokio_runtime();
+        let handle = runtime.handle().clone();
+
+        let task = NativeTask::spawn(async move {
+            let ambient = tokio::runtime::Handle::try_current().is_ok();
+            let spawned_on = in_tokio_context(handle, async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                tokio::spawn(async { std::thread::current().name().map(str::to_owned) })
+                    .await
+                    .ok()
+                    .flatten()
+            })
+            .await;
+            (ambient, spawned_on)
+        })
+        .expect("native task");
+        let outcome = block_on(timeout(HANG_GUARD, task.wait()))
+            .expect("native root")
+            .expect("the hop must finish");
+
+        assert_eq!(
+            outcome,
+            NativeTaskOutcome::Completed((false, Some("hop-test-tokio".to_owned()))),
+            "a native worker has no ambient Tokio, yet the hop's timer fires and its spawn lands on Tokio"
+        );
+    }
+
+    #[test]
+    fn dropping_a_tokio_hop_drops_its_work_at_once() {
+        struct DropSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let runtime = hop_test_tokio_runtime();
+        let (dropped, dropped_signal) = std::sync::mpsc::channel();
+        let mut hop = in_tokio_context(runtime.handle().clone(), async move {
+            let _signal = DropSignal(dropped);
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        assert!(
+            (&mut hop).now_or_never().is_none(),
+            "the hop parks on its timer"
+        );
+
+        drop(hop);
+
+        assert_eq!(
+            dropped_signal.try_recv(),
+            Ok(()),
+            "the work must be dropped by the time the hop's drop returns"
+        );
+    }
+
+    #[test]
+    fn dropping_a_native_task_set_aborts_its_running_tasks() {
+        let (started, task_started) = std::sync::mpsc::channel();
+        let (ended, task_ended) = std::sync::mpsc::channel::<()>();
+        let mut set = NativeTaskSet::default();
+        set.spawn(async move {
+            let _ended = ended;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        })
+        .expect("native task");
+        task_started
+            .recv_timeout(HANG_GUARD)
+            .expect("the task runs");
+
+        drop(set);
+
+        assert_eq!(
+            task_ended.recv_timeout(HANG_GUARD),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the dropped set must abort its task"
+        );
+    }
+
+    #[test]
+    fn try_join_next_returns_only_tasks_that_already_ended() {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let mut set = NativeTaskSet::default();
+        set.spawn(async move {
+            let _ = released.await;
+            1
+        })
+        .expect("live task");
+        set.spawn(async { 2 }).expect("finished task");
+
+        let deadline = Instant::now() + HANG_GUARD;
+        let finished = loop {
+            if let Some(outcome) = set.try_join_next() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the finished task was never reaped"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(finished, NativeTaskOutcome::Completed(2));
+        assert_eq!(set.try_join_next(), None, "the live task is not awaited");
+        assert_eq!(set.len(), 1);
+
+        release.send(()).expect("release the live task");
+        let live = block_on(timeout(HANG_GUARD, set.join_next()))
+            .expect("native root")
+            .expect("the live task ends");
+        assert_eq!(live, Some(NativeTaskOutcome::Completed(1)));
+        assert!(set.is_empty());
+    }
+
     #[test]
     fn a_missing_tokio_runtime_is_counted_per_site_and_a_present_one_is_not() {
         const SITE: &str = "native_runtime.tests.tokio_handle";
@@ -438,6 +998,36 @@ mod tests {
         assert!(tokio_handle(SITE).is_some());
         assert_eq!(tokio_runtime_missing_count(SITE), before + 1);
         assert_eq!(tokio_runtime_missing_total(), before_total + 1);
+    }
+
+    #[tokio::test]
+    async fn on_blocking_pool_never_polls_on_a_tokio_caller_thread() {
+        let caller = std::thread::current().id();
+        let in_place = off_native_thread(async { std::thread::current().id() })
+            .await
+            .expect("in-place poll");
+        assert_eq!(
+            in_place, caller,
+            "off_native_thread polls a Tokio caller in place"
+        );
+
+        let polled_on = on_blocking_pool(async {
+            sleep_until(Instant::now() + Duration::from_millis(1))
+                .await
+                .expect("native timer");
+            (std::thread::current().id(), ON_BLOCKING_POOL.get())
+        })
+        .await
+        .expect("blocking-pool poll");
+
+        assert_ne!(
+            polled_on.0, caller,
+            "the future must leave the Tokio worker"
+        );
+        assert!(
+            polled_on.1,
+            "the future must be polled on the native blocking pool"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -481,6 +1071,36 @@ mod tests {
         assert_eq!(
             outcome,
             NativeTaskOutcome::Completed((Ok(7), Err(TimeoutError::Elapsed), true))
+        );
+    }
+
+    #[test]
+    fn off_native_thread_moves_a_native_caller_and_keeps_its_awaits_working() {
+        let off_native = || async {
+            let parked_thread = Runtime::current_handle().is_none();
+            let slept = sleep_until(Instant::now() + Duration::from_millis(5)).await;
+            let blocking = spawn_blocking(|| 7).await;
+            (parked_thread, slept, blocking)
+        };
+        let task = NativeTask::spawn(async move {
+            let caller_was_native = Runtime::current_handle().is_some();
+            (caller_was_native, off_native_thread(off_native()).await)
+        })
+        .expect("native task");
+        assert_eq!(
+            block_on(task.wait()).expect("process runtime"),
+            NativeTaskOutcome::Completed((true, Ok((true, Ok(()), Ok(7)))))
+        );
+        let in_place = std::thread::spawn(move || {
+            let thread = std::thread::current().id();
+            off_native_thread(async move { std::thread::current().id() == thread }).now_or_never()
+        })
+        .join()
+        .expect("plain thread");
+        assert_eq!(
+            in_place,
+            Some(Ok(true)),
+            "a non-native caller polls in place"
         );
     }
 
@@ -591,14 +1211,70 @@ mod tests {
         assert!(payload.message().contains("native task failure"));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn work_spawned_off_native_threads_runs_on_the_blocking_pool_and_aborts_there() {
+        let finished = NativeTask::spawn_off_native_thread(async {
+            sleep_until(Instant::now() + Duration::from_millis(5))
+                .await
+                .expect("native timer from the blocking pool");
+            Runtime::current_handle().is_none()
+        })
+        .expect("blocking-pool task");
+        assert_eq!(
+            tokio::time::timeout(HANG_GUARD, finished.wait()).await,
+            Ok(NativeTaskOutcome::Completed(true)),
+            "the work must not run on a native worker"
+        );
+
+        struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send(());
+                }
+            }
+        }
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (dropping, dropped) = tokio::sync::oneshot::channel();
+        let pending = NativeTask::spawn_off_native_thread(async move {
+            let _signal = SignalOnDrop(Some(dropping));
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        })
+        .expect("blocking-pool task");
+        running.await.expect("work started");
+        pending.abort();
+        assert_eq!(
+            tokio::time::timeout(HANG_GUARD, pending.wait()).await,
+            Ok(NativeTaskOutcome::Cancelled)
+        );
+        tokio::time::timeout(HANG_GUARD, dropped)
+            .await
+            .expect("abort must drop the work on its pool thread")
+            .expect("the work signals its drop");
+
+        let panicked = NativeTask::<()>::spawn_off_native_thread(async { panic!("pool failure") })
+            .expect("blocking-pool task");
+        let NativeTaskOutcome::Panicked(payload) =
+            tokio::time::timeout(HANG_GUARD, panicked.wait())
+                .await
+                .expect("a panicked task must settle")
+        else {
+            panic!("expected a panic outcome");
+        };
+        assert!(payload.message().contains("pool failure"));
+    }
+
     #[test]
     fn a_task_dropped_by_its_runtime_reports_cancelled() {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("test runtime");
-        let task = runtime.block_on(async {
-            NativeTask::spawn(std::future::pending::<()>()).expect("native task")
+        let mut task = None;
+        runtime.block_on(async {
+            task = Some(NativeTask::spawn(std::future::pending::<()>()).expect("native task"));
         });
+        let task = task.expect("spawned");
         drop(runtime);
         assert_eq!(task.try_finished(), Some(NativeTaskOutcome::Cancelled));
     }
@@ -781,10 +1457,222 @@ mod tests {
 
     #[test]
     fn install_after_the_default_runtime_started_is_refused() {
-        process_runtime().expect("default process runtime");
+        handle().expect("default process runtime");
         assert_eq!(
             install(RuntimeBuilder::multi_thread()).err(),
             Some(InstallError::AlreadyStarted)
+        );
+    }
+
+    #[cfg(unix)]
+    const SPIN: Duration = Duration::from_millis(150);
+    #[cfg(unix)]
+    const WAKE_BOUND: Duration = Duration::from_millis(40);
+
+    fn spin(duration: Duration) {
+        let spun = Instant::now();
+        while spun.elapsed() < duration {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// #3994: on two workers, task A wakes on its socket, so the idle reactor
+    /// leader runs it, then spins for [`SPIN`], inline in that poll or on the
+    /// blocking pool. Task B's socket becomes readable 10 ms into the spin.
+    /// Returns how long after that B woke.
+    #[cfg(unix)]
+    fn socket_wake_behind_a_spinning_task(spin_on_blocking_pool: bool) -> Duration {
+        use asupersync::io::AsyncReadExt;
+        use asupersync::net::unix::UnixStream;
+        use std::io::Write;
+
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .blocking_threads(1, 1)
+            .build()
+            .expect("test runtime");
+        let (mut a_tx, a_rx) = std::os::unix::net::UnixStream::pair().expect("socket a");
+        let (mut b_tx, b_rx) = std::os::unix::net::UnixStream::pair().expect("socket b");
+        let (woke, wakes) = std::sync::mpsc::channel::<(char, Instant)>();
+        let spawn_reader = |name: char, rx: std::os::unix::net::UnixStream, then: Duration| {
+            let woke = woke.clone();
+            runtime
+                .handle()
+                .try_spawn(async move {
+                    rx.set_nonblocking(true).expect("nonblocking");
+                    let mut rx = UnixStream::from_std(rx).expect("native socket");
+                    rx.read_exact(&mut [0_u8; 1]).await.expect("read");
+                    let _ = woke.send((name, Instant::now()));
+                    if spin_on_blocking_pool {
+                        spawn_blocking(move || spin(then)).await.expect("pool spin");
+                    } else {
+                        spin(then);
+                    }
+                })
+                .expect("spawn reader")
+        };
+        let _a = spawn_reader('a', a_rx, SPIN);
+        let _b = spawn_reader('b', b_rx, Duration::ZERO);
+        // Both readers park on the reactor and both workers go idle.
+        std::thread::sleep(Duration::from_millis(100));
+
+        a_tx.write_all(b"a").expect("wake a");
+        assert_eq!(wakes.recv_timeout(HANG_GUARD).expect("a wakes").0, 'a');
+        std::thread::sleep(Duration::from_millis(10));
+        let readable = Instant::now();
+        b_tx.write_all(b"b").expect("wake b");
+        let (name, woke_at) = wakes.recv_timeout(HANG_GUARD).expect("b wakes");
+        assert_eq!(name, 'b');
+        woke_at.duration_since(readable)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_long_poll_does_not_delay_another_tasks_socket_wake() {
+        let latency = socket_wake_behind_a_spinning_task(false);
+        assert!(
+            latency < WAKE_BOUND,
+            "b woke {latency:?} after its socket became readable, behind a's {SPIN:?} poll"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn work_on_the_blocking_pool_does_not_delay_another_tasks_socket_wake() {
+        let latency = socket_wake_behind_a_spinning_task(true);
+        assert!(
+            latency < WAKE_BOUND,
+            "b woke {latency:?} after its socket became readable, behind a's {SPIN:?} pool spin"
+        );
+    }
+
+    #[track_caller]
+    fn spawned_here<T: Clone + Send + Sync + 'static>(
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> (NativeTask<T>, &'static std::panic::Location<'static>) {
+        (
+            NativeTask::spawn(work).expect("native task"),
+            std::panic::Location::caller(),
+        )
+    }
+
+    /// The guard's window encloses the spin, so a descheduled worker only
+    /// lengthens the measured poll.
+    #[test]
+    fn a_long_native_poll_completes_and_is_counted_at_its_spawn_site() {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("test runtime");
+        let (long, short) = runtime.block_on(async {
+            let (task, site) = spawned_here(async {
+                spin(LONG_POLL + Duration::from_millis(50));
+                7
+            });
+            let long = (task.wait().await, site);
+            let (task, site) = spawned_here(async { 8 });
+            (long, (task.wait().await, site))
+        });
+        assert_eq!(long.0, NativeTaskOutcome::Completed(7));
+        assert_eq!(long_native_polls().get(long.1), Some(&1), "{}", long.1);
+        assert_eq!(short.0, NativeTaskOutcome::Completed(8));
+        assert_eq!(long_native_polls().get(short.1), None, "{}", short.1);
+    }
+
+    /// Queued instead, the inner work would wait for a second pool thread
+    /// while the outer one holds the first; a full pool never frees one.
+    #[test]
+    fn blocking_work_spawned_from_the_blocking_pool_runs_on_the_same_thread() {
+        let (outer, inner) = block_on(spawn_blocking(|| {
+            let inner = spawn_blocking(|| std::thread::current().id()).now_or_never();
+            (std::thread::current().id(), inner)
+        }))
+        .expect("process runtime")
+        .expect("outer blocking work");
+        assert_eq!(inner, Some(Ok(outer)));
+    }
+
+    /// A fresh one-thread pool, so the thread has run no other queued work.
+    #[test]
+    fn blocking_work_from_a_task_spawned_off_native_threads_runs_on_its_thread() {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .blocking_threads(1, 1)
+            .build()
+            .expect("test runtime");
+        let outcome = runtime.block_on(async {
+            NativeTask::spawn_off_native_thread(async {
+                spawn_blocking(|| std::thread::current().id()).now_or_never()
+                    == Some(Ok(std::thread::current().id()))
+            })
+            .expect("blocking-pool task")
+            .wait()
+            .await
+        });
+        assert_eq!(outcome, NativeTaskOutcome::Completed(true));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn current_thread_stack_size() -> usize {
+        let mut attributes = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
+        let mut size = 0;
+        // SAFETY: `pthread_getattr_np` initializes `attributes` for the calling
+        // thread before `pthread_attr_getstacksize` reads it, and they are
+        // destroyed once, after that read.
+        unsafe {
+            assert_eq!(
+                libc::pthread_getattr_np(libc::pthread_self(), attributes.as_mut_ptr()),
+                0
+            );
+            assert_eq!(
+                libc::pthread_attr_getstacksize(attributes.as_ptr(), &raw mut size),
+                0
+            );
+            libc::pthread_attr_destroy(attributes.as_mut_ptr());
+        }
+        size
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn blocking_pool_threads_get_the_runtime_thread_stack_size() {
+        const STACK: usize = 16 * 1024 * 1024;
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .thread_stack_size(STACK)
+            .blocking_threads(1, 2)
+            .build()
+            .expect("test runtime");
+        let stack = runtime
+            .block_on(async { spawn_blocking(current_thread_stack_size).await })
+            .expect("blocking work");
+        assert!(stack >= STACK, "pool thread stack is {stack} bytes");
+    }
+
+    #[test]
+    fn the_lateness_canary_records_a_wake_held_behind_a_long_poll() {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let canary = spawn_lateness_canary().expect("canary");
+            sleep_until(Instant::now() + Duration::from_millis(20))
+                .await
+                .expect("let the canary arm its first timer");
+            NativeTask::spawn(async { spin(CANARY_TICK + LONG_POLL * 3) })
+                .expect("spinning task")
+                .wait()
+                .await;
+            sleep_until(Instant::now() + CANARY_TICK)
+                .await
+                .expect("let the canary record its overdue wake");
+            canary.abort();
+        });
+        let lateness = scheduling_lateness();
+        assert!(
+            lateness.late_ticks >= 1 && lateness.worst >= LONG_POLL,
+            "{lateness:?}"
         );
     }
 

@@ -1,6 +1,6 @@
 use super::{
-    CommitEvidence, CommitRelation, CommitSessionRecord, GitCorrelationError, SessionGitSpan,
-    SpanObservation, SpanOverlapKind, digest_bytes, normalize_worktree, observation_extends_span,
+    CommitEvidence, CommitRelation, CommitSessionRecord, SessionGitSpan, SpanObservation,
+    SpanOverlapKind, digest_bytes, normalize_worktree, observation_extends_span,
     providers_compatible,
 };
 
@@ -147,10 +147,14 @@ pub enum TargetScan {
     /// repository. Historical attribution is unavailable for this target,
     /// but retrying cannot restore the archived ref.
     MissingReference,
-    /// The scan could not run, the worktree is gone, `git log` failed, or the
-    /// repository was unreadable. Distinct from `Scanned(vec![])`: the target's
-    /// commits are unknown, not absent, so the sweep watermark must not move
-    /// past it or the target would never be revisited.
+    /// The worktree directory is gone or is no longer a Git repository, as a
+    /// deleted agent worktree is. Terminal for the spans already retained: a
+    /// later session at the same path records new spans, which scan afresh.
+    MissingWorktree,
+    /// `git log` or the reference lookup failed in a repository that still
+    /// exists. Distinct from `Scanned(vec![])`: the target's commits are
+    /// unknown, not absent, so attribution retries it a bounded number of
+    /// passes before it gives the target up.
     Unavailable,
 }
 
@@ -158,7 +162,10 @@ pub enum TargetScan {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommitAttribution {
     pub records: Vec<CommitSessionRecord>,
+    /// Targets whose branch or worktree no longer resolves.
     pub unavailable_references: usize,
+    /// Worktrees of the [`TargetScan::Unavailable`] targets.
+    pub retryable_targets: Vec<String>,
 }
 
 pub fn stable_backfill_span(
@@ -399,7 +406,7 @@ pub fn attribute_commits<F>(
     spans: &[SessionGitSpan],
     gap_secs: i64,
     mut scan: F,
-) -> Result<CommitAttribution, GitCorrelationError>
+) -> CommitAttribution
 where
     F: FnMut(&SpanScanTarget) -> TargetScan,
 {
@@ -416,11 +423,15 @@ where
                     attribution.unavailable_references.saturating_add(1);
                 continue;
             }
+            TargetScan::MissingWorktree => {
+                warn_missing_worktree_once(&target.worktree);
+                attribution.unavailable_references =
+                    attribution.unavailable_references.saturating_add(1);
+                continue;
+            }
             TargetScan::Unavailable => {
-                return Err(GitCorrelationError::Unavailable(format!(
-                    "cannot scan Git history for retained span target {}",
-                    target.worktree
-                )));
+                attribution.retryable_targets.push(target.worktree.clone());
+                continue;
             }
         };
         for commit in commits {
@@ -434,7 +445,24 @@ where
             ));
         }
     }
-    Ok(attribution)
+    attribution
+}
+
+/// Spans still inside their merge gap rescan every pass until the gap closes,
+/// so the warning is kept to one per worktree per process.
+fn warn_missing_worktree_once(worktree: &str) {
+    static WARNED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let first = WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(worktree.to_owned());
+    if first {
+        tracing::warn!(
+            worktree,
+            "retained span target worktree is gone or no longer a Git repository; its historical commit attribution is unavailable"
+        );
+    }
 }
 
 #[cfg(test)]

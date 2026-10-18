@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use tempfile::TempDir;
 
@@ -414,20 +415,23 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
 
 const GIT_HISTORY_SEQUENCE_FRONTIER_KEY: &str = "git_history_change_sequence_frontier";
 
-fn incremental_git(repo: &Path) -> FakeGit {
-    FakeGit {
+fn incremental_git(repo: &Path) -> Arc<FakeGit> {
+    Arc::new(FakeGit {
         timeline: vec![
             (T_BASE + 300, Some("feature".to_string())),
             (T_BASE + 600, Some("main".to_string())),
         ],
         current: Some("main".to_string()),
         real_repo: repo.to_path_buf(),
-    }
+    })
 }
 
 /// One production convergence pass that must settle without a later failure.
-async fn converge(db: &HostAdmissionTestRuntimeV1, git: &FakeGit) -> BackfillStats {
-    let outcome = db.converge_git_evidence_for_test(git, None).await.unwrap();
+async fn converge(db: &HostAdmissionTestRuntimeV1, git: &Arc<FakeGit>) -> BackfillStats {
+    let outcome = db
+        .converge_git_evidence_for_test(git.clone(), None)
+        .await
+        .unwrap();
     assert_eq!(outcome.later_failure, None);
     outcome.pass.backfill
 }
@@ -561,7 +565,7 @@ async fn large_catch_up_converges_in_one_pass_and_then_stays_settled() {
     let scope = ObservationScopeV1::Project { project_id };
 
     let first = db
-        .converge_git_evidence_for_test(&SystemGit, None)
+        .converge_git_evidence_for_test(Arc::new(SystemGit), None)
         .await
         .unwrap();
     assert_eq!(first.later_failure, None);

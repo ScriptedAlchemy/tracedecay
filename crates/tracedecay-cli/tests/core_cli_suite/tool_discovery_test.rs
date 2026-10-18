@@ -1,4 +1,4 @@
-//! Behavioral discovery and help checks for the shell MCP-tool surface.
+//! Behavioral discovery and help checks for the shell MCP-tool interface.
 //!
 //! Both sides of every comparison come from this test run: the catalog this
 //! test process links and the `tracedecay` binary Cargo built for the same run

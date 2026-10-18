@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tracedecay_domain::{ProjectId, UserProfileId};
 use tracedecay_store_runtime::{RemoteRecoveryAdmission, RemoteRecoveryProjectLifecycle};
@@ -19,7 +19,9 @@ pub(in crate::daemon) struct RemoteRecoveryProjectLifecycleV1 {
     profile_id: UserProfileId,
     profile_root: PathBuf,
     gate: Arc<StoreWriterGates>,
-    session_runtime_registries: super::SharedSessionRuntimeRegistries,
+    // Weak: the registry this lifecycle is installed into lives in this map,
+    // so a strong handle would keep the registry and every store it owns alive.
+    session_runtime_registries: Weak<tokio::sync::Mutex<super::SessionRuntimeRegistries>>,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<super::project_retirement::ProjectServerRetirement>>>,
 }
@@ -86,7 +88,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
             profile_id: identity.profile_id().clone(),
             profile_root: authority::canonical_identity_path(identity.profile_root())?,
             gate: Arc::clone(&administration.gate),
-            session_runtime_registries: Arc::clone(&administration.session_runtime_registries),
+            session_runtime_registries: Arc::downgrade(&administration.session_runtime_registries),
             project_server_retirements: Arc::clone(&administration.project_server_retirements),
         })
     }
@@ -133,7 +135,12 @@ impl RemoteRecoveryProjectLifecycleV1 {
 
     async fn ensure_project_recovery_active(&self, project_id: &ProjectId) -> Result<()> {
         let registry = {
-            let registries = self.session_runtime_registries.lock().await;
+            let registries = self.session_runtime_registries.upgrade().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "remote recovery profile registry is unavailable".to_owned(),
+                }
+            })?;
+            let registries = registries.lock().await;
             registries
                 .get(&self.profile_root)
                 .and_then(|entry| entry.registry.get())
@@ -256,7 +263,7 @@ pub(super) async fn retire_runtime_work(
     #[cfg(unix)]
     retire_maintenance_tasks(automation, tracked_retirements, profile_root, project_id).await;
     for (owner, servers) in server_retirements {
-        let task = tokio::spawn(async move {
+        let retirement = async move {
             // Replay is a data-root owner outside the MCP server task set and
             // retains the exact ProjectSessions client used for native lifecycle
             // delivery. Join it inside the tracked retirement deadline before
@@ -270,8 +277,9 @@ pub(super) async fn retire_runtime_work(
                 .await;
             }
             super::super::project_server_lifecycle::retire_project_servers_now(servers).await;
-        });
-        super::project_retirement::track_retirement_task(tracked_retirements, owner, task).await;
+        };
+        super::project_retirement::track_tokio_retirement(tracked_retirements, owner, retirement)
+            .await;
     }
     let deadline = std::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
     let receipt = super::project_retirement::settle_project_retirements(

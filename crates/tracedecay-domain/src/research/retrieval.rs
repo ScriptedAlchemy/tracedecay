@@ -44,14 +44,6 @@ impl TryFrom<String> for PrivacyDomainBoundLocatorDigest {
     }
 }
 
-impl TryFrom<&str> for PrivacyDomainBoundLocatorDigest {
-    type Error = DomainError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::try_from(value.to_owned())
-    }
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PayloadAccessState {

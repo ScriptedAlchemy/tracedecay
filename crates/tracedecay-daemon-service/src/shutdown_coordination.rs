@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 use tracedecay_store_runtime::ShutdownStatus;
 
 pub struct ShutdownCoordinatorV1 {
@@ -22,6 +22,12 @@ struct ShutdownCoordinatorCompletion(Arc<ShutdownCoordinatorState>);
 
 impl Drop for ShutdownCoordinatorCompletion {
     fn drop(&mut self) {
+        // Work that panicked unwinds through here without a receipt.
+        if std::thread::panicking() {
+            self.0.finish(ShutdownStatus::Failed(
+                "MCP shutdown work panicked".to_owned(),
+            ));
+        }
         self.0.changed.notify_waiters();
     }
 }
@@ -37,13 +43,12 @@ impl Default for ShutdownCoordinatorV1 {
 impl ShutdownCoordinatorV1 {
     pub async fn coordinate_until<Work>(
         &self,
-        deadline: impl Into<std::time::Instant>,
+        deadline: std::time::Instant,
         work: Work,
     ) -> ShutdownStatus
     where
         Work: std::future::Future<Output = ShutdownStatus> + Send + 'static,
     {
-        let deadline = deadline.into();
         let mut work = Some(work);
         loop {
             self.reap_completed_coordinator().await;
@@ -81,23 +86,14 @@ impl ShutdownCoordinatorV1 {
                 return status;
             }
 
-            // The MCP server's shutdown work still joins Tokio-owned tasks, so
-            // it runs on Tokio while the coordinator that owns it does not.
             let started = work
                 .take()
                 .ok_or_else(|| "MCP shutdown coordinator lost its work future".to_owned())
                 .and_then(|work| {
-                    let runtime =
-                        native_runtime::tokio_handle("daemon-service.shutdown_coordination.runner")
-                            .ok_or_else(|| "MCP shutdown work found no Tokio runtime".to_owned())?;
                     let state = Arc::clone(&self.state);
                     NativeTask::spawn(async move {
                         let _completion = ShutdownCoordinatorCompletion(Arc::clone(&state));
-                        let status = match runtime.spawn(work).await {
-                            Ok(status) => status,
-                            Err(error) => ShutdownStatus::Failed(error.to_string()),
-                        };
-                        state.finish(status);
+                        state.finish(work.await);
                     })
                     .map_err(|error| format!("MCP shutdown coordinator was not started: {error}"))
                 });
@@ -226,6 +222,8 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    use tracedecay_runtime_core::native_runtime;
+
     /// The bounded wait times out on the native clock, so a waiter driven by
     /// no Tokio runtime still returns at its deadline, and not before it.
     #[test]
@@ -247,30 +245,50 @@ mod tests {
         );
     }
 
-    /// The coordinator runs on the native runtime; the MCP shutdown work it
-    /// owns still needs Tokio, so a caller without one gets a typed failure.
+    /// The coordinator and the MCP shutdown work it owns both run on the
+    /// native runtime, so a caller with no Tokio runtime gets the work's own
+    /// receipt.
     #[test]
-    fn coordinating_without_a_tokio_runtime_fails_with_a_typed_status() {
-        const SITE: &str = "daemon-service.shutdown_coordination.runner";
+    fn coordinating_without_a_tokio_runtime_runs_the_work_on_the_native_runtime() {
         let coordinator = ShutdownCoordinatorV1::default();
-        let missing = native_runtime::tokio_runtime_missing_count(SITE);
         let status = native_runtime::block_on(async {
             assert!(tokio::runtime::Handle::try_current().is_err());
             coordinator
                 .coordinate_until(Instant::now() + Duration::from_secs(5), async {
-                    ShutdownStatus::Clean
+                    if tokio::runtime::Handle::try_current().is_ok() {
+                        return ShutdownStatus::Failed("work ran on Tokio".to_owned());
+                    }
+                    native_runtime::sleep_until(Instant::now() + Duration::from_millis(1))
+                        .await
+                        .map_or_else(ShutdownStatus::Failed, |()| ShutdownStatus::Clean)
                 })
                 .await
         })
         .expect("native runtime");
 
+        assert_eq!(status, ShutdownStatus::Clean);
+    }
+
+    /// Work that panics reports a failure at once instead of holding its
+    /// caller until the deadline.
+    #[test]
+    fn panicking_work_fails_before_the_deadline() {
+        let coordinator = ShutdownCoordinatorV1::default();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let fail = true;
+        let status = native_runtime::block_on(coordinator.coordinate_until(deadline, async move {
+            assert!(!fail, "shutdown work failed on purpose");
+            ShutdownStatus::Clean
+        }))
+        .expect("native runtime");
+
         assert_eq!(
             status,
-            ShutdownStatus::Failed("MCP shutdown work found no Tokio runtime".to_owned())
+            ShutdownStatus::Failed("MCP shutdown work panicked".to_owned())
         );
-        assert_eq!(
-            native_runtime::tokio_runtime_missing_count(SITE) - missing,
-            1
+        assert!(
+            Instant::now() < deadline,
+            "the panic must not wait out the deadline"
         );
     }
 

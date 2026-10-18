@@ -30,7 +30,7 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::git_repository::{GitRepositoryAuthority, GitRepositoryStatus};
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
-use super::store::SharedDaemonNativeIntegrationStore;
+use super::store::DaemonNativeIntegrationStore;
 
 #[derive(Clone)]
 pub struct DaemonAuthorizedScopeSetReader {
@@ -261,7 +261,7 @@ pub struct DaemonNativeWorktreeAuthority {
     pub(super) repository_id: RepositoryId,
     pub(super) repository_root: PathBuf,
     pub(super) repository_common_dir: PathBuf,
-    pub(super) store: SharedDaemonNativeIntegrationStore,
+    pub(super) store: DaemonNativeIntegrationStore,
     pub(super) holder_fence: WorktreeHolderAdmissionFenceV1,
     inventory_epoch: AtomicU64,
 }
@@ -272,7 +272,7 @@ impl DaemonNativeWorktreeAuthority {
         project_id: ProjectId,
         repository_id: RepositoryId,
         repository_root: &Path,
-        store: SharedDaemonNativeIntegrationStore,
+        store: DaemonNativeIntegrationStore,
     ) -> Result<Self, WorktreeContractError> {
         project_id.validate()?;
         repository_id.validate()?;
@@ -677,22 +677,23 @@ impl NativeWorktreePort for DaemonNativeWorktreeAuthority {
         )))
     }
 
-    fn remove(
+    async fn remove(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
         scope_set: &AuthorizedScopeSet,
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
-        self.remove_cleanup(request, scope_set, cancellation)
+        self.remove_cleanup(request, scope_set, cancellation).await
     }
 
-    fn reconcile(
+    async fn reconcile(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,
         scope_set: &AuthorizedScopeSet,
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
         self.reconcile_cleanup(request, scope_set, cancellation)
+            .await
     }
 }
 

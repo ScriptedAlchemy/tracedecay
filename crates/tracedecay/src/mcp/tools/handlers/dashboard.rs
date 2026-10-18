@@ -33,12 +33,13 @@ use tracedecay_daemon_service::{ProjectRuntimePublicationStateV1, ProjectRuntime
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 
 use tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter;
 
 use code_reads::DashboardCodeReadAdapter;
 use tracedecay_dashboard_api::{
-    AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
+    AutomationSchedulerReconciler, ConnectionExecutor, DEFAULT_PORT, DashboardApplicationRouters,
     DashboardApplicationRuntime, DashboardAutomationWriter,
     DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
     DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
@@ -513,7 +514,7 @@ struct RunningDashboard {
     url: String,
     addr: std::net::SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<()>,
+    task: Arc<NativeTask<()>>,
     completed: Arc<tokio::sync::Semaphore>,
 }
 
@@ -530,7 +531,7 @@ impl RunningDashboard {
 ///
 /// The signal is level triggered on purpose. A `Notify::notify_waiters` only
 /// wakes the waiters already registered, and the drop runs strictly before
-/// the runtime marks the `JoinHandle` finished, so a stop that registered in
+/// the runtime marks the task finished, so a stop that registered in
 /// between observed neither the wake nor `is_finished` and then slept until
 /// its deadline. A closed semaphore is observable by every later waiter:
 /// `is_closed` reports it synchronously and `acquire` resolves at once.
@@ -570,16 +571,19 @@ async fn take_finished_dashboard_for(project_root: &Path) -> Option<RunningDashb
 
 async fn join_dashboard(dashboard: RunningDashboard, exceeded_deadline: bool) -> Result<()> {
     let url = format!("http://{}/", dashboard.addr);
-    match dashboard.task.await {
-        Ok(()) if !exceeded_deadline => Ok(()),
-        Ok(()) => Err(TraceDecayError::Config {
+    match dashboard.task.wait().await {
+        NativeTaskOutcome::Completed(()) if !exceeded_deadline => Ok(()),
+        NativeTaskOutcome::Completed(()) => Err(TraceDecayError::Config {
             message: format!("dashboard '{url}' exceeded its shutdown deadline"),
         }),
-        Err(error) if error.is_cancelled() && exceeded_deadline => Err(TraceDecayError::Config {
+        NativeTaskOutcome::Cancelled if exceeded_deadline => Err(TraceDecayError::Config {
             message: format!("dashboard '{url}' was aborted after its shutdown deadline"),
         }),
-        Err(error) => Err(TraceDecayError::Config {
-            message: format!("dashboard '{url}' task failed: {error}"),
+        NativeTaskOutcome::Cancelled => Err(TraceDecayError::Config {
+            message: format!("dashboard '{url}' task failed: task was cancelled"),
+        }),
+        NativeTaskOutcome::Panicked(payload) => Err(TraceDecayError::Config {
+            message: format!("dashboard '{url}' task failed: {payload:?}"),
         }),
     }
 }
@@ -652,10 +656,10 @@ pub(crate) async fn shutdown_dashboard_until(deadline: std::time::Instant) -> Re
         let manager = get_manager().lock().await;
         (
             manager.keys().cloned().collect::<Vec<_>>(),
-            crate::daemon::AbortTasksOnDrop(
+            AbortDashboardsOnDrop(
                 manager
                     .values()
-                    .map(|dashboard| dashboard.task.abort_handle())
+                    .map(|dashboard| Arc::clone(&dashboard.task))
                     .collect(),
             ),
         )
@@ -671,6 +675,18 @@ pub(crate) async fn shutdown_dashboard_until(deadline: std::time::Instant) -> Re
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+/// Aborts every dashboard task it holds when a whole-daemon stop is dropped
+/// before joining them.
+struct AbortDashboardsOnDrop(Vec<Arc<NativeTask<()>>>);
+
+impl Drop for AbortDashboardsOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
     }
 }
 
@@ -1104,13 +1120,16 @@ pub(super) async fn compute_dashboard(
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
             let completed = Arc::new(tokio::sync::Semaphore::new(0));
             let task_completion = DashboardTaskCompletion(Arc::clone(&completed));
-            let task = tokio::spawn(async move {
+            let task = NativeTask::spawn(async move {
                 let _completion = task_completion;
-                serve_loopback(listener, app, async move {
+                serve_loopback(ConnectionExecutor::Native, listener, app, async move {
                     let _ = shutdown_rx.await;
                 })
                 .await;
-            });
+            })
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("the hosted dashboard could not start: {error}"),
+            })?;
 
             guard.insert(
                 requested_root,
@@ -1118,7 +1137,7 @@ pub(super) async fn compute_dashboard(
                     url: url.clone(),
                     addr,
                     shutdown: Some(shutdown_tx),
-                    task,
+                    task: Arc::new(task),
                     completed,
                 },
             );

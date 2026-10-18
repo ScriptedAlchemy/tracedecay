@@ -1259,7 +1259,11 @@ fn shutting_down_off_tokio_empties_the_registry() {
     })
     .expect("native runtime");
 
-    assert!(shut_down, "the off-Tokio drain completes");
+    assert_eq!(
+        shut_down,
+        super::ProjectRuntimesStop::Stopped,
+        "the off-Tokio drain completes"
+    );
     assert!(registry.is_empty());
     assert_eq!(
         tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits(),

@@ -9,13 +9,13 @@ use tracedecay_contracts::remote::composition::{
 };
 use tracedecay_contracts::remote::credential_admission::RemoteCredentialUseV1;
 use tracedecay_contracts::remote::protocol::{
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    RemoteProtocolFutureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
 };
 use tracedecay_contracts::remote::query::{
     RemoteExactObservationQueryProtocolAdapterV1, RemoteExactObservationQueryServiceV1,
     RemoteQueryRequestV1, RemoteQueryResultV1,
 };
-use tracedecay_contracts::{ApplicationContractError, ApplicationOutcome, OperationTermination};
+use tracedecay_contracts::{ApplicationOutcome, OperationTermination};
 use tracedecay_domain::{
     CoverageStateV1, CurrentRemoteAuthorityStateV1, ObservedTernaryV1,
     RemoteAuthorityUnavailableReasonV1, RemoteCoverageObservedV1, RemoteOperationV1, UtcMicros,
@@ -55,11 +55,12 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
         &self,
         request: RemoteProtocolRequestV1<RemoteQueryRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        let expected_shards = request.body.expected_shards.len();
-        let response = match self
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let request_id = request.request_id.clone();
+            let observed_at = request.sent_at;
+            let expected_shards = request.body.expected_shards.len();
+            let response = match self
             .credentials
             .storage_for_presented(RemoteCredentialUseV1::Query, &credential)
         {
@@ -75,7 +76,8 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
                         )),
                     ),
                 )
-                .execute(request, credential)?
+                .execute(request, credential)
+                .await?
             }
             Err(_) => remote_authority_unavailable_response(
                 request_id,
@@ -84,17 +86,18 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
                     remote_exact_observation_query_result_contract_v1(),
             )?,
         };
-        if let Ok(envelope) = &response.result {
-            let producer = self
-                .invocation
-                .observability_producer_for_brain_profile_project(
-                    self.credentials.brain_id(),
-                    self.credentials.profile_id(),
-                    &envelope.scope.project_id,
-                );
-            record_remote_query_response(producer.as_deref(), expected_shards, &response);
-        }
-        Ok(response)
+            if let Ok(envelope) = &response.result {
+                let producer = self
+                    .invocation
+                    .observability_producer_for_brain_profile_project(
+                        self.credentials.brain_id(),
+                        self.credentials.profile_id(),
+                        &envelope.scope.project_id,
+                    );
+                record_remote_query_response(producer.as_deref(), expected_shards, &response);
+            }
+            Ok(response)
+        })
     }
 }
 

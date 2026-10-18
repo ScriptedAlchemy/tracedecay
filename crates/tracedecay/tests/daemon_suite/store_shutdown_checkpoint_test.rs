@@ -27,7 +27,7 @@ use crate::code_index_journey::{
 };
 use crate::common::{
     IsolatedHome, daemon_authority_path, daemon_socket_path, poll_until,
-    spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with, tracedecay_command_with_home,
+    spawn_tracedecay_daemon_logged, tracedecay_command_with_home,
 };
 
 const ANCHOR: &str = "shutdown_checkpoint_anchor";
@@ -105,7 +105,8 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
     let revision = initialize_repository(&project);
 
     let socket = daemon_socket_path(environment.home());
-    let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let log_path = environment.scratch().join("graceful-stop.log");
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
     let handshake = tracedecay::daemon::handshake_for_current_client(
@@ -147,8 +148,9 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
         assert_eq!(
             wal_bytes(store),
             0,
-            "a stopped daemon keeps no WAL for {}",
-            store.display()
+            "a stopped daemon keeps no WAL for {}; log={}",
+            store.display(),
+            fs::read_to_string(&log_path).unwrap_or_default()
         );
     }
 }
@@ -824,6 +826,10 @@ async fn capacity_retirement_completes_while_a_maintenance_tick_runs() {
     fs::remove_file(&tick_hold).expect("release the parked maintenance tick");
 
     let log = fs::read_to_string(&log_path).expect("daemon log");
+    assert!(
+        !log.contains("panicked"),
+        "the maintenance tick must stay parked through the retirement; log={log}"
+    );
     assert!(
         !log.contains("project_server_capacity_reached"),
         "a running maintenance tick must not block capacity retirement; log={log}"

@@ -315,135 +315,6 @@ impl GlobalDbObservationStore {
         Ok(RefusalCoverageOutcome::Recorded)
     }
 
-    /// The runtime key for this coverage is already committed, so the writer
-    /// will not run the command again. If that commit left the cursor behind
-    /// the admitted range, put it back; a missing or different ledger row stays
-    /// a collision.
-    async fn restore_admitted_cursor_coverage(
-        &self,
-        advance: &ObservationCursorAdvance,
-    ) -> ObservationStoreResult<CursorAdvanceOutcome> {
-        const OPERATION: &str = "restore admitted observation source cursor";
-        let source_json = serde_json::to_string(advance.next_cursor().source())
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let scope_json = serde_json::to_string(advance.next_cursor().scope())
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let coverage_json = serde_json::to_string(&advance.coverage())
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let next_cursor_json = serde_json::to_string(advance.next_cursor())
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let transaction = self
-            .database
-            .begin_write_transaction(OPERATION)
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let mut cursor_rows = transaction
-            .query(
-                READ_SOURCE_CURSOR_SQL,
-                tracedecay_runtime_core::db::engine::params![
-                    source_json.as_str(),
-                    scope_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let durable_cursor = cursor_rows
-            .next()
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?
-            .map(|row| {
-                let encoded = row
-                    .get::<String>(0)
-                    .map_err(|error| runtime_storage_error(OPERATION, error))?;
-                serde_json::from_str::<ObservationSourceCursorV1>(&encoded)
-                    .map_err(|error| runtime_storage_error(OPERATION, error))
-            })
-            .transpose()?;
-        drop(cursor_rows);
-        if durable_cursor
-            .as_ref()
-            .is_some_and(|cursor| cursor.reached(advance.next_cursor()))
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| runtime_storage_error(OPERATION, error))?;
-            return Ok(CursorAdvanceOutcome::ExactDuplicate);
-        }
-        if durable_cursor.as_ref() != advance.expected_cursor() {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| runtime_storage_error(OPERATION, error))?;
-            return Err(ObservationStoreError::CursorAdvanceCollision);
-        }
-        let mut ledger_rows = transaction
-            .query(
-                READ_CURSOR_ADVANCE_SQL,
-                tracedecay_runtime_core::db::engine::params![
-                    source_json.as_str(),
-                    scope_json.as_str(),
-                    coverage_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        let ledger = ledger_rows
-            .next()
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?
-            .map(|row| {
-                Ok::<_, ObservationStoreError>((
-                    row.get::<String>(0)
-                        .map_err(|error| runtime_storage_error(OPERATION, error))?,
-                    row.get::<Option<String>>(1)
-                        .map_err(|error| runtime_storage_error(OPERATION, error))?,
-                ))
-            })
-            .transpose()?;
-        drop(ledger_rows);
-        let receipt_id = advance
-            .sanitization_receipt()
-            .map(|receipt| receipt.receipt().receipt_id().as_str());
-        if !cursor_advance_ledger_row_matches(
-            ledger.as_ref(),
-            advance.reason().as_str(),
-            receipt_id,
-        ) {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| runtime_storage_error(OPERATION, error))?;
-            return Err(ObservationStoreError::CursorAdvanceCollision);
-        }
-        transaction
-            .execute(
-                COMMIT_SOURCE_CURSOR_SQL,
-                tracedecay_runtime_core::db::engine::params![
-                    source_json.as_str(),
-                    scope_json.as_str(),
-                    next_cursor_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        transaction
-            .execute(
-                PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
-                tracedecay_runtime_core::db::engine::params![
-                    source_json.as_str(),
-                    scope_json.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| runtime_storage_error(OPERATION, error))?;
-        Ok(CursorAdvanceOutcome::Committed)
-    }
-
     pub async fn converge_projection_predecessor(
         &self,
     ) -> ProjectionStoreResult<ProjectionPredecessorConvergence> {
@@ -1654,7 +1525,7 @@ impl ObservationStore for GlobalDbObservationStore {
         source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
     ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
-        read_runtime_source_cursor(&self.runtime, source, scope)
+        read_runtime_source_cursor(&self.runtime, source, scope).await
     }
 
     async fn committed_source_cursors(
@@ -1668,7 +1539,9 @@ impl ObservationStore for GlobalDbObservationStore {
                 source: source.clone(),
                 scope: scope.clone(),
             },
-        )? {
+        )
+        .await?
+        {
             ObservationReadResultV1::CommittedSourceCursors(cursors) => Ok(cursors),
             _ => Err(runtime_storage_error(
                 "read committed observation source cursors",
@@ -1686,7 +1559,8 @@ impl ObservationStore for GlobalDbObservationStore {
             runtime,
             advance.next_cursor().source(),
             advance.next_cursor().scope(),
-        )?;
+        )
+        .await?;
         // One owner per frontier. A cursor that already reached `next` has
         // recorded the range; a second reason must not become a permanent
         // collision that both ingest owners then warn on forever. The
@@ -1707,7 +1581,7 @@ impl ObservationStore for GlobalDbObservationStore {
             "coverage": advance.coverage(),
         });
         let key = format!("cursor.{}", canonical_runtime_digest(&identity)?);
-        let replay = advance.clone();
+        let next_cursor = advance.next_cursor().clone();
         let payload = RepositoryWritePayloadV1::ObservationCursorAdvance(Box::new(advance));
         let (command_bytes, command_digest) = canonical_json_bytes_and_sha256(
             &runtime_command_value(&payload)?,
@@ -1717,16 +1591,18 @@ impl ObservationStore for GlobalDbObservationStore {
         })?;
         let outcome = submit_runtime_write(
             runtime,
-            payload,
-            command_digest,
+            payload.clone(),
+            command_digest.clone(),
             command_bytes.len(),
             key,
             "advance observation source cursor",
         )
-        .await;
-        match outcome? {
+        .await?;
+        match outcome {
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            | RuntimeSubmitOutcomeV1::ExactReplay { .. }
+            | RuntimeSubmitOutcomeV1::IdempotencyConflict { .. }
                 if reached_frontier =>
             {
                 Ok(CursorAdvanceOutcome::ExactDuplicate)
@@ -1735,19 +1611,52 @@ impl ObservationStore for GlobalDbObservationStore {
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
                 Ok(CursorAdvanceOutcome::Committed)
             }
-            RuntimeSubmitOutcomeV1::ExactReplay { .. } => Ok(CursorAdvanceOutcome::ExactDuplicate),
-            // The idempotency key covers the advanced coverage, not the whole
-            // command, so a re-scan of already-admitted history reuses the key
-            // with different bytes (a fresh `expected_cursor` or resume
-            // checkpoint) and the writer reports a conflict against the earlier
-            // committed receipt. The other owner may also have committed this
-            // key between the pre-check and the writer lookup. Re-read the
-            // durable cursor under one write transaction: an owner that already
-            // reached `next_cursor` holds the range, a matching ledger row whose
-            // commit left the cursor behind gets that cursor restored, and a
-            // missing or different ledger row stays a collision.
-            RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
-                self.restore_admitted_cursor_coverage(&replay).await
+            // The key names the coverage, not the cursor the advance moved
+            // from, so its receipt outlives the cursor state it advanced. A
+            // rescan that resumes behind the admitted frontier (retained
+            // history, or a cursor the startup repair rewound to its last
+            // committed observation) would otherwise replay as a no-op that
+            // leaves the cursor behind, or, once the ledger row is pruned, fail
+            // as a permanent collision on every pass. The writer's
+            // compare-and-swap keeps the advance correct, so it runs again
+            // under its own key.
+            RuntimeSubmitOutcomeV1::ExactReplay { .. }
+            | RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
+                // Another owner may have committed this key after the
+                // pre-check; it owns the range.
+                if read_runtime_source_cursor(runtime, next_cursor.source(), next_cursor.scope())
+                    .await?
+                    .is_some_and(|cursor| cursor.reached(&next_cursor))
+                {
+                    return Ok(CursorAdvanceOutcome::ExactDuplicate);
+                }
+                let key = format!(
+                    "cursor.{}",
+                    canonical_runtime_digest(&serde_json::json!({
+                        "reconcile": identity,
+                        "at": now_micros().0,
+                    }))?
+                );
+                match submit_runtime_write(
+                    runtime,
+                    payload,
+                    command_digest,
+                    command_bytes.len(),
+                    key,
+                    "reconcile observation source cursor",
+                )
+                .await?
+                {
+                    RuntimeSubmitOutcomeV1::Committed { .. }
+                    | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
+                        Ok(CursorAdvanceOutcome::Committed)
+                    }
+                    other => Err(rejected_submit_error(
+                        "reconcile observation source cursor",
+                        "runtime rejected cursor reconciliation",
+                        &other,
+                    )),
+                }
             }
             other => Err(rejected_submit_error(
                 "advance observation source cursor",
@@ -1761,7 +1670,7 @@ impl ObservationStore for GlobalDbObservationStore {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ObservationStoreResult<Option<StoredObservation>> {
-        read_runtime_stored_observation(&self.runtime, observation_id)
+        read_runtime_stored_observation(&self.runtime, observation_id).await
     }
 
     async fn replay_observations(
@@ -1780,7 +1689,9 @@ impl ObservationStore for GlobalDbObservationStore {
                 after_sequence: request.after_sequence(),
                 limit,
             },
-        )? {
+        )
+        .await?
+        {
             ObservationReadResultV1::Replay(rows) => rows
                 .into_iter()
                 .map(stored_observation_from_runtime_row)
@@ -1844,7 +1755,7 @@ fn identity_collision(
     }
 }
 
-fn dispatch_runtime_observation_read(
+async fn dispatch_runtime_observation_read(
     runtime: &DatabaseRuntimeClientV1,
     operation: ObservationReadOperationV1,
 ) -> ObservationStoreResult<ObservationReadResultV1> {
@@ -1885,14 +1796,15 @@ fn dispatch_runtime_observation_read(
         control,
     )
     .map_err(|error| runtime_storage_error("build observation runtime read", error))?;
-    let probe = RuntimeObservationProbe::from_control(request.control());
+    let probe = Arc::new(RuntimeObservationProbe::from_control(request.control()));
     tracing::trace!(
         target: "tracedecay::observation_admission_work",
         work = "runtime_command",
         "dispatch observation runtime read"
     );
     let outcome = runtime
-        .dispatch_read(request, &probe)
+        .dispatch_read(request, probe)
+        .await
         .map_err(|error| match error {
             StoreRuntimeRegistryFailure::ReaderSaturated => {
                 ObservationStoreError::ReaderSaturated {
@@ -1952,7 +1864,7 @@ fn stored_observation_from_runtime_row(
     ))
 }
 
-fn read_runtime_source_cursor(
+async fn read_runtime_source_cursor(
     runtime: &DatabaseRuntimeClientV1,
     source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
@@ -1963,7 +1875,9 @@ fn read_runtime_source_cursor(
             source: source.clone(),
             scope: scope.clone(),
         },
-    )? {
+    )
+    .await?
+    {
         ObservationReadResultV1::SourceCursor(cursor) => Ok(cursor),
         _ => Err(runtime_storage_error(
             "read observation source cursor",
@@ -2024,7 +1938,7 @@ fn refused_scan_frontier(
     .map(RefusedScanFrontier::AtFrontier)
 }
 
-fn read_runtime_stored_observation(
+async fn read_runtime_stored_observation(
     runtime: &DatabaseRuntimeClientV1,
     observation_id: &CanonicalObservationIdV1,
 ) -> ObservationStoreResult<Option<StoredObservation>> {
@@ -2033,7 +1947,9 @@ fn read_runtime_stored_observation(
         ObservationReadOperationV1::Observation {
             observation_id: observation_id.clone(),
         },
-    )? {
+    )
+    .await?
+    {
         ObservationReadResultV1::Observation(row) => match *row {
             Some(row) => stored_observation_from_runtime_row(row).map(Some),
             None => Ok(None),
@@ -2549,6 +2465,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
                 now_micros: now_micros().0,
             },
         )
+        .await
         .map_err(projection_runtime_error)?
         {
             ObservationReadResultV1::NextQueuedProjection(observation_id) => Ok(observation_id),
@@ -2580,6 +2497,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
             &self.runtime,
             ObservationReadOperationV1::ProjectionCheckpoint,
         )
+        .await
         .map_err(projection_runtime_error)?
         {
             ObservationReadResultV1::ProjectionCheckpoint(sequence) => {

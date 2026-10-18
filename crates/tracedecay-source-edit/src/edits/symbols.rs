@@ -40,6 +40,19 @@ impl EditSymbolV1 {
                 "symbol source span is not an exact UTF-8 range",
             ));
         }
+        // These operations splice whole lines. Refuse a byte-exact symbol
+        // sharing a boundary line with unrelated syntax rather than deleting it.
+        let line_start = source[..start].rfind('\n').map_or(0, |offset| offset + 1);
+        let suffix = if source.as_bytes()[end - 1] == b'\n' {
+            ""
+        } else {
+            source[end..].split('\n').next().unwrap_or("")
+        };
+        if !source[line_start..start].trim().is_empty() || !suffix.trim().is_empty() {
+            return Err(symbol_evidence_unavailable(
+                "symbol shares a boundary line with unrelated syntax; use an exact string edit",
+            ));
+        }
         let start_line = source[..start]
             .bytes()
             .filter(|byte| *byte == b'\n')
@@ -355,6 +368,17 @@ mod tests {
             "config error: symbol 'src/a.rs::Widget' is ambiguous (2 matches); pass an exact \
              stored qualified name"
         );
+    }
+
+    #[test]
+    fn line_bounds_refuse_siblings_and_inline_containers() {
+        for source in ["fn a() {} fn b() {}\n", "mod x { fn a() {} }\n"] {
+            let mut target = symbol(NodeKind::Function, "a");
+            let start = source.find("fn a").expect("declaration");
+            target.source_span.start_byte = start as u64;
+            target.source_span.end_byte = (start + "fn a() {}".len()) as u64;
+            assert!(target.line_bounds(source).is_err(), "{source}");
+        }
     }
 
     #[test]

@@ -93,11 +93,10 @@ impl ProjectServerRetirementAdmission<'_> {
     where
         Task: std::future::Future<Output = ()> + Send + 'static,
     {
-        let task = tokio::spawn(retirement);
         track_project_server_retirement_after_admission(
             &mut self.retirements,
             owner,
-            tokio_retirement_status(task),
+            spawn_tokio_retirement(retirement),
         );
     }
 
@@ -138,14 +137,40 @@ where
         completion: task_completion,
         terminal: false,
     };
-    tokio::spawn(async move {
+    let retirement = async move {
         let status = match retirement.await {
             Ok(()) => ProjectServerRetirementStatus::Clean,
             Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
         };
         finalizer.complete(status);
-    });
+    };
+    // Without a Tokio runtime the retirement is dropped unstarted, and its
+    // finalizer publishes the failed receipt.
+    if let Some(runtime) = native_runtime::tokio_handle(RETIREMENT_TOKIO_SITE) {
+        runtime.spawn(retirement);
+    }
     completion
+}
+
+/// Retirements reach `project_server_lifecycle`, whose timers are Tokio's, so
+/// they run on the daemon's Tokio runtime.
+const RETIREMENT_TOKIO_SITE: &str = "daemon.project_retirement";
+
+/// Spawns `retirement` on the Tokio runtime and returns its receipt. Without
+/// a Tokio runtime the retirement never runs and its receipt is a failure.
+fn spawn_tokio_retirement(
+    retirement: impl std::future::Future<Output = ()> + Send + 'static,
+) -> impl std::future::Future<Output = ProjectServerRetirementStatus> + Send + 'static {
+    let task = native_runtime::tokio_handle(RETIREMENT_TOKIO_SITE)
+        .map(|runtime| runtime.spawn(retirement));
+    async move {
+        match task {
+            Some(task) => tokio_retirement_status(task).await,
+            None => ProjectServerRetirementStatus::Failed(
+                "no Tokio runtime ran the project server retirement".to_owned(),
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -259,12 +284,22 @@ async fn track_project_server_retirement(
     track_project_server_retirement_after_admission(&mut retirements, owner, joined);
 }
 
+#[cfg(test)]
 pub(super) async fn track_retirement_task(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     owner: StoreOwnerKey,
     task: tokio::task::JoinHandle<()>,
 ) {
     track_project_server_retirement(retirements, owner, tokio_retirement_status(task)).await;
+}
+
+/// Spawns `retirement` on the Tokio runtime and tracks its receipt.
+pub(super) async fn track_tokio_retirement(
+    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
+    owner: StoreOwnerKey,
+    retirement: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    track_project_server_retirement(retirements, owner, spawn_tokio_retirement(retirement)).await;
 }
 
 pub(super) async fn track_aborted_native_retirement_task(

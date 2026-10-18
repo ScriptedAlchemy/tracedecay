@@ -17,7 +17,7 @@ The plugin registers the TraceDecay MCP server under the `tracedecay` key as:
 tracedecay serve
 ```
 
-Cursor Settings surfaces that MCP server key literally, so the Cursor bundle
+Cursor Settings displays that MCP server key literally, so the Cursor bundle
 uses `tracedecay` (not the Claude/Codex `graph` key). Each Cursor workspace
 gets its own project store.
 
@@ -89,20 +89,17 @@ for supported local language servers and install hints. It is informational:
 it does not install or start a server. It is **not** an MCP tool, so do not add
 it (or a wildcard) to `mcpAllowlist`.
 
-For literal strings, regexes, and config keys inside indexed code, use
-`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
-`tracedecay_context` for concept-level discovery.
-
 For sessions resumed from compacted context, any recovery guidance is produced
 from the daemon's canonical session state after the hook admission succeeds;
 the `sessionStart` adapter does not read a session store itself.
 
-Slash workflows ship as Cursor-native commands
-(`/tracedecay-map-architecture`, `/tracedecay-check-health`,
-`/tracedecay-curate-memory`, `/tracedecay-review-diff`, ...). Their slugs keep
-the `tracedecay-` prefix so typing `/tracedecay` lists every command. The
-files in `overlays/cursor/commands/` are independently authored for Cursor
-(skill handoff + approval notes), not generated from `plugin/commands/`.
+Workflows no skill covers ship as Cursor-native commands
+(`/tracedecay-audit-safety`, `/tracedecay-draft-commit`,
+`/tracedecay-test-changes`, ...). Their slugs keep the `tracedecay-` prefix so
+typing `/tracedecay` lists every command. Every skill is also invocable by
+name, for example `/assessing-impact`. The files in `overlays/cursor/commands/`
+are independently authored for Cursor (skill handoff + approval notes), not
+generated from `plugin/commands/`.
 
 ## Auto-review and `permissions.json`
 

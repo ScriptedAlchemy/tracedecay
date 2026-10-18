@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_runtime_core::native_runtime::NativeTask;
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome, NativeTaskSet};
 
 /// Bound on the join failures retained from tasks reaped during normal
 /// operation. Shutdown reports these alongside anything it drains itself; a
@@ -17,16 +17,20 @@ const REAPED_FAILURE_CAPACITY: usize = 16;
 /// whatever completed since the last spawn, and a panic surfaces on the next
 /// admission instead of waiting for shutdown. Reaping never awaits a live
 /// task: `try_join_next` only returns results that are already ready.
+///
+/// Tasks run on the native runtime. No spawned future needs an ambient Tokio
+/// runtime, and their storage calls are async, so none parks a native worker
+/// on the SQLite writer.
 #[derive(Default)]
 pub struct McpBackgroundTaskOwner {
     admission: std::sync::Mutex<McpBackgroundTaskAdmission>,
-    shutdown_tasks: tokio::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
+    shutdown_tasks: tokio::sync::Mutex<Option<NativeTaskSet<()>>>,
 }
 
 #[derive(Default)]
 struct McpBackgroundTaskAdmission {
     closed: bool,
-    tasks: tokio::task::JoinSet<()>,
+    tasks: NativeTaskSet<()>,
     /// Join failures observed while reaping, bounded by
     /// [`REAPED_FAILURE_CAPACITY`]; the oldest is dropped first.
     reaped_failures: std::collections::VecDeque<String>,
@@ -36,11 +40,8 @@ impl McpBackgroundTaskAdmission {
     /// Drains every already-finished task. A panic or abort is recorded once,
     /// here, and logged at the moment it is observed.
     fn reap_finished(&mut self) {
-        while let Some(result) = self.tasks.try_join_next() {
-            if let Err(error) = result
-                && !error.is_cancelled()
-            {
-                let failure = error.to_string();
+        while let Some(outcome) = self.tasks.try_join_next() {
+            if let Some(failure) = task_failure(outcome) {
                 tracing::error!(error = %failure, "MCP background task failed");
                 if self.reaped_failures.len() == REAPED_FAILURE_CAPACITY {
                     self.reaped_failures.pop_front();
@@ -64,7 +65,14 @@ impl McpBackgroundTaskOwner {
             return false;
         }
         admission.reap_finished();
-        admission.tasks.spawn(task);
+        // The task logs to its spawner's subscriber from whichever native
+        // worker polls it. A runtime that refuses the task refuses it as a
+        // closed owner does.
+        let task = tracing::instrument::WithSubscriber::with_current_subscriber(task);
+        if let Err(error) = admission.tasks.spawn(task) {
+            tracing::error!(%error, "MCP background task was not started");
+            return false;
+        }
         true
     }
 
@@ -135,12 +143,8 @@ impl McpBackgroundTaskOwner {
         };
         tasks.abort_all();
         let mut failures = Vec::new();
-        while let Some(result) = tasks.join_next().await {
-            if let Err(error) = result
-                && !error.is_cancelled()
-            {
-                failures.push(error.to_string());
-            }
+        while let Some(outcome) = tasks.join_next().await {
+            failures.extend(task_failure(outcome));
         }
         retained.take();
         let mut reaped: Vec<String> = self
@@ -152,6 +156,15 @@ impl McpBackgroundTaskOwner {
             .collect();
         reaped.append(&mut failures);
         reaped
+    }
+}
+
+/// The join failure an ended background task reports. An aborted task is not
+/// a failure.
+fn task_failure(outcome: NativeTaskOutcome<()>) -> Option<String> {
+    match outcome {
+        NativeTaskOutcome::Panicked(payload) => Some(format!("task panicked: {payload}")),
+        NativeTaskOutcome::Completed(()) | NativeTaskOutcome::Cancelled => None,
     }
 }
 
@@ -378,7 +391,10 @@ mod response_lifecycle_tests {
 #[cfg(test)]
 mod background_task_owner_tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use tracedecay_runtime_core::native_runtime;
 
     struct DropSignal(Arc<AtomicBool>);
 
@@ -388,7 +404,7 @@ mod background_task_owner_tests {
         }
     }
 
-    struct DropCount(Arc<std::sync::atomic::AtomicUsize>);
+    struct DropCount(Arc<AtomicUsize>);
 
     impl Drop for DropCount {
         fn drop(&mut self) {
@@ -396,178 +412,198 @@ mod background_task_owner_tests {
         }
     }
 
-    /// Yields until `settled` is set: the task that owns it has run to
-    /// completion (or unwound) on the test runtime.
-    async fn wait_until_set(settled: &AtomicBool) {
-        for _ in 0..1_000 {
-            if settled.load(Ordering::Acquire) {
-                return;
-            }
-            tokio::task::yield_now().await;
+    /// Runs `test` as a native root with no Tokio runtime entered: the owner
+    /// spawns onto, and shutdown joins, native tasks only.
+    fn on_native<F: std::future::Future<Output = ()>>(test: F) {
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            test.await;
+        })
+        .expect("native runtime");
+    }
+
+    /// Waits until `settled` holds: the native worker has run the task that
+    /// sets it.
+    async fn wait_until(settled: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !settled() {
+            assert!(
+                Instant::now() < deadline,
+                "background task did not settle on the native runtime"
+            );
+            native_runtime::sleep_until(Instant::now() + Duration::from_millis(1))
+                .await
+                .expect("native timer");
         }
-        panic!("background task did not settle on the test runtime");
     }
 
-    #[tokio::test]
-    async fn shutdown_aborts_joins_and_closes_background_task_admission() {
-        let owner = McpBackgroundTaskOwner::default();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let task_dropped = Arc::clone(&dropped);
+    /// Spawns a task that records its start, then parks until aborted,
+    /// signalling `dropped` when its future is dropped.
+    async fn spawn_parked(owner: &McpBackgroundTaskOwner, dropped: &Arc<AtomicBool>) {
+        let started = Arc::new(AtomicBool::new(false));
+        let task_started = Arc::clone(&started);
+        let task_dropped = Arc::clone(dropped);
         assert!(owner.spawn(async move {
             let _signal = DropSignal(task_dropped);
+            task_started.store(true, Ordering::Release);
             std::future::pending::<()>().await;
         }));
-        tokio::task::yield_now().await;
-
-        assert_eq!(owner.shutdown().await.len(), 0);
-        assert!(dropped.load(Ordering::Acquire));
-        assert!(!owner.spawn(async {}));
+        wait_until(|| started.load(Ordering::Acquire)).await;
     }
 
-    #[tokio::test]
-    async fn close_admission_refuses_new_background_work_without_joining() {
-        let owner = McpBackgroundTaskOwner::default();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let task_dropped = Arc::clone(&dropped);
-        assert!(owner.spawn(async move {
-            let _signal = DropSignal(task_dropped);
-            std::future::pending::<()>().await;
-        }));
-        tokio::task::yield_now().await;
+    #[test]
+    fn shutdown_aborts_joins_and_closes_background_task_admission() {
+        on_native(async {
+            let owner = McpBackgroundTaskOwner::default();
+            let dropped = Arc::new(AtomicBool::new(false));
+            spawn_parked(&owner, &dropped).await;
 
-        owner.close_admission();
-        assert!(!owner.spawn(async {}));
-        assert!(
-            !dropped.load(Ordering::Acquire),
-            "close_admission must not join or abort live tasks"
-        );
-        assert_eq!(owner.shutdown().await.len(), 0);
-        assert!(dropped.load(Ordering::Acquire));
+            assert_eq!(owner.shutdown().await.len(), 0);
+            assert!(
+                dropped.load(Ordering::Acquire),
+                "shutdown returns only after the aborted task's future is dropped"
+            );
+            assert!(!owner.spawn(async {}));
+        });
+    }
+
+    #[test]
+    fn close_admission_refuses_new_background_work_without_joining() {
+        on_native(async {
+            let owner = McpBackgroundTaskOwner::default();
+            let dropped = Arc::new(AtomicBool::new(false));
+            spawn_parked(&owner, &dropped).await;
+
+            owner.close_admission();
+            assert!(!owner.spawn(async {}));
+            assert!(
+                !dropped.load(Ordering::Acquire),
+                "close_admission must not join or abort live tasks"
+            );
+            assert_eq!(owner.shutdown().await.len(), 0);
+            assert!(dropped.load(Ordering::Acquire));
+        });
     }
 
     /// A sustained run of short tasks must not accumulate in the owner: once
     /// they finish, the next admission reaps them without shutdown and
     /// without waiting on the live task that is still running.
-    #[tokio::test]
-    async fn completed_tasks_are_reaped_by_the_next_admission_before_shutdown() {
-        let owner = McpBackgroundTaskOwner::default();
-        let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let live_started = Arc::new(AtomicBool::new(false));
-        let task_live_started = Arc::clone(&live_started);
-        assert!(owner.spawn(async move {
-            task_live_started.store(true, Ordering::Release);
-            std::future::pending::<()>().await;
-        }));
-        const COMPLETED: usize = 32;
-        for _ in 0..COMPLETED {
-            let finished = Arc::clone(&finished);
-            assert!(owner.spawn(async move {
-                finished.fetch_add(1, Ordering::AcqRel);
-            }));
-        }
-        wait_until_set(&live_started).await;
-        for _ in 0..1_000 {
-            if finished.load(Ordering::Acquire) == COMPLETED {
-                break;
+    #[test]
+    fn completed_tasks_are_reaped_by_the_next_admission_before_shutdown() {
+        on_native(async {
+            let owner = McpBackgroundTaskOwner::default();
+            let live_dropped = Arc::new(AtomicBool::new(false));
+            spawn_parked(&owner, &live_dropped).await;
+            const COMPLETED: usize = 32;
+            let finished = Arc::new(AtomicUsize::new(0));
+            for _ in 0..COMPLETED {
+                let finished = Arc::new(DropCount(Arc::clone(&finished)));
+                assert!(owner.spawn(async move {
+                    drop(finished);
+                }));
             }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(finished.load(Ordering::Acquire), COMPLETED);
-        assert!(
-            owner.retained_tasks() > 1,
-            "completed tasks stay retained until an admission reaps them"
-        );
+            wait_until(|| finished.load(Ordering::Acquire) == COMPLETED).await;
+            assert!(
+                owner.retained_tasks() > 1,
+                "completed tasks stay retained until an admission reaps them"
+            );
 
-        let admitted = Arc::new(AtomicBool::new(false));
-        let task_admitted = Arc::clone(&admitted);
-        assert!(owner.spawn(async move {
-            task_admitted.store(true, Ordering::Release);
-        }));
-
-        assert_eq!(
-            owner.retained_tasks(),
-            2,
-            "after reaping, the owner retains only the live task and the task just admitted"
-        );
-        assert_eq!(owner.reaped_failures().len(), 0);
-        wait_until_set(&admitted).await;
-        assert_eq!(owner.shutdown().await.len(), 0);
+            // A task's future is dropped just before its join publishes, so
+            // the last completions may land a moment after `finished` does.
+            wait_until(|| {
+                assert!(owner.spawn(async {}));
+                owner.retained_tasks() <= 2
+            })
+            .await;
+            assert_eq!(
+                owner.retained_tasks(),
+                2,
+                "after reaping, the owner retains only the live task and the task just admitted"
+            );
+            assert_eq!(owner.reaped_failures().len(), 0);
+            assert!(
+                !live_dropped.load(Ordering::Acquire),
+                "reaping never aborts live work"
+            );
+            assert_eq!(owner.shutdown().await.len(), 0);
+        });
     }
 
     /// A panicked task is observed by the next admission, once, and shutdown
     /// reports it exactly once rather than discovering it for the first time.
-    #[tokio::test]
-    async fn panicked_task_evidence_surfaces_on_the_next_admission() {
-        let owner = McpBackgroundTaskOwner::default();
-        let unwound = Arc::new(AtomicBool::new(false));
-        let task_unwound = Arc::clone(&unwound);
-        assert!(owner.spawn(async move {
-            let _signal = DropSignal(task_unwound);
-            panic!("background task failed on purpose");
-        }));
-        wait_until_set(&unwound).await;
-        assert!(
-            owner.reaped_failures().is_empty(),
-            "a finished task is reaped by an admission, not by completing"
-        );
+    #[test]
+    fn panicked_task_evidence_surfaces_on_the_next_admission() {
+        on_native(async {
+            let owner = McpBackgroundTaskOwner::default();
+            let unwound = Arc::new(AtomicBool::new(false));
+            let task_unwound = Arc::clone(&unwound);
+            assert!(owner.spawn(async move {
+                let _signal = DropSignal(task_unwound);
+                panic!("background task failed on purpose");
+            }));
+            wait_until(|| unwound.load(Ordering::Acquire)).await;
+            assert!(
+                owner.reaped_failures().is_empty(),
+                "a finished task is reaped by an admission, not by completing"
+            );
 
-        assert!(owner.spawn(async {}));
+            wait_until(|| {
+                assert!(owner.spawn(async {}));
+                !owner.reaped_failures().is_empty()
+            })
+            .await;
 
-        let reaped = owner.reaped_failures();
-        assert_eq!(reaped.len(), 1, "one panic yields one failure record");
-        assert!(
-            reaped[0].contains("panicked"),
-            "the join failure names the panic: {}",
-            reaped[0]
-        );
-        assert_eq!(
-            owner.retained_tasks(),
-            1,
-            "the panicked task is no longer retained; only the new task is"
-        );
+            let reaped = owner.reaped_failures();
+            assert_eq!(reaped.len(), 1, "one panic yields one failure record");
+            assert!(
+                reaped[0].contains("panicked") && reaped[0].contains("failed on purpose"),
+                "the join failure names the panic: {}",
+                reaped[0]
+            );
 
-        assert!(owner.spawn(async {}));
-        assert_eq!(
-            owner.reaped_failures().len(),
-            1,
-            "reaping again must not re-observe the same panic"
-        );
+            assert!(owner.spawn(async {}));
+            assert_eq!(
+                owner.reaped_failures().len(),
+                1,
+                "reaping again must not re-observe the same panic"
+            );
 
-        let failures = owner.shutdown().await;
-        assert_eq!(failures.len(), 1, "shutdown reports the reaped panic once");
-        assert!(failures[0].contains("panicked"));
-        assert!(
-            owner.shutdown().await.is_empty(),
-            "a second shutdown has nothing left to report"
-        );
+            let failures = owner.shutdown().await;
+            assert_eq!(failures.len(), 1, "shutdown reports the reaped panic once");
+            assert!(failures[0].contains("panicked"));
+            assert!(
+                owner.shutdown().await.is_empty(),
+                "a second shutdown has nothing left to report"
+            );
+        });
     }
 
     /// The reaped-failure record is bounded: a server that outlives many
     /// panics keeps the newest ones, not one entry per failed task.
-    #[tokio::test]
-    async fn reaped_failures_keep_only_the_newest_bounded_records() {
-        let owner = McpBackgroundTaskOwner::default();
-        let total = REAPED_FAILURE_CAPACITY + 4;
-        let unwound = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        for ordinal in 0..total {
-            let unwound = Arc::clone(&unwound);
-            assert!(owner.spawn(async move {
-                let _count = DropCount(unwound);
-                panic!("bounded failure {ordinal}");
-            }));
-        }
-        for _ in 0..1_000 {
-            if unwound.load(Ordering::Acquire) == total {
-                break;
+    #[test]
+    fn reaped_failures_keep_only_the_newest_bounded_records() {
+        on_native(async {
+            let owner = McpBackgroundTaskOwner::default();
+            let total = REAPED_FAILURE_CAPACITY + 4;
+            let unwound = Arc::new(AtomicUsize::new(0));
+            for ordinal in 0..total {
+                let unwound = Arc::clone(&unwound);
+                assert!(owner.spawn(async move {
+                    let _count = DropCount(unwound);
+                    panic!("bounded failure {ordinal}");
+                }));
             }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(unwound.load(Ordering::Acquire), total);
+            wait_until(|| unwound.load(Ordering::Acquire) == total).await;
 
-        assert!(owner.spawn(async {}));
+            wait_until(|| {
+                assert!(owner.spawn(async {}));
+                owner.retained_tasks() <= 1
+            })
+            .await;
 
-        let reaped = owner.reaped_failures();
-        assert_eq!(reaped.len(), REAPED_FAILURE_CAPACITY);
-        assert_eq!(owner.shutdown().await.len(), REAPED_FAILURE_CAPACITY);
+            let reaped = owner.reaped_failures();
+            assert_eq!(reaped.len(), REAPED_FAILURE_CAPACITY);
+            assert_eq!(owner.shutdown().await.len(), REAPED_FAILURE_CAPACITY);
+        });
     }
 }

@@ -21,8 +21,8 @@ use super::{RegisteredWorkRuntime, work_product_problem};
     skip_all
 )]
 pub(super) async fn retrieve(
-    registered: &RegisteredWorkRuntime,
-    context: &RequestContext,
+    registered: RegisteredWorkRuntime,
+    context: RequestContext,
     capability: &str,
     use_case: UseCaseId,
     request: WorkEvidenceRetrieveRequestV1,
@@ -39,15 +39,21 @@ pub(super) async fn retrieve(
         )
     })?;
     let evidence_retrieval = Arc::clone(&registered.evidence_retrieval);
-    WorkEvidenceRetrievalServiceV1::new(
-        storage.clone(),
-        storage.clone(),
-        storage,
-        Arc::clone(&evidence_retrieval),
-        evidence_retrieval,
-        binding,
-    )
-    .retrieve(context, request)
+    tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+        WorkEvidenceRetrievalServiceV1::new(
+            storage.clone(),
+            storage.clone(),
+            storage,
+            Arc::clone(&evidence_retrieval),
+            evidence_retrieval,
+            binding,
+        )
+        .retrieve(&context, request)
+        .await
+    })
     .await
+    .unwrap_or(Err(
+        tracedecay_contracts::WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable,
+    ))
     .map_err(work_product_problem)
 }

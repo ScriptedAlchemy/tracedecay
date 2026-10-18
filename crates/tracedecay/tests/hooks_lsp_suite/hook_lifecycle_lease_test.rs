@@ -597,5 +597,22 @@ fn bound_claude_hook_returns_only_the_transport_response() {
 
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
-    assert_eq!(output.stdout, b"{}\n");
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_else(|| panic!("registered SessionStart carries the skill mandate: {response}"));
+    assert!(
+        context.starts_with("TraceDecay keeps a code graph")
+            && context.contains("`routing-tracedecay`"),
+        "{context}"
+    );
+    assert_eq!(
+        response,
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        })
+    );
 }

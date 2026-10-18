@@ -22,12 +22,12 @@ use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectCl
 use tracedecay_tool_catalog::{CapabilityId, CatalogSnapshotV1};
 
 use super::{
-    CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionService,
+    CurrentGitIndexPolicyStateV1, DaemonGitIndexTransactionService, DaemonGitIndexTransactionStore,
     DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor, GitIndexPolicyRecheckPort,
-    GitIndexTransactionStoreRegistry, RepositoryMutationQueue,
-    SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
+    GitIndexTransactionStoreRegistry, RepositoryMutationQueue, canonicalize_repository_root,
 };
 use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_application::project_open_authorization::mounted_grant_expires_at;
 use tracedecay_contracts::catalog_composition::CatalogCompositionError;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
@@ -82,10 +82,7 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
         capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let evaluated_at = now_micros();
-        if evaluated_at >= self.access.grant_expires_at {
-            return Err(GitIndexTransactionPortError::PolicyDenied);
-        }
-        // The Git transaction port is synchronous while the configuration
+        // The authority source is synchronous while the configuration
         // authority is asynchronous. Callers run on blocking threads, where
         // the native runtime may park the caller until the read settles.
         let current = native_runtime::block_on(self.configuration.current())
@@ -189,7 +186,7 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
             scope: self.access.scope.clone(),
             requester: self.access.requester.clone(),
             effective_capabilities,
-            grant_expires_at: self.access.grant_expires_at,
+            grant_expires_at: mounted_grant_expires_at(evaluated_at),
             policy_revision: GIT_POLICY_REVISION,
             policy_digest,
             configuration_digest: current.snapshot.effective_behavior_digest,
@@ -360,7 +357,7 @@ fn scope_matches_snapshot(
 }
 
 pub type DaemonProjectGitIndexTransactionService = DaemonGitIndexTransactionService<
-    SharedDaemonGitIndexTransactionStore,
+    DaemonGitIndexTransactionStore,
     FixedDaemonGitIndexExecutor<DaemonProjectGitIndexPreviewAssembler>,
     GitEffectClassifierV1,
     DaemonGitIndexPolicyRecheck,
@@ -427,9 +424,9 @@ impl ServiceKey {
     }
 }
 
-/// Owns the store actor, native executor, classifier, policy recheck, and
+/// Owns the store, native executor, classifier, policy recheck, and
 /// repository queue for each exact project/worktree identity. Linked
-/// worktrees share one session store actor without sharing native executors or
+/// worktrees share one session store without sharing native executors or
 /// mutation authority.
 pub struct DaemonGitIndexTransactionServiceRegistry {
     catalog: ApplicationCatalogComposer,
@@ -502,25 +499,24 @@ impl DaemonGitIndexTransactionServiceRegistry {
             project_id,
             source,
             observed_at,
-            || self.stores.ensure(database),
+            self.stores.ensure(database),
         )
         .await
     }
 
-    pub(super) async fn mount_with<F>(
+    pub(super) async fn mount_with(
         &self,
         database_path: PathBuf,
         repository_root: PathBuf,
         project_id: ProjectId,
         source: Arc<dyn DaemonGitAuthoritySource>,
         observed_at: UtcMicros,
-        open_store: F,
-    ) -> Result<DaemonGitInvocationOwner, GitIndexTransactionPortError>
-    where
-        F: FnOnce() -> tracedecay_store::GitIndexTransactionStoreResult<
-            super::SharedDaemonGitIndexTransactionStore,
+        open_store: impl Future<
+            Output = tracedecay_store::GitIndexTransactionStoreResult<
+                DaemonGitIndexTransactionStore,
+            >,
         >,
-    {
+    ) -> Result<DaemonGitInvocationOwner, GitIndexTransactionPortError> {
         if self.shutdown_fenced.load(Ordering::SeqCst) {
             return Err(GitIndexTransactionPortError::DaemonUnavailable);
         }
@@ -547,14 +543,16 @@ impl DaemonGitIndexTransactionServiceRegistry {
             }
         }
 
-        // Open/retain the store actor under the creation gate before native
-        // recovery runs on a blocking thread. Later mounts reuse this actor.
-        let store = open_store().map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        // Open/retain the store under the creation gate before native recovery
+        // runs on a blocking thread. Later mounts reuse this store.
+        let store = open_store
+            .await
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let native_root = repository_root.clone();
         let authority = Arc::new(DaemonGitAuthoritySlot::new(source));
         let service_authority = Arc::clone(&authority);
         let mutation_queue = Arc::clone(&self.mutation_queue);
-        let (project_id, service) = native_runtime::spawn_blocking(move || {
+        let (project_id, service) = native_runtime::on_blocking_pool(async move {
             let native = FixedDaemonGitIndexExecutor::new(
                 DaemonProjectGitIndexPreviewAssembler::new(native_root, project_id.clone()),
             );
@@ -566,6 +564,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
                 mutation_queue,
                 observed_at,
             )
+            .await
             .map(|service| (project_id, service))
         })
         .await
@@ -595,9 +594,8 @@ impl DaemonGitIndexTransactionServiceRegistry {
             .lock()
             .await
             .retain(|key, _| key.project_id != *project_id || key.database_path != database_path);
-        self.stores
-            .remove(database_path)
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)
+        self.stores.remove(database_path).await;
+        Ok(())
     }
 
     /// Resolve only an owner already mounted by project-open admission.
@@ -642,11 +640,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         };
         let services_closed = services.len();
         drop(services);
-        let store_actors_joined = self
-            .stores
-            .shutdown_all()
-            .await
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let store_actors_joined = self.stores.shutdown_all().await;
         let receipt = DaemonGitIndexShutdownReceiptV1 {
             services_closed,
             store_actors_joined,
@@ -667,17 +661,10 @@ impl DaemonGitIndexTransactionServiceRegistry {
             .for_repository_root(repository_root)
             .await?
             .ok_or(GitIndexTransactionPortError::DaemonUnavailable)?;
-        // The store actor waits on the project writer lane, which a task on
-        // the caller's runtime may hold, so the synchronous port cannot run
-        // on that runtime's thread.
-        let preview = preview.clone();
-        native_runtime::spawn_blocking(move || {
-            owner
-                .service
-                .port
-                .quarantine_preview_for_test(&preview, observed_at)
-        })
-        .await
-        .unwrap_or(Err(GitIndexTransactionPortError::DaemonUnavailable))
+        owner
+            .service
+            .port
+            .quarantine_preview_for_test(preview, observed_at)
+            .await
     }
 }

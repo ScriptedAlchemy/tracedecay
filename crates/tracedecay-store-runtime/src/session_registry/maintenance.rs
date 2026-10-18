@@ -12,11 +12,11 @@ use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
 };
 use tracedecay_domain::errors::{
-    PROFILE_RESET_COMMAND, ResettableStoreV1, STALE_STORE_RESET_COMMAND, StoreResetRequiredV1,
-    TraceDecayError,
+    DAEMON_RESTART_COMMAND, PROFILE_RESET_COMMAND, ResettableStoreV1, STALE_STORE_RESET_COMMAND,
+    StoreResetRequiredV1, TraceDecayError,
 };
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
-use tracedecay_runtime_core::native_runtime::NativeTask;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_runtime_core::storage::profile_root_of_sharded_data_root;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
 
@@ -359,7 +359,9 @@ impl RegisteredSchemaConvergenceMaintenance {
                     ],
                 );
             }
-            let _ = release_process_allocator_memory_v1();
+            // `malloc_trim` walks every glibc arena: up to 0.8 s of CPU on a
+            // large heap, which would stall this native worker's I/O.
+            let _ = native_runtime::spawn_blocking(release_process_allocator_memory_v1).await;
             drop(permit);
             let status = match result {
                 Ok(()) => {
@@ -632,10 +634,38 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
+    /// Hold a store file this daemon still has open, but which was deleted or
+    /// replaced on disk, in the reset-required state until the daemon
+    /// restarts. Returns whether the loss is new.
+    pub fn record_store_identity_lost(&self, path: &Path) -> bool {
+        let mut lost = self
+            .lost_store_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if lost.contains_key(path) {
+            return false;
+        }
+        lost.insert(
+            path.to_path_buf(),
+            StoreResetRequiredV1 {
+                store: path.display().to_string(),
+                authority: "store file identity".to_owned(),
+                found_version: None,
+                required_version: None,
+                reason: "the store file was deleted or replaced while the daemon held it open; \
+                         writes go to an unlinked inode and its space is not freed"
+                    .to_owned(),
+                remedy: DAEMON_RESTART_COMMAND.to_owned(),
+            },
+        );
+        true
+    }
+
     /// Stores in this profile currently held in their typed reset-required
     /// state, each with the exact command that resets it: registered stores
-    /// refused at attach, then Hook V2 admission state on disk in a shape this
-    /// binary refuses, in the profile or any of its project shards.
+    /// refused at attach, store files lost while open, then Hook V2 admission
+    /// state on disk in a shape this binary refuses, in the profile or any of
+    /// its project shards.
     #[must_use]
     pub fn reset_required_stores(&self) -> Vec<StoreResetRequiredV1> {
         let mut stores: Vec<_> = self
@@ -645,6 +675,13 @@ impl DaemonSessionRuntimeRegistryV1 {
             .values()
             .cloned()
             .collect();
+        stores.extend(
+            self.lost_store_files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+                .cloned(),
+        );
         let profile_root = self.identity.profile_root();
         let project_shards = std::fs::read_dir(
             tracedecay_runtime_core::storage::profile_shards_root(profile_root),
@@ -974,6 +1011,52 @@ mod tests {
         assert_eq!(
             maintenance.status(&shard_id),
             Some(RegisteredSchemaConvergenceStatus::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_file_lost_while_open_requires_a_daemon_restart() {
+        let temp = tempfile::TempDir::new().expect("registry fixture root");
+        let profile_root = temp.path().join("profile");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            43,
+            "store file identity reset",
+        )
+        .expect("daemon database scope");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("daemon session runtime registry");
+        let lost = profile_root.join("global.db");
+        assert!(
+            registry
+                .reset_required_stores()
+                .iter()
+                .all(|store| store.store != lost.display().to_string()),
+            "nothing is reset-required before the loss"
+        );
+
+        assert!(registry.record_store_identity_lost(&lost));
+        assert!(
+            !registry.record_store_identity_lost(&lost),
+            "a loss already held is not new"
+        );
+
+        let recorded: Vec<_> = registry
+            .reset_required_stores()
+            .into_iter()
+            .filter(|store| store.store == lost.display().to_string())
+            .collect();
+        assert_eq!(recorded.len(), 1, "one entry per lost store file");
+        assert_eq!(recorded[0].authority, "store file identity");
+        assert_eq!(recorded[0].remedy, DAEMON_RESTART_COMMAND);
+        assert_eq!(recorded[0].found_version, None);
+        assert_eq!(
+            ResettableStoreV1::from_label(&recorded[0].store),
+            None,
+            "wipe --stale must refuse the store and name the restart instead"
         );
     }
 }

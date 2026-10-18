@@ -1,10 +1,11 @@
 use super::{
     AnalyticsAction, Cli, CommandFamily, CommandRuntime, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, PackageHookAction, RAYON_NUM_THREADS_ENV,
-    ScoopPackageHookAction, StderrTracingDefault, command_profile_label, command_runtime,
-    daemon_cpu_threads_from, is_one_shot_daemon_client, normalize_tool_reserved_global_flags,
-    runs_worldwide_counter_flush, should_skip_agent_install_check, should_skip_startup_maintenance,
-    stderr_tracing_default, try_print_cli_version, validate_host_bundle_options,
+    ScoopPackageHookAction, StderrTracingDefault, async_worker_threads, command_profile_label,
+    command_runtime, daemon_cpu_threads_from, is_one_shot_daemon_client,
+    normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
+    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
+    try_print_cli_version, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -391,7 +392,24 @@ fn status_is_a_one_shot_daemon_client() {
 }
 
 #[test]
-fn every_command_but_the_foreground_daemon_runs_on_the_native_runtime() {
+fn long_lived_commands_run_at_least_two_native_workers() {
+    for args in [&["daemon", "run"][..], &["serve"]] {
+        assert!(
+            async_worker_threads(Some(&parse_command(args))) >= 2,
+            "{args:?}"
+        );
+    }
+    for args in [&["status"][..], &["tool", "tracedecay_status"]] {
+        assert_eq!(
+            async_worker_threads(Some(&parse_command(args))),
+            1,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn only_the_foreground_daemon_owns_a_tokio_runtime() {
     for args in [
         &["hook-stop"][..],
         &["current-counter"],
@@ -427,7 +445,7 @@ fn every_command_but_the_foreground_daemon_runs_on_the_native_runtime() {
     assert_eq!(command_runtime(None), CommandRuntime::Native);
     assert_eq!(
         command_runtime(Some(&parse_command(&["daemon", "run"]))),
-        CommandRuntime::Tokio
+        CommandRuntime::NativeWithTokio
     );
 }
 

@@ -41,7 +41,7 @@ pub use debris::{
 pub use findings::{
     code_generation_retention_finding, incident_debris_finding, orphan_store_finding,
     over_budget_finding, pending_schema_migration_finding, retention_backlog_finding,
-    table_growth_finding,
+    table_growth_finding, wal_checkpoint_pinned_finding,
 };
 pub use identity::{
     FreePageRatioV1, RelativeArtifactPathV1, StorageByteSizeV1, StoreKeyV1, TableNameV1,
@@ -54,5 +54,6 @@ pub use telemetry::{
     SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES, StorageTelemetryFuture, StorageTelemetryReadV1,
     StoreBudgetEvaluationV1, StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort,
     TableGrowthBaselinePendingV1, TableGrowthDoctorEvidenceV1, TableGrowthSampleV1,
-    TableGrowthTelemetryReadV1, is_significant_table_growth, table_growth_doctor_evidence,
+    TableGrowthTelemetryReadV1, TableGrowthUnavailableReasonV1, is_significant_table_growth,
+    table_growth_doctor_evidence,
 };

@@ -422,7 +422,7 @@ impl ProjectOpenFailure {
     }
 
     /// Records a failed open for its route. A `ResetRequired` refusal
-    /// additionally captures the refused store's on-disk fingerprint so a
+    /// also captures the refused store's on-disk fingerprint so a
     /// later retry can distinguish "still the refused files" from "the
     /// operator reset the store on disk".
     fn recorded_for_route(error: &TraceDecayError, route: &ProjectRouteKey) -> Self {
@@ -632,15 +632,26 @@ impl ProjectOpenTasks {
         if registry.active_task_count() >= MAX_TRACKED_PROJECT_OPEN_TASKS {
             return ProjectOpenTaskClaim::Saturated;
         }
+        // The open reaches `project_server_lifecycle`, whose timers are Tokio's.
+        let Some(runtime) =
+            tracedecay_runtime_core::native_runtime::tokio_handle("daemon.project_open.task")
+        else {
+            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
+                "project open refused: the daemon has no Tokio runtime".to_owned(),
+            ));
+        };
 
         let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let (task_completion, completion) = tokio::sync::watch::channel(false);
         let failure_route = route.clone();
-        let task = tokio::spawn(tracing::Instrument::instrument(
-            async move {
-                let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
+        // An aborted open abandons its blocking waits, not their effects:
+        // completion fires once the task and the blocking work it owns end.
+        let completion_owner: Arc<dyn Send + Sync> =
+            Arc::new(ProjectOpenTaskCompletionFinalizer(task_completion));
+        let task = runtime.spawn(tracing::Instrument::instrument(
+            native_runtime::BLOCKING_WORK_OWNER.scope(completion_owner, async move {
                 let state = match open(task_cancellation).await {
                     Ok(()) => ProjectOpenTaskState::Ready,
                     Err(error) => ProjectOpenTaskState::Failed(
@@ -648,7 +659,7 @@ impl ProjectOpenTasks {
                     ),
                 };
                 updates.send_replace(state);
-            },
+            }),
             tracing::trace_span!("daemon.project.admit.task"),
         ));
         registry.routes.insert(

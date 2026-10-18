@@ -633,7 +633,13 @@ impl CodeGraphActivationAuthorityV1 {
                         ),
                     ));
                 }
-                latest.prewarm_serving_derivations();
+                native_runtime::spawn_blocking(move || latest.prewarm_serving_derivations())
+                    .await
+                    .map_err(|error| {
+                        CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                            "code graph activation task failed: {error}"
+                        ))
+                    })?;
                 Ok(None)
             }
         }

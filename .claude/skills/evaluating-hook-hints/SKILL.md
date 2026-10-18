@@ -29,7 +29,7 @@ Run relevant existing evals in the owning package:
 For an adapter change, run its focused tests separately; Cargo accepts one name
 filter per invocation. Confirm non-zero test counts. Audit all supported hosts
 when shared hook behavior changes; test affected behavior without repeating
-identical substrate cases across every host.
+the same tests of shared code across every host.
 
 Preserve contextual hint budgets and the current bounded repetition policy;
 do not weaken limits to hide excessive hints. Report observed behavior,

@@ -182,6 +182,156 @@ fn bundled_skill_descriptions_satisfy_claude_description_rules() {
     }
 }
 
+/// Claude invoked none of the bundled skills while their descriptions only
+/// named a capability, and reached only 8 of 21 matching tasks with a bare
+/// "Use when" trigger. Both clauses together raised it to 21 of 21 (#4081).
+/// A skill that can misfire may add one "Skip when" sentence between them.
+#[test]
+fn bundled_skill_descriptions_tell_the_model_when_to_load_them() {
+    const LOAD: &str = " Load this skill before the first tool call.";
+    for skill in load_all_skill_docs() {
+        let description = required_scalar(&skill, "description");
+        assert!(
+            description.starts_with("Use when ") && description.ends_with(LOAD),
+            "{} description must start with \"Use when\" and end with \"Load this skill \
+             before the first tool call.\"; got {description:?}",
+            skill.path.display()
+        );
+        let trigger = &description[..description.len() - LOAD.len()];
+        if let Some((_, exclusion)) = trigger.split_once(" Skip when ") {
+            assert!(
+                exclusion.ends_with('.')
+                    && !exclusion.contains(". ")
+                    && !exclusion.contains("Skip when "),
+                "{} may add one \"Skip when ...\" sentence, directly before the load \
+                 clause; got {description:?}",
+                skill.path.display()
+            );
+        }
+    }
+}
+
+/// Every skill closes with the reply contract an eval can grade: what to
+/// return, which evidence to quote, and what not to do.
+#[test]
+fn bundled_skills_close_with_a_report_contract() {
+    for skill in load_all_skill_docs() {
+        let last_paragraph = skill
+            .body
+            .trim_end()
+            .rsplit("\n\n")
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            last_paragraph.starts_with("**Report:** ")
+                && last_paragraph.to_lowercase().contains(" do not "),
+            "{} must end with a `**Report:** ...` paragraph that names what to return and \
+             what not to do; got {last_paragraph:?}",
+            skill.path.display()
+        );
+    }
+}
+
+/// A skill with steps numbers them from 1 and opens them with the skip
+/// convention, so an eval can grade which steps ran and why one was skipped.
+#[test]
+fn stepped_skills_number_their_steps_and_name_the_skip_convention() {
+    const PREAMBLE: &str =
+        "Follow these steps in order. Report a step you skip as `skip: <reason>`.";
+    for skill in load_all_skill_docs() {
+        let numbers = skill
+            .body
+            .lines()
+            .filter_map(|line| line.split_once(". "))
+            .filter_map(|(number, _)| number.parse::<usize>().ok())
+            .collect::<Vec<_>>();
+        if numbers.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            numbers,
+            (1..=numbers.len()).collect::<Vec<_>>(),
+            "{} must number its steps 1..n in order",
+            skill.path.display()
+        );
+        assert!(
+            skill.body.contains(PREAMBLE),
+            "{} has numbered steps, so it must open them with {PREAMBLE:?}",
+            skill.path.display()
+        );
+    }
+}
+
+/// Claude, Cursor, and Kimi invoke any skill by name, so plugin commands exist
+/// only for workflows no skill covers. OpenCode exposes a skill as `/name`
+/// only when its metadata opts in.
+#[test]
+fn every_skill_is_a_slash_command_on_opencode() {
+    for skill in load_all_skill_docs() {
+        let opted_in = matches!(
+            skill.frontmatter.get("metadata"),
+            Some(SkillFrontmatterValue::Block(lines))
+                if lines.iter().any(|line| line == "opencode/slash: \"true\"")
+        );
+        assert!(
+            opted_in,
+            "{} must set `metadata: opencode/slash: \"true\"` so OpenCode offers it as \
+             /{}",
+            skill.path.display(),
+            skill.name
+        );
+    }
+}
+
+/// The session-start mandate routes by skill name, so every backticked name it
+/// gives must be a bundled skill.
+#[test]
+fn session_start_mandate_names_only_bundled_skills() {
+    let mandate = std::fs::read_to_string(crate::plugin_validation_support::repo_path(
+        "plugin/hooks/session-start-context.md",
+    ))
+    .unwrap();
+    let bundled = load_all_skill_docs()
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect::<Vec<_>>();
+    let named = mandate
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| is_kebab_case_skill_name(token))
+        .collect::<Vec<_>>();
+    assert!(
+        named.contains(&"routing-tracedecay"),
+        "the mandate must name the routing-tracedecay entry skill"
+    );
+    let unknown = named
+        .iter()
+        .filter(|name| !bundled.iter().any(|skill| skill == *name))
+        .collect::<Vec<_>>();
+    assert!(
+        unknown.is_empty(),
+        "plugin/hooks/session-start-context.md names skills that are not bundled: {unknown:?}"
+    );
+}
+
+/// Cursor's sessionStart context is best-effort, so its always-applied rule
+/// carries the mandate. One source keeps the two hosts' routing identical.
+#[test]
+fn cursor_rule_carries_the_skill_mandate() {
+    let read = |relative: &str| {
+        std::fs::read_to_string(crate::plugin_validation_support::repo_path(relative)).unwrap()
+    };
+    let mandate = read("plugin/hooks/session-start-context.md");
+    assert!(
+        read("plugin/rules/tracedecay.mdc").contains(mandate.trim_end()),
+        "plugin/rules/tracedecay.mdc must contain plugin/hooks/session-start-context.md verbatim"
+    );
+}
+
 /// Strict Agent Skills spec conformance.
 ///
 /// The whole shared skill set must stay strictly Agent-Skills-spec conformant:

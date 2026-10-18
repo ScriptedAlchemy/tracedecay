@@ -656,7 +656,7 @@ async fn settings_envelope(
         restart_recommended,
     };
     // Both editable scopes settle through the one cataloged daemon
-    // configuration effect. A profile write additionally requires the exact
+    // configuration effect. A profile write also requires the exact
     // profile identity bound by the daemon handshake.
     let mut legal_actions = Vec::new();
     if state.application_invocation_executor.is_some() {

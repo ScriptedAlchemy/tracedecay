@@ -17,6 +17,7 @@ use crate::admission::{
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::source::TranscriptIngestError;
 
 async fn queue_cursor_projection(
@@ -315,6 +316,7 @@ async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
             DEFAULT_COMPOSER_ENVELOPE_CAP,
             None,
             &cancellation,
+            &mut SourceSweep::new(PROVIDER, None),
         )
         .await;
 
@@ -426,6 +428,7 @@ async fn cancellation_after_first_drain_preserves_committed_projection_stats() {
             DEFAULT_COMPOSER_ENVELOPE_CAP,
             None,
             &cancellation,
+            &mut SourceSweep::new(PROVIDER, None),
         )
         .await
         .expect_err("post-drain cancellation must terminate the sweep");

@@ -24,7 +24,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::hosts::codex::{CodexDiscoveryHub, PendingTranscript};
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger, SourceSweep};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
@@ -176,19 +176,20 @@ fn pending_session(
     source: &VibeSource,
     path: &Path,
     project_root: &Path,
-    convergence: Option<(&CodexDiscoveryHub, &str)>,
-) -> TranscriptIngestResult<Option<(PendingTranscript, VibeMeta)>> {
-    let Some(pending) = PendingTranscript::observe_blocking(convergence, path)? else {
+    ledger: Option<&SourceLedger>,
+) -> TranscriptIngestResult<Option<(SourceClaim, VibeMeta)>> {
+    let Some(pending) = SourceClaim::observe_file_blocking(ledger, path)? else {
         return Ok(None);
     };
     match source.scoped_meta(path, project_root) {
         ScopedMeta::InScope(meta) => Ok(Some((pending, meta))),
-        ScopedMeta::OutsideScope => pending.finished(path).map(|()| None),
+        ScopedMeta::OutsideScope => pending.finished().map(|()| None),
         ScopedMeta::Undecided => Ok(None),
     }
 }
 
-#[tracing::instrument(name = "sessions.hosts.vibe.capture", level = "trace", skip_all)]
+/// A capture pass for a caller outside a provider run. It returns a permanent
+/// source refusal as its error instead of quarantining the source.
 pub async fn capture_vibe_observations(
     facade: &dyn HostAdmission,
     source: &VibeSource,
@@ -196,7 +197,28 @@ pub async fn capture_vibe_observations(
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-    convergence: Option<(&CodexDiscoveryHub, &str)>,
+) -> TranscriptIngestResult<VibeCaptureOutcome> {
+    capture_vibe_sweep(
+        facade,
+        source,
+        project_root,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(PROVIDER, None),
+    )
+    .await
+}
+
+#[tracing::instrument(name = "sessions.hosts.vibe.capture", level = "trace", skip_all)]
+pub(crate) async fn capture_vibe_sweep(
+    facade: &dyn HostAdmission,
+    source: &VibeSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<VibeCaptureOutcome> {
     let discovery = {
         let source = source.clone();
@@ -209,6 +231,7 @@ pub async fn capture_vibe_observations(
         })
         .await?
     };
+    let ledger = sweep.ledger();
     let mut outcome = VibeCaptureOutcome {
         deferred: discovery.is_truncated(),
         ..VibeCaptureOutcome::default()
@@ -227,24 +250,16 @@ pub async fn capture_vibe_observations(
             let source = source.clone();
             let project_root = project_root.to_path_buf();
             let session_path = path.clone();
-            let convergence =
-                convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_string()));
+            let ledger = ledger.clone();
             run_blocking_transcript_section("vibe", move || {
-                pending_session(
-                    &source,
-                    &session_path,
-                    &project_root,
-                    convergence
-                        .as_ref()
-                        .map(|(hub, consumer)| (hub, consumer.as_str())),
-                )
+                pending_session(&source, &session_path, &project_root, ledger.as_ref())
             })
             .await?
         }?
         else {
             continue;
         };
-        let progress = capture_vibe_path(
+        let progress = match capture_vibe_path(
             facade,
             &path,
             meta,
@@ -252,8 +267,15 @@ pub async fn capture_vibe_observations(
             max_new_bytes.map(|_| remaining),
             cancellation,
         )
-        .await?;
-        pending.admitted(&path, progress.source_deferred, progress.covered_through)?;
+        .await
+        {
+            Ok(progress) => progress,
+            Err(error) => {
+                sweep.refused(pending, error)?;
+                continue;
+            }
+        };
+        pending.admitted(progress.source_deferred, progress.covered_through)?;
         outcome.bytes_consumed = outcome
             .bytes_consumed
             .saturating_add(progress.bytes_consumed);

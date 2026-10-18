@@ -32,7 +32,9 @@
 //!   the boundary/provenance as a summary record without claiming plaintext
 //!   access to Codex's private summary.
 //! * `response_item` with `payload.type == "message"` and role `user` or
-//!   `assistant`, a conversational turn. Goal-context user messages are still
+//!   `assistant`, a conversational turn. When the `event_msg` written right
+//!   after it records the same message in the same turn, projection keeps the
+//!   event and retires this echo. Goal-context user messages are still
 //!   cataloged as compact goal-context rows from that message text, because
 //!   real rollouts often record the active goal only in this form. Other
 //!   roles stay unsupported injected context.
@@ -75,7 +77,7 @@ use tracedecay_store::ParseOffset;
 
 use meta::session_meta;
 
-use crate::runtime::ingest::TranscriptCatchUpFailure;
+use crate::runtime::ingest::quarantine::{SourceKey, SourceLedger, Witness, stat_if_present};
 use crate::runtime::jsonl_observation_admission::{
     SharedJsonlPathPin, install_shared_jsonl_preparation_authority, pin_shared_jsonl_paths,
     reserve_shared_jsonl_bytes,
@@ -84,7 +86,6 @@ use crate::runtime::shared::{ProjectMembership, TranscriptScopeMatcher};
 use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, TranscriptCursorKey, TranscriptDiscoveryBounds,
     TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    run_blocking_transcript_section,
 };
 
 #[cfg(test)]
@@ -170,6 +171,9 @@ impl Default for CodexDiscoveryHub {
 struct CodexDiscoveryHubState {
     discovery: CodexDiscoveryState,
     discovery_scanning: bool,
+    /// Shared scans started so far. A queued pass carries the count of the
+    /// scan that produced it.
+    shared_scans: u64,
     /// A consumer was told to wait for a scan in progress; the next scan to
     /// finish releases it.
     scan_waited: bool,
@@ -185,233 +189,13 @@ struct CodexDiscoveryConsumerState {
     mode: CodexDiscoveryConsumerMode,
     awaiting_ack: Option<CodexQueuedDiscoveryPass>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
-    /// Per-consumer outcomes tied to the settled identity observed before
-    /// reading. A retained source-contract failure avoids rereading bytes but
-    /// continues to block coverage; it never proves admission or convergence.
-    /// Reservations and records are released when the consumer deregisters.
-    read_outcomes: HashMap<PathBuf, TranscriptReadRecord>,
-}
-
-struct TranscriptReadRecord {
-    witness: SettledFileWitness,
-    failure: Option<TranscriptCatchUpFailure>,
-    _memory: ProcessSharedMemoryReservationV1,
-}
-
-impl CodexDiscoveryConsumerState {
-    fn holds_converged(&self, path: &Path, witness: SettledFileWitness) -> bool {
-        self.read_outcomes
-            .get(path)
-            .is_some_and(|recorded| recorded.witness == witness && recorded.failure.is_none())
-    }
-}
-
-/// A transcript file's corpus identity, taken only once its change time is
-/// settled so that an equal later identity proves the bytes unchanged.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SettledFileWitness {
-    identity: [u8; 32],
-    len: u64,
-}
-
-impl SettledFileWitness {
-    /// `None` once the file is gone, or for the reasons [`Self::of`] gives.
-    fn settled(path: &Path) -> TranscriptIngestResult<Option<Self>> {
-        match stat_if_present(path, "stat transcript for convergence")? {
-            Some(metadata) => Self::of(path, &metadata),
-            None => Ok(None),
-        }
-    }
-
-    /// `None` while the file's change time is inside the timestamp quantum,
-    /// or where no stat field witnesses a rewrite: the pass then reads it as
-    /// before.
-    fn of(path: &Path, metadata: &std::fs::Metadata) -> TranscriptIngestResult<Option<Self>> {
-        let changed = change_stamp(path, metadata);
-        if !metadata.is_file() || !changed.is_settled() {
-            return Ok(None);
-        }
-        Ok(Some(Self {
-            identity: codex_corpus_identity(path, metadata, changed)?,
-            len: metadata.len(),
-        }))
-    }
-}
-
-/// A delivered transcript file its discovery consumer still has to read.
-///
-/// Every host's history pass for a scope runs under that scope's discovery
-/// consumer, so one per-consumer record proves a file unchanged for all of
-/// them.
-pub(crate) struct PendingTranscript {
-    convergence: Option<(CodexDiscoveryHub, String, SettledFileWitness)>,
-}
-
-impl PendingTranscript {
-    /// `None` when the consumer already finished this exact file, or the file
-    /// is gone, so the pass skips it without opening it.
-    pub(crate) async fn observe(
-        discovery: Option<(&CodexDiscoveryHub, &str)>,
-        path: &Path,
-    ) -> TranscriptIngestResult<Option<Self>> {
-        let path = path.to_path_buf();
-        let discovery = discovery.map(|(hub, consumer)| (hub.clone(), consumer.to_string()));
-        run_blocking_transcript_section("codex", move || {
-            Self::observe_blocking(
-                discovery
-                    .as_ref()
-                    .map(|(hub, consumer)| (hub, consumer.as_str())),
-                &path,
-            )
-        })
-        .await?
-    }
-
-    /// [`Self::observe`] for a caller already on a blocking thread.
-    pub(crate) fn observe_blocking(
-        discovery: Option<(&CodexDiscoveryHub, &str)>,
-        path: &Path,
-    ) -> TranscriptIngestResult<Option<Self>> {
-        let Some((hub, consumer)) = discovery else {
-            return Ok(Some(Self { convergence: None }));
-        };
-        // A delivered pass is replayed until a catch-up acknowledges it, and a
-        // read failure withholds the acknowledgement. A file moved away since
-        // delivery (Codex archives a session by moving its rollout) has
-        // nothing left to read; failing on it would replay the same path
-        // forever. A later walk delivers the file again if it returns.
-        let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
-            return Ok(None);
-        };
-        let witness = SettledFileWitness::of(path, &metadata)?;
-        if let Some(witness) = witness
-            && hub.file_converged(consumer, path, witness)
-        {
-            return Ok(None);
-        }
-        if witness.is_none() && hub.path_recorded_converged(consumer, path) {
-            return Ok(None);
-        }
-        Ok(Some(Self {
-            convergence: witness.map(|witness| (hub.clone(), consumer.to_string(), witness)),
-        }))
-    }
-
-    pub(crate) fn cached_source_failure(&self, path: &Path) -> Option<TranscriptCatchUpFailure> {
-        let (hub, consumer, witness) = self.convergence.as_ref()?;
-        let inner = hub.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let recorded = inner.consumers.get(consumer)?.read_outcomes.get(path)?;
-        (recorded.witness == *witness)
-            .then_some(recorded.failure)
-            .flatten()
-    }
-
-    /// Only source-contract failures depend solely on the witnessed bytes.
-    /// Admission, privacy, and storage failures can recover independently.
-    pub(crate) fn record_source_failure(
-        self,
-        path: &Path,
-        error: &TranscriptIngestError,
-        failure: TranscriptCatchUpFailure,
-    ) -> TranscriptIngestResult<()> {
-        if matches!(
-            error,
-            TranscriptIngestError::Domain(_)
-                | TranscriptIngestError::ObservationContract(_)
-                | TranscriptIngestError::InvalidSourceIdentity { .. }
-        ) && let Some((hub, consumer, witness)) = self.convergence
-        {
-            hub.record_file_result(&consumer, path, witness, Some(failure))?;
-        }
-        Ok(())
-    }
-
-    /// Records convergence once admission covered every byte the witness
-    /// measured; a deferred or shorter admission reads the file again.
-    pub(crate) fn admitted(
-        self,
-        path: &Path,
-        source_deferred: bool,
-        covered_through: u64,
-    ) -> TranscriptIngestResult<()> {
-        match self.convergence {
-            Some((hub, consumer, witness))
-                if !source_deferred && covered_through == witness.len =>
-            {
-                hub.record_file_converged(&consumer, path, witness)
-            }
-            _ => Ok(()),
-        }
-    }
-
-    /// Records that the pass read this file and found nothing the
-    /// consumer's scope will ever admit from it unchanged (it is outside the
-    /// scope, or every source it names already converged), so later passes
-    /// do not re-read it to decide again.
-    pub(crate) fn finished(self, path: &Path) -> TranscriptIngestResult<()> {
-        match self.convergence {
-            Some((hub, consumer, witness)) => hub.record_file_converged(&consumer, path, witness),
-            None => Ok(()),
-        }
-    }
-
-    /// Whether admission consumed the whole settled file and left no tail.
-    /// An unsettled change time cannot prove that, so a later pass reads the
-    /// file again.
-    pub(crate) fn admission_settles(&self, source_deferred: bool, covered_through: u64) -> bool {
-        self.convergence
-            .as_ref()
-            .is_some_and(|(_, _, witness)| !source_deferred && covered_through == witness.len)
-    }
-
-    /// Owned copy of the settled identity, so a caller can finish the file
-    /// after asynchronous admission without observing it again.
-    pub(crate) fn settled(&self) -> Option<SettledTranscript> {
-        self.convergence
-            .as_ref()
-            .map(|(hub, consumer, witness)| SettledTranscript {
-                hub: hub.clone(),
-                consumer: consumer.clone(),
-                witness: *witness,
-            })
-    }
-}
-
-/// A file whose change time was already settled when this pass observed it.
-///
-/// Held across admission so the parent file can be finished once every
-/// source it names is covered, without a later pass opening it to decide.
-pub(crate) struct SettledTranscript {
-    hub: CodexDiscoveryHub,
-    consumer: String,
-    witness: SettledFileWitness,
-}
-
-impl SettledTranscript {
-    pub(crate) fn finished(self, path: &Path) -> TranscriptIngestResult<()> {
-        self.hub
-            .record_file_converged(&self.consumer, path, self.witness)
-    }
-}
-
-fn stat_if_present(
-    path: &Path,
-    operation: &'static str,
-) -> TranscriptIngestResult<Option<std::fs::Metadata>> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(TranscriptIngestError::ScanIo {
-            operation,
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
+    sources: SourceLedger,
 }
 
 enum CodexDiscoveryConsumerMode {
     Shared {
-        queue: VecDeque<CodexQueuedDiscoveryPass>,
+        /// Each pass with the shared scan that produced it.
+        queue: VecDeque<(u64, CodexQueuedDiscoveryPass)>,
     },
     Replay {
         generation: u128,
@@ -558,7 +342,6 @@ fn indexed_replay_pass(
     } else {
         frontier.for_coverage(false)
     };
-    let pin = std::sync::Arc::new(pin_shared_jsonl_paths(&paths));
     Ok((
         CodexDiscoveryPass {
             report: FileDiscoveryReport {
@@ -570,7 +353,7 @@ fn indexed_replay_pass(
             },
             next_frontier,
             selected_sources: Vec::new(),
-            _shared_page_pin: Some(pin),
+            _shared_page_pin: None,
         },
         next_position,
     ))
@@ -639,7 +422,7 @@ impl CodexDiscoveryHub {
                 mode,
                 awaiting_ack: None,
                 _memory: None,
-                read_outcomes: HashMap::new(),
+                sources: SourceLedger::default(),
             },
         );
     }
@@ -722,6 +505,7 @@ impl CodexDiscoveryHub {
         bounds: TranscriptDiscoveryBounds,
         frontier: CodexDiscoveryFrontier,
     ) -> TranscriptIngestResult<CodexDiscoveryDelivery> {
+        let mut scans_before_poll = None;
         loop {
             let work = {
                 let mut inner = self.inner.lock().map_err(|_| {
@@ -729,6 +513,7 @@ impl CodexDiscoveryHub {
                         detail: "Codex discovery hub lock is poisoned",
                     }
                 })?;
+                let scans_before_poll = *scans_before_poll.get_or_insert(inner.shared_scans);
                 let source_key = source.discovery_key();
                 let replay = {
                     let consumer_state = inner.consumers.get_mut(consumer).ok_or(
@@ -817,11 +602,25 @@ impl CodexDiscoveryHub {
                                 frontier,
                                 effective_position.as_ref(),
                             )?;
+                            drop(inner);
+                            let pass = std::sync::Arc::new(pass.with_page_pin());
+                            let mut inner = self.inner.lock().map_err(|_| {
+                                TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                                    detail: "Codex discovery hub lock is poisoned",
+                                }
+                            })?;
                             let state = inner.consumers.get_mut(consumer).ok_or(
                                 TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                                     detail: "Codex replay consumer registration disappeared",
                                 },
                             )?;
+                            // Another poll may have delivered while the pages
+                            // were pinned; an unacknowledged pass is redelivered.
+                            if let Some(awaiting) = &state.awaiting_ack {
+                                return Ok(CodexDiscoveryDelivery::Ready(std::sync::Arc::clone(
+                                    &awaiting.pass,
+                                )));
+                            }
                             let CodexDiscoveryConsumerMode::Replay {
                                 generation,
                                 position,
@@ -834,7 +633,6 @@ impl CodexDiscoveryHub {
                                 *generation = index_generation;
                                 *position = None;
                             }
-                            let pass = std::sync::Arc::new(pass);
                             state.awaiting_ack = Some(CodexQueuedDiscoveryPass {
                                 base: frontier,
                                 pass: std::sync::Arc::clone(&pass),
@@ -880,7 +678,17 @@ impl CodexDiscoveryHub {
                         CodexDiscoveryConsumerMode::Shared { queue } => queue.pop_front(),
                         CodexDiscoveryConsumerMode::Replay { .. } => None,
                     };
-                    if let Some(queued) = queued {
+                    if let Some((scan, queued)) = queued {
+                        // An empty pass from a scan that began before this
+                        // poll proves nothing about changes since, so the
+                        // consumer scans again instead of converging on it.
+                        if scan <= scans_before_poll
+                            && queued.pass.report.paths.is_empty()
+                            && queued.pass.selected_sources.is_empty()
+                            && queued.pass.next_frontier == queued.base
+                        {
+                            continue;
+                        }
                         if queued.base == frontier {
                             consumer_state.awaiting_ack = Some(queued.clone());
                             return Ok(CodexDiscoveryDelivery::Ready(queued.pass));
@@ -912,6 +720,7 @@ impl CodexDiscoveryHub {
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     inner.discovery_scanning = true;
+                    inner.shared_scans += 1;
                     CodexDiscoveryWork::Shared {
                         state: std::mem::take(&mut inner.discovery),
                         frontier: shared_frontier,
@@ -933,7 +742,11 @@ impl CodexDiscoveryHub {
             // on directory entries, so a large Codex profile cannot emit any
             // rollout until the dated tree has been re-walked in capacity-sized
             // slices.
-            let result = source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
+            let mut result =
+                source.discover_transcript_paths_with_state(bounds, base, &mut discovery);
+            if replay_source.is_none() {
+                result = result.map(CodexDiscoveryPass::with_page_pin);
+            }
             let mut inner = self.inner.lock().map_err(|_| {
                 TranscriptIngestError::InvalidCodexDiscoveryFrontier {
                     detail: "Codex discovery hub lock is poisoned",
@@ -947,12 +760,9 @@ impl CodexDiscoveryHub {
             let Some(source_key) = replay_source else {
                 inner.discovery_scanning = false;
                 inner.discovery = discovery;
-                let mut pass = result?;
+                let pass = result?;
                 inner.discovery.acknowledge();
                 inner.frontier = Some(pass.next_frontier);
-                pass._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
-                    &pass.report.paths,
-                )));
                 let pass = std::sync::Arc::new(pass);
                 let queued = CodexQueuedDiscoveryPass {
                     base,
@@ -960,6 +770,7 @@ impl CodexDiscoveryHub {
                     indexed_ack: None,
                 };
                 let shared_source_key = inner.source_key.clone();
+                let scan = inner.shared_scans;
                 for state in inner.consumers.values_mut() {
                     let CodexDiscoveryConsumerMode::Shared { queue } = &mut state.mode else {
                         continue;
@@ -975,7 +786,7 @@ impl CodexDiscoveryHub {
                         };
                         state.awaiting_ack = None;
                     } else {
-                        queue.push_back(queued.clone());
+                        queue.push_back((scan, queued.clone()));
                     }
                 }
                 drop(inner);
@@ -1103,33 +914,13 @@ impl CodexDiscoveryHub {
         }
     }
 
-    /// Whether `consumer` already recorded `path` converged. Used when the
-    /// file's change time is still inside the coarse timestamp quantum and
-    /// cannot yet mint a fresh witness, but an earlier pass already proved
-    /// the bytes unchanged.
-    fn path_recorded_converged(&self, consumer: &str, path: &Path) -> bool {
+    pub(crate) fn source_ledger(&self, consumer: &str) -> Option<SourceLedger> {
         self.inner
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .consumers
             .get(consumer)
-            .is_some_and(|state| {
-                state
-                    .read_outcomes
-                    .get(path)
-                    .is_some_and(|recorded| recorded.failure.is_none())
-            })
-    }
-
-    /// Whether `consumer` already finished `path` while it had exactly
-    /// `witness`.
-    fn file_converged(&self, consumer: &str, path: &Path, witness: SettledFileWitness) -> bool {
-        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-
-        inner
-            .consumers
-            .get(consumer)
-            .is_some_and(|state| state.holds_converged(path, witness))
+            .map(|state| state.sources.clone())
     }
 
     /// The delivered paths `consumer` would still read, in delivery order, so
@@ -1139,76 +930,20 @@ impl CodexDiscoveryHub {
         consumer: &str,
         paths: &[PathBuf],
     ) -> TranscriptIngestResult<Vec<PathBuf>> {
-        let witnesses = paths
-            .iter()
-            .map(|path| SettledFileWitness::settled(path))
-            .collect::<TranscriptIngestResult<Vec<_>>>()?;
-        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let state = inner.consumers.get(consumer);
-        Ok(paths
-            .iter()
-            .zip(witnesses)
-            .filter(|(path, witness)| {
-                !witness.is_some_and(|witness| {
-                    state.is_some_and(|state| {
-                        state
-                            .read_outcomes
-                            .get(*path)
-                            .is_some_and(|recorded| recorded.witness == witness)
-                    })
-                })
-            })
-            .map(|(path, _)| path.clone())
-            .collect())
-    }
-
-    /// Records that `consumer` finished `path` while it had `witness`.
-    /// Without capacity to retain the record the file is simply read again
-    /// by the next pass that finds it.
-    fn record_file_converged(
-        &self,
-        consumer: &str,
-        path: &Path,
-        witness: SettledFileWitness,
-    ) -> TranscriptIngestResult<()> {
-        self.record_file_result(consumer, path, witness, None)
-    }
-
-    fn record_file_result(
-        &self,
-        consumer: &str,
-        path: &Path,
-        witness: SettledFileWitness,
-        failure: Option<TranscriptCatchUpFailure>,
-    ) -> TranscriptIngestResult<()> {
-        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(state) = inner.consumers.get_mut(consumer) else {
-            return Ok(());
+        let Some(ledger) = self.source_ledger(consumer) else {
+            return Ok(paths.to_vec());
         };
-        if let Some(recorded) = state.read_outcomes.get_mut(path) {
-            recorded.witness = witness;
-            recorded.failure = failure;
-            return Ok(());
+        let mut needed = Vec::with_capacity(paths.len());
+        for path in paths {
+            let witness = match stat_if_present(path, "stat transcript for convergence")? {
+                Some(metadata) => Witness::settled_file(path, &metadata)?,
+                None => None,
+            };
+            if !witness.is_some_and(|witness| ledger.holds(&SourceKey::file(path), witness)) {
+                needed.push(path.clone());
+            }
         }
-        let charge = candidate_charge(
-            path,
-            u64::try_from(std::mem::size_of::<(PathBuf, TranscriptReadRecord)>())
-                .unwrap_or(u64::MAX),
-        )?;
-        let Some(reservation) =
-            reserve_shared_jsonl_bytes(charge, "transcript read outcome capacity")?
-        else {
-            return Ok(());
-        };
-        state.read_outcomes.insert(
-            path.to_path_buf(),
-            TranscriptReadRecord {
-                witness,
-                failure,
-                _memory: reservation,
-            },
-        );
-        Ok(())
+        Ok(needed)
     }
 
     pub(crate) fn acknowledge(&self, consumer: &str) {
@@ -2256,6 +1991,17 @@ pub struct CodexDiscoveryPass {
     _shared_page_pin: Option<std::sync::Arc<SharedJsonlPathPin>>,
 }
 
+impl CodexDiscoveryPass {
+    /// Pinning canonicalizes every path. The hub pins outside its lock
+    /// because native ingest workers read their source ledgers under it.
+    fn with_page_pin(mut self) -> Self {
+        self._shared_page_pin = Some(std::sync::Arc::new(pin_shared_jsonl_paths(
+            &self.report.paths,
+        )));
+        self
+    }
+}
+
 fn retained_scan_step(
     source: &CodexSource,
     state: &mut CodexDiscoveryState,
@@ -2879,7 +2625,7 @@ fn hash_directory_name(hasher: &mut Sha256, name: &std::ffi::OsStr) {
     hasher.update(name.to_string_lossy().as_bytes());
 }
 
-fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult<u64> {
+pub(crate) fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult<u64> {
     u64::try_from(path_byte_len(path))
         .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
             detail: "candidate path size exceeds discovery accounting range",
@@ -2892,13 +2638,13 @@ fn candidate_charge(path: &Path, metadata_charge: u64) -> TranscriptIngestResult
 
 /// The change stamp a corpus identity carries, settled against the clock now:
 /// after the stat, before any read of the bytes the identity stands for.
-fn change_stamp(path: &Path, metadata: &std::fs::Metadata) -> ChangeStamp {
+pub(crate) fn change_stamp(path: &Path, metadata: &std::fs::Metadata) -> ChangeStamp {
     RewriteWitness::native_path_stamp(path, metadata, ChangeClockReading::now())
 }
 
 /// Discovery skips re-delivering a file whose identity is unchanged, so an
 /// identity carrying an unsettled stamp matches no later one.
-fn codex_corpus_identity(
+pub(crate) fn codex_corpus_identity(
     path: &Path,
     metadata: &std::fs::Metadata,
     changed: ChangeStamp,

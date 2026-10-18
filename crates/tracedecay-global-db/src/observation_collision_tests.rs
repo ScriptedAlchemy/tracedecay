@@ -2662,7 +2662,6 @@ async fn run_vibe_trigger(
         ObservationScopeV1::Profile,
         None,
         &tracedecay_sessions::observation::ObservationCancellation::default(),
-        None,
     )
     .await
 }
@@ -3360,7 +3359,7 @@ async fn rewind_source_cursor(
 /// what wedges retained ingest. The durable cursor already sits exactly at
 /// `next_cursor`, so the coverage is applied and the replay is a duplicate.
 /// A conflict whose ledger already records this coverage restores the cursor.
-/// A missing ledger row stays a collision.
+/// A pruned ledger row is recorded again from the durable cursor.
 #[asupersync::test]
 async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate() {
     const FILE_IDENTITY: u64 = 41;
@@ -3873,4 +3872,312 @@ async fn drain_keeps_divergent_workflow_fact_state_a_hard_error() {
         store.projection_checkpoint().await.unwrap().last_sequence(),
         0
     );
+}
+
+fn file_bytes_advance(
+    observation: &DurableObservationV1,
+    expected: Option<&ObservationCursorAdvance>,
+    range: (u64, u64),
+    reason: ObservationCoverageReason,
+) -> ObservationCursorAdvance {
+    ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        ObservationOrderingDomainV1::FileBytes,
+        expected.map(|advance| advance.next_cursor().clone()),
+        ObservationSourceRangeV1::new(range.0, range.1).unwrap(),
+        reason,
+    )
+    .unwrap()
+}
+
+/// Admits `[0, 5)`, `[5, 10)` and `[10, 20)`, so the durable cursor sits two
+/// advances past `[5, 10)` and that range's ledger row is already pruned.
+async fn admitted_three_ranges(
+    name: &str,
+) -> (
+    TempDir,
+    HostAdmissionTestRuntimeV1,
+    DurableObservationV1,
+    [ObservationCursorAdvance; 3],
+) {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new(format!("session.{name}")).unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        &format!("record.{name}"),
+        1,
+        "admitted ranges fixture",
+        &format!("receipt.{name}"),
+        None,
+    );
+    let first = file_bytes_advance(
+        &observation,
+        None,
+        (0, 5),
+        ObservationCoverageReason::BlankFrame,
+    );
+    let second = file_bytes_advance(
+        &observation,
+        Some(&first),
+        (5, 10),
+        ObservationCoverageReason::OutOfScope,
+    );
+    let third = file_bytes_advance(
+        &observation,
+        Some(&second),
+        (10, 20),
+        ObservationCoverageReason::BlankFrame,
+    );
+    for advance in [&first, &second, &third] {
+        assert_eq!(
+            store.advance_source_cursor(advance.clone()).await.unwrap(),
+            CursorAdvanceOutcome::Committed
+        );
+    }
+    (tmp, runtime, observation, [first, second, third])
+}
+
+/// Issue #4012: a rescan that resumes more than one advance behind the
+/// admitted frontier replays a coverage whose runtime receipt is committed
+/// and whose ledger row was pruned. That failed every pass with a
+/// non-retryable `observation_cursor_advance_collision`, and the cursor never
+/// moved again.
+#[asupersync::test]
+async fn rescan_behind_a_pruned_ledger_row_reconciles_from_the_durable_cursor() {
+    let (_tmp, runtime, observation, [first, second, _]) =
+        admitted_three_ranges("rescan-pruned-row").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, first.next_cursor()).await;
+    let rescan = file_bytes_advance(
+        &observation,
+        Some(&first),
+        (5, 10),
+        ObservationCoverageReason::BlankFrame,
+    );
+    assert_eq!(rescan.coverage(), second.coverage());
+
+    assert_eq!(
+        store.advance_source_cursor(rescan.clone()).await.unwrap(),
+        CursorAdvanceOutcome::Committed,
+        "the rescan must advance from the durable cursor"
+    );
+    assert_eq!(
+        store.advance_source_cursor(rescan.clone()).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate,
+        "the next pass finds the range owned"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(rescan.next_cursor())
+    );
+}
+
+/// The same rescan with the original command bytes is an exact runtime
+/// replay. Reporting it as a duplicate left the cursor behind, so the next
+/// advance lost its compare-and-swap on every pass.
+#[asupersync::test]
+async fn exact_replay_behind_the_frontier_moves_the_cursor() {
+    let (_tmp, runtime, observation, [first, second, _]) =
+        admitted_three_ranges("rescan-exact-replay").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, first.next_cursor()).await;
+
+    store.advance_source_cursor(second.clone()).await.unwrap();
+    assert_eq!(
+        store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(second.next_cursor())
+    );
+}
+
+/// A rescan behind a retained ledger row that names another reason is the
+/// runtime write path's typed ledger disagreement, not an anonymous
+/// collision.
+#[asupersync::test]
+async fn rescan_behind_a_retained_row_reports_the_ledger_disagreement() {
+    let (_tmp, runtime, observation, [_, second, third]) =
+        admitted_three_ranges("rescan-retained-row").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, second.next_cursor()).await;
+    let rescan = file_bytes_advance(
+        &observation,
+        Some(&second),
+        (10, 20),
+        ObservationCoverageReason::OutOfScope,
+    );
+    assert_eq!(rescan.coverage(), third.coverage());
+
+    let error = store.advance_source_cursor(rescan).await.unwrap_err();
+    let ObservationStoreError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("a retained row with another reason is a ledger disagreement, got {error:?}");
+    };
+    assert!(matches!(
+        disagreement.stored().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::BlankFrame)
+    ));
+    assert!(matches!(
+        disagreement.candidate().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::OutOfScope)
+    ));
+}
+
+/// Output ownership is durable provenance, read fresh by every projection.
+///
+/// Retiring a quarantined projection removes the output the observation
+/// created and its provenance through the same writer connection that
+/// projects (`retire_quarantined_projection`). The next observation of that
+/// output must then create it, exactly as it would on a freshly opened store,
+/// instead of acting on ownership the writer remembered from before.
+#[asupersync::test]
+async fn retired_output_is_created_by_the_next_observation_of_it() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.retired-output-owner").unwrap();
+    let record_id = "record.retired-output-owner";
+    let output_message_id = format!("message.{record_id}");
+    let (first, write) = collision_candidate(
+        &session_id,
+        record_id,
+        1,
+        "first rendering",
+        "receipt.retired-output-owner.first",
+        None,
+    );
+    store.persist_observation(write).await.unwrap();
+    assert!(matches!(
+        store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+            params![COLLISION_PROVIDER, output_message_id.as_str()],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "DELETE FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                first.observation_id().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO observation_projection_dispositions
+                (projector_version, observation_id, receipt_id, reason)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                first.observation_id().as_str(),
+                first.receipt().receipt().receipt_id().as_str(),
+                ProjectionSkipReason::SanitizationRefused.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let cursor = store
+        .get_source_cursor(first.source(), first.scope())
+        .await
+        .unwrap();
+    let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
+    let next_record = ObservationId::new("record.retired-output-owner.next").unwrap();
+    let range = ObservationSourceRangeV1::new(1, 2).unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider.clone(),
+        "message",
+        next_record.clone(),
+        CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_message_id(ObservationId::new(output_message_id.as_str()).unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": "second rendering"}),
+            model: None,
+            timestamp: Some(1_750_000_001),
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let second = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            next_record,
+        )
+        .unwrap(),
+        fixture_receipt("receipt.retired-output-owner.second", &payload),
+        RetentionClass::new("retention.collision-test").unwrap(),
+        payload,
+    )
+    .unwrap();
+    assert_ne!(second.observation_id(), first.observation_id());
+    store
+        .persist_observation(anchored_write_for(second.clone(), cursor))
+        .await
+        .unwrap();
+    let outcome = store
+        .project_observation(second.observation_id())
+        .await
+        .expect("the next observation of a retired output must project");
+    assert!(
+        matches!(outcome, ProjectionPersistOutcome::Projected(_)),
+        "{outcome:?}"
+    );
+
+    let owners = provenance_rows(&runtime)
+        .await
+        .into_iter()
+        .filter(|row| row.5 == output_message_id)
+        .map(|row| (row.1, row.7))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        vec![(second.observation_id().as_str().to_owned(), 1)],
+        "the retired output's next observation must own and create it"
+    );
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
 }

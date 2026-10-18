@@ -242,7 +242,7 @@ has acted on it.
 
 ## 5. Reproducing this evaluation
 
-The tool surface changed along with the retrieval rewrite: memory operations
+The tool interface changed along with the retrieval rewrite: memory operations
 are now separate MCP tools (`fact_store_add`, `fact_store_search`,
 `fact_store_probe`, `fact_store_reason`, …) rather than one `fact_store` tool
 with an `action` field, and the CLI's `tracedecay tool <name> --args '<json>'`

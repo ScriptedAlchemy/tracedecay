@@ -401,7 +401,7 @@ struct RegisteredReplayConsumer {
     graph: Weak<tracedecay_project::project::TraceDecay>,
     delivery_settlements:
         Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<tracedecay_runtime_core::native_runtime::NativeTask<()>>,
     /// This registration's spool wake; its identity is the registration's.
     wake: Arc<tokio::sync::Notify>,
     /// The failures of the last finished sweep; `None` before the first.
@@ -456,52 +456,32 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
 /// Start `graph`'s replay consumer for its hook data root. The newest owner
 /// of a data root takes it over: a reopen can register while the retiring
 /// owner's server still holds the older graph, and that graph's release must
-/// not leave the reopened project without a consumer. Returns `false` when
-/// `graph`'s own consumer is already running.
+/// not leave the reopened project without a consumer.
 pub(crate) fn register_hook_v2_replay_consumer(
     graph: Arc<tracedecay_project::project::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
-) -> bool {
+) -> ReplayConsumerStart {
     let data_root = graph.hook_store_layout().data_root.clone();
     let project_root = graph.project_root().to_path_buf();
     let graph = Arc::downgrade(&graph);
     let delivery_settlements = Arc::downgrade(&delivery_settlements);
     let wake = Arc::new(tokio::sync::Notify::new());
-    let displaced = match registered_replay_roots().lock() {
-        Ok(mut roots) => {
-            if roots.get(&data_root).is_some_and(|consumer| {
-                Weak::ptr_eq(&consumer.graph, &graph)
-                    && consumer.graph.upgrade().is_some()
-                    && consumer.delivery_settlements.upgrade().is_some()
-            }) {
-                return false;
-            }
-            roots.insert(
-                data_root.clone(),
-                RegisteredReplayConsumer {
-                    graph: graph.clone(),
-                    delivery_settlements: delivery_settlements.clone(),
-                    task: None,
-                    wake: Arc::clone(&wake),
-                    last_sweep: None,
-                },
-            )
-        }
-        Err(_) => return false,
-    };
-    if let Some(task) = displaced.and_then(|consumer| consumer.task) {
-        task.abort();
-    }
     let task_data_root = data_root.clone();
     let task_graph = graph.clone();
     let task_delivery_settlements = delivery_settlements.clone();
     let task_project_sessions = project_sessions;
     let task_background_cpu = background_cpu;
-    spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
     let task_wake = Arc::clone(&wake);
-    let task = tokio::spawn(async move {
+    // The task is spawned before the registry changes and held at `start`
+    // until it is registered, so a runtime that refuses it leaves the data
+    // root's running consumer in place.
+    let (start, started) = tokio::sync::oneshot::channel::<()>();
+    let consumer = async move {
+        if started.await.is_err() {
+            return;
+        }
         loop {
             let (Some(graph_owner), Some(delivery_settlements)) =
                 (task_graph.upgrade(), task_delivery_settlements.upgrade())
@@ -548,25 +528,66 @@ pub(crate) fn register_hook_v2_replay_consumer(
                 break;
             }
         }
-        spool_watch::detach_consumer(&task_data_root, &task_wake);
-        if let Ok(mut roots) = registered_replay_roots().lock()
-            && roots
-                .get(&task_data_root)
-                .is_some_and(|registered| Arc::ptr_eq(&registered.wake, &task_wake))
-        {
-            roots.remove(&task_data_root);
+        release_replay_registration(&task_data_root, &task_wake);
+    };
+    let task = match tracedecay_runtime_core::native_runtime::NativeTask::spawn(consumer) {
+        Ok(task) => task,
+        Err(error) => {
+            tracing::warn!(%error, data_root = %data_root.display(), "hook replay consumer not admitted");
+            return ReplayConsumerStart::RuntimeUnavailable;
         }
-    });
-    match registered_replay_roots().lock() {
-        Ok(mut roots) => match roots.get_mut(&data_root) {
-            Some(registered) if Arc::ptr_eq(&registered.wake, &wake) => {
-                registered.task = Some(task);
+    };
+    let displaced = match registered_replay_roots().lock() {
+        Ok(mut roots) => {
+            if roots.get(&data_root).is_some_and(|consumer| {
+                Weak::ptr_eq(&consumer.graph, &graph)
+                    && consumer.graph.upgrade().is_some()
+                    && consumer.delivery_settlements.upgrade().is_some()
+            }) {
+                return ReplayConsumerStart::AlreadyRunning;
             }
-            _ => task.abort(),
-        },
-        Err(_) => task.abort(),
+            roots.insert(
+                data_root.clone(),
+                RegisteredReplayConsumer {
+                    graph,
+                    delivery_settlements,
+                    task: Some(task),
+                    wake: Arc::clone(&wake),
+                    last_sweep: None,
+                },
+            )
+        }
+        Err(_) => return ReplayConsumerStart::RegistryPoisoned,
+    };
+    if let Some(task) = displaced.and_then(|consumer| consumer.task) {
+        task.abort();
     }
-    true
+    spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
+    let _ = start.send(());
+    ReplayConsumerStart::Started
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayConsumerStart {
+    Started,
+    /// `graph`'s own consumer already drains the data root.
+    AlreadyRunning,
+    /// The native runtime refused the consumer; the registry is unchanged.
+    RuntimeUnavailable,
+    RegistryPoisoned,
+}
+
+/// Detaches the consumer woken by `wake` and drops its registration, unless a
+/// newer consumer already took `data_root` over.
+fn release_replay_registration(data_root: &Path, wake: &Arc<tokio::sync::Notify>) {
+    spool_watch::detach_consumer(data_root, wake);
+    if let Ok(mut roots) = registered_replay_roots().lock()
+        && roots
+            .get(data_root)
+            .is_some_and(|registered| Arc::ptr_eq(&registered.wake, wake))
+    {
+        roots.remove(data_root);
+    }
 }
 
 /// Stop and join whichever replay consumer owns `data_root`. For daemon
@@ -729,7 +750,7 @@ mod tests {
     }
 
     impl ReplayOwnerFixture {
-        fn register(&self, graph: &ProjectGraph) -> bool {
+        fn register(&self, graph: &ProjectGraph) -> ReplayConsumerStart {
             register_hook_v2_replay_consumer(
                 Arc::clone(graph),
                 Arc::clone(&self.settlements),
@@ -739,26 +760,26 @@ mod tests {
         }
     }
 
-    async fn assert_newer_owner_survives(data_root: &Path, newer: &ProjectGraph) {
-        let newer_task_running = registered_replay_roots()
+    async fn assert_owner_keeps_replay(data_root: &Path, owner: &ProjectGraph) {
+        let owner_task_running = registered_replay_roots()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(data_root)
             .is_some_and(|registered| {
-                Weak::ptr_eq(&registered.graph, &Arc::downgrade(newer))
+                Weak::ptr_eq(&registered.graph, &Arc::downgrade(owner))
                     && registered
                         .task
                         .as_ref()
                         .is_some_and(|task| !task.is_finished())
             });
         assert!(
-            newer_task_running,
-            "the newer owner must own the data root's running replay consumer"
+            owner_task_running,
+            "the owner must keep the data root's running replay consumer"
         );
         assert!(hook_v2_replay_consumer_registered(data_root));
         assert!(
             spool_watch::consumer_attached(data_root),
-            "the newer owner's consumer must keep the spool wake"
+            "the owner's consumer must keep the spool wake"
         );
         shutdown_hook_v2_replay_consumer(data_root).await;
         assert!(!hook_v2_replay_consumer_registered(data_root));
@@ -771,14 +792,22 @@ mod tests {
         let (fixture, older, newer) = replay_owner_fixture().await;
         let data_root = older.hook_store_layout().data_root.clone();
         assert_eq!(data_root, newer.hook_store_layout().data_root);
-        assert!(fixture.register(&older), "the older owner starts replay");
+        assert_eq!(
+            fixture.register(&older),
+            ReplayConsumerStart::Started,
+            "the older owner starts replay"
+        );
         let older_owner = Arc::downgrade(&older);
         drop(older);
-        assert!(fixture.register(&newer), "the reopened owner starts replay");
+        assert_eq!(
+            fixture.register(&newer),
+            ReplayConsumerStart::Started,
+            "the reopened owner starts replay"
+        );
 
         retire_hook_v2_replay_consumer(&data_root, &older_owner).await;
 
-        assert_newer_owner_survives(&data_root, &newer).await;
+        assert_owner_keeps_replay(&data_root, &newer).await;
     }
 
     /// The project reopens while its retiring owner's server still holds the
@@ -788,16 +817,40 @@ mod tests {
     async fn a_reopen_takes_over_replay_from_an_owner_still_retiring() {
         let (fixture, older, newer) = replay_owner_fixture().await;
         let data_root = older.hook_store_layout().data_root.clone();
-        assert!(fixture.register(&older), "the older owner starts replay");
+        assert_eq!(
+            fixture.register(&older),
+            ReplayConsumerStart::Started,
+            "the older owner starts replay"
+        );
         let newer_registered = fixture.register(&newer);
 
         retire_hook_v2_replay_consumer(&data_root, &Arc::downgrade(&older)).await;
         drop(older);
 
-        assert!(
+        assert_eq!(
             newer_registered,
+            ReplayConsumerStart::Started,
             "the reopened owner's registration must be accepted"
         );
-        assert_newer_owner_survives(&data_root, &newer).await;
+        assert_owner_keeps_replay(&data_root, &newer).await;
+    }
+
+    /// Project opens register from native workers, which have no Tokio
+    /// runtime; the reopened owner must still take the data root over.
+    #[tokio::test]
+    async fn a_registration_off_tokio_takes_over_replay() {
+        let (fixture, older, newer) = replay_owner_fixture().await;
+        let data_root = older.hook_store_layout().data_root.clone();
+        assert_eq!(fixture.register(&older), ReplayConsumerStart::Started);
+
+        let registered = std::thread::scope(|scope| {
+            scope
+                .spawn(|| fixture.register(&newer))
+                .join()
+                .expect("registration thread")
+        });
+
+        assert_eq!(registered, ReplayConsumerStart::Started);
+        assert_owner_keeps_replay(&data_root, &newer).await;
     }
 }

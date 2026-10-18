@@ -2476,7 +2476,7 @@ fn serialize_page_row<T: serde::Serialize>(
     staging.clear();
     serde_json::to_writer(&mut *staging, value)
         .map_err(|error| CodeIndexProductionErrorV1::Contract(format!("{message}: {error}")))?;
-    Ok(staging.as_slice().to_vec())
+    Ok(staging.to_vec())
 }
 
 fn admit_validated_file_parts(

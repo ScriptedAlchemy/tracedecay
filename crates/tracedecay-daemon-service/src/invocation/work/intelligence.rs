@@ -2,9 +2,10 @@
 //!
 //! These handlers bind their read operation to the admitted capability and
 //! use-case context before reading the registered Work authorities. Experience
-//! additionally snapshots current configuration consent, so expertise never
+//! also snapshots current configuration consent, so expertise never
 //! relies on caller-provided or stale authorization state.
 
+use tracedecay_application::work::RegisteredWorkApplicationServicesV1;
 use tracedecay_contracts::{
     ApplicationProblem, Deadline, RequestContext, RequestId, SafeDiagnostic,
     WorkAttemptListOperationV1, WorkAttemptListRequestV1, WorkExperienceRequestV1,
@@ -22,41 +23,62 @@ use tracedecay_global_db::configuration::{
 
 use super::{RegisteredWorkRuntime, complete_work_read, preparation, work_product_problem};
 
+fn intelligence_service(
+    registered: &RegisteredWorkRuntime,
+    capability: &str,
+    use_case: &UseCaseId,
+) -> Result<
+    tracedecay_contracts::WorkIntelligenceServiceV1<
+        tracedecay_rusqlite_runtime::work_product::AuthorizedWorkProductReadStorageV1,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+    ApplicationProblem,
+> {
+    let unavailable = || {
+        work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+        )
+    };
+    let capability = CapabilityId::new(capability).map_err(|_| unavailable())?;
+    tracedecay_application::work::authorized_work_intelligence_service(
+        &registered.database,
+        WorkProductBindingV1::new(capability, use_case.clone()),
+        registered.authority.clone(),
+    )
+    .map_err(|_| unavailable())
+}
+
 #[tracing::instrument(
     name = "daemon.service.work.generate_proposal",
     level = "trace",
     skip_all
 )]
-pub(super) fn generate_proposal(
+pub(super) async fn generate_proposal(
     registered: &RegisteredWorkRuntime,
+    services: &RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     capability: &str,
     use_case: &UseCaseId,
     request: tracedecay_contracts::GenerateProposalRequest,
 ) -> Result<tracedecay_contracts::GeneratedWorkProposal, ApplicationProblem> {
-    let capability = CapabilityId::new(capability).map_err(|_| {
-        work_product_problem(
-            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-        )
-    })?;
-    let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    tracedecay_application::work::authorized_work_intelligence_service(
-        &registered.database,
-        binding,
-        registered.authority.clone(),
-    )
-    .map_err(|_| {
-        work_product_problem(
-            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-        )
-    })?
-    .generate_proposal(
-        context,
-        registered.configuration_digest.clone(),
-        &registered.proposal_routing,
-        request,
-    )
-    .map_err(work_product_problem)
+    let (registered, context, capability, use_case) = (
+        registered.clone(),
+        context.clone(),
+        capability.to_owned(),
+        use_case.clone(),
+    );
+    services
+        .read(move |_| {
+            intelligence_service(&registered, &capability, &use_case)?
+                .generate_proposal(
+                    &context,
+                    registered.configuration_digest.clone(),
+                    &registered.proposal_routing,
+                    request,
+                )
+                .map_err(work_product_problem)
+        })
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -65,9 +87,9 @@ pub(super) fn generate_proposal(
     level = "trace",
     skip_all
 )]
-pub(super) fn execution_history(
+pub(super) async fn execution_history(
     registered: &RegisteredWorkRuntime,
-    services: &tracedecay_application::work::RegisteredWorkApplicationServicesV1,
+    services: &RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -79,32 +101,39 @@ pub(super) fn execution_history(
     deadline: Deadline,
     request: WorkAttemptListRequestV1,
 ) -> DaemonInvocationResponse {
-    // Initial attempt admission appends the accepted-attempt graph event and
-    // inserts the attempt row in one transaction. Read both from that committed
-    // generation; a fresh attempt does not need a session correlation.
-    let attempts = services.attempts().list(
-        context,
-        WorkAttemptListOperationV1::ExecutionHistory,
-        &request,
-        || {
-            preparation::current_work_product_attempt_topology(
-                registered,
-                context,
-                capability,
-                &use_case,
-                observed_at,
-            )
-        },
-    );
-    let history = attempts.and_then(|attempts| {
-        let storage = registered.database.work_storage().map_err(|_| {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "application.work-execution-history.unavailable".to_owned(),
-                message: "The Work execution timing authority is unavailable.".to_owned(),
+    let history = {
+        let (registered, context, capability, use_case) = (
+            registered.clone(),
+            context.clone(),
+            capability.to_owned(),
+            use_case.clone(),
+        );
+        services
+            .read(move |services| {
+                let attempts = services.attempts().list(
+                    &context,
+                    WorkAttemptListOperationV1::ExecutionHistory,
+                    &request,
+                    || {
+                        preparation::current_work_product_attempt_topology(
+                            &registered,
+                            &context,
+                            &capability,
+                            &use_case,
+                            observed_at,
+                        )
+                    },
+                )?;
+                let storage = registered.database.work_storage().map_err(|_| {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "application.work-execution-history.unavailable".to_owned(),
+                        message: "The Work execution timing authority is unavailable.".to_owned(),
+                    })
+                })?;
+                tracedecay_contracts::project_work_execution_history(&storage, &context, attempts)
             })
-        })?;
-        tracedecay_contracts::project_work_execution_history(&storage, context, attempts)
-    });
+            .await
+    };
     complete_work_read(
         registered,
         request_id,
@@ -124,6 +153,7 @@ pub(super) fn execution_history(
 #[tracing::instrument(name = "daemon.service.work.experience", level = "trace", skip_all)]
 pub(super) async fn experience(
     registered: &RegisteredWorkRuntime,
+    services: &RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -135,17 +165,8 @@ pub(super) async fn experience(
     capability: &str,
     request: WorkExperienceRequestV1,
 ) -> DaemonInvocationResponse {
-    let Ok(capability) = CapabilityId::new(capability) else {
+    let Ok(intelligence) = intelligence_service(registered, capability, &use_case) else {
         return unavailable(request_id);
-    };
-    let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence = match tracedecay_application::work::authorized_work_intelligence_service(
-        &registered.database,
-        binding,
-        registered.authority.clone(),
-    ) {
-        Ok(service) => service,
-        Err(_) => return unavailable(request_id),
     };
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         registered.database.clone(),
@@ -161,6 +182,14 @@ pub(super) async fn experience(
         Ok(consent) => consent,
         Err(_) => return unavailable(request_id),
     };
+    let read_context = context.clone();
+    let experienced = services
+        .read(move |_| {
+            intelligence
+                .experience(&read_context, request, consent)
+                .map_err(work_product_problem)
+        })
+        .await;
     complete_work_read(
         registered,
         request_id,
@@ -169,9 +198,7 @@ pub(super) async fn experience(
         operation_key,
         use_case,
         input_digest,
-        intelligence
-            .experience(context, request, consent)
-            .map_err(work_product_problem),
+        experienced,
         observed_at,
         deadline,
         WorkApplicationOutcomeV1::Experience,
@@ -184,8 +211,9 @@ pub(super) async fn experience(
     level = "trace",
     skip_all
 )]
-pub(super) fn compare_proposal(
+pub(super) async fn compare_proposal(
     registered: &RegisteredWorkRuntime,
+    services: &RegisteredWorkApplicationServicesV1,
     request_id: String,
     context: &RequestContext,
     canonical_request_id: RequestId,
@@ -197,18 +225,17 @@ pub(super) fn compare_proposal(
     capability: &str,
     request: WorkProposalComparisonRequestV1,
 ) -> DaemonInvocationResponse {
-    let Ok(capability) = CapabilityId::new(capability) else {
+    let Ok(intelligence) = intelligence_service(registered, capability, &use_case) else {
         return unavailable(request_id);
     };
-    let binding = WorkProductBindingV1::new(capability, use_case.clone());
-    let intelligence = match tracedecay_application::work::authorized_work_intelligence_service(
-        &registered.database,
-        binding,
-        registered.authority.clone(),
-    ) {
-        Ok(service) => service,
-        Err(_) => return unavailable(request_id),
-    };
+    let read_context = context.clone();
+    let compared = services
+        .read(move |_| {
+            intelligence
+                .compare_proposal(&read_context, request)
+                .map_err(work_product_problem)
+        })
+        .await;
     complete_work_read(
         registered,
         request_id,
@@ -217,9 +244,7 @@ pub(super) fn compare_proposal(
         operation_key,
         use_case,
         input_digest,
-        intelligence
-            .compare_proposal(context, request)
-            .map_err(work_product_problem),
+        compared,
         observed_at,
         deadline,
         WorkApplicationOutcomeV1::CompareProposal,

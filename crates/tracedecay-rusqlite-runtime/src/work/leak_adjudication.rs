@@ -6,30 +6,26 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{WorkAuthority, canonical_sha256};
 
-use crate::exact_sql::{ExactSqlTransaction, ExactSqlValue};
+use crate::exact_sql::ExactSqlValue;
 use crate::work::{
-    WorkSqliteStorage, authority_params_owned, exact_sql_integer, exact_sql_statement,
-    exact_sql_text, registered_work_query,
+    RegisteredWorkQuery, RegisteredWorkWrite, authority_params_owned, exact_sql_integer,
+    exact_sql_statement, exact_sql_text, registered_work_query,
 };
+use crate::work_run_control::WorkSqliteJobStorage;
 
 type StorageError = WorkLeakAdjudicationStorageErrorV1;
 
-impl WorkLeakAdjudicationStoragePortV1 for WorkSqliteStorage {
+/// The job's transaction commits the append, and rolls back every refusal.
+impl WorkLeakAdjudicationStoragePortV1 for WorkSqliteJobStorage<'_> {
     fn leak_by_command(
         &self,
         authority: &WorkAuthority,
         command_id: &tracedecay_domain::WorkCommandId,
     ) -> Result<Option<tracedecay_contracts::WorkLeakAdjudicationReceiptV1>, StorageError> {
-        let transaction = self
-            .handle()
-            .begin_deferred()
-            .map_err(|_| StorageError::Unavailable)?;
-        let receipt = replay_by_command(&transaction, authority, command_id.as_str())?
-            .map(|(_, receipt)| receipt);
-        transaction
-            .commit()
-            .map_err(|_| StorageError::Unavailable)?;
-        Ok(receipt)
+        Ok(
+            replay_by_command(self.transaction, authority, command_id.as_str())?
+                .map(|(_, receipt)| receipt),
+        )
     }
 
     fn compare_and_record_leak(
@@ -38,36 +34,28 @@ impl WorkLeakAdjudicationStoragePortV1 for WorkSqliteStorage {
         write: &WorkLeakAdjudicationWriteV1,
     ) -> Result<WorkLeakAdjudicationOutcomeV1, StorageError> {
         validate_write(write)?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| StorageError::Unavailable)?;
+        let transaction = self.transaction;
         if let Some((digest, receipt)) = replay_by_command(
-            &transaction,
+            transaction,
             authority,
             write.receipt.command.command_id.as_str(),
         )? {
-            let _ = transaction.rollback();
             return if digest == write.receipt.canonical_input_digest.as_str() {
                 Ok(WorkLeakAdjudicationOutcomeV1::Replayed(receipt))
             } else {
                 Err(StorageError::IdempotencyConflict)
             };
         }
-        require_attempt(&transaction, authority, write)?;
+        require_attempt(transaction, authority, write)?;
         let current = current_revision(
-            &transaction,
+            transaction,
             authority,
             &write.receipt.command.adjudication_id,
         )?;
         if current != write.receipt.command.expected_revision {
-            let _ = transaction.rollback();
             return Err(StorageError::RevisionConflict);
         }
-        insert_receipt(&transaction, authority, write)?;
-        transaction
-            .commit()
-            .map_err(|_| StorageError::Unavailable)?;
+        insert_receipt(transaction, authority, write)?;
         Ok(WorkLeakAdjudicationOutcomeV1::Appended(
             write.receipt.clone(),
         ))
@@ -100,7 +88,7 @@ fn validate_write(write: &WorkLeakAdjudicationWriteV1) -> Result<(), StorageErro
 }
 
 fn replay_by_command(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
     command_id: &str,
 ) -> Result<Option<(String, tracedecay_contracts::WorkLeakAdjudicationReceiptV1)>, StorageError> {
@@ -150,7 +138,7 @@ fn replay_by_command(
 }
 
 fn require_attempt(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
     write: &WorkLeakAdjudicationWriteV1,
 ) -> Result<(), StorageError> {
@@ -179,7 +167,7 @@ fn require_attempt(
 }
 
 fn current_revision(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
     adjudication_id: &str,
 ) -> Result<Option<u64>, StorageError> {
@@ -207,7 +195,7 @@ fn current_revision(
 }
 
 fn insert_receipt(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     write: &WorkLeakAdjudicationWriteV1,
 ) -> Result<(), StorageError> {
@@ -218,7 +206,7 @@ fn insert_receipt(
     )
     .map_err(|_| StorageError::Unavailable)?;
     transaction
-        .execute(
+        .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_leak_adjudications_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,

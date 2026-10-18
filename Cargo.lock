@@ -6028,7 +6028,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.87"
+version = "1.0.0-beta.88"
 dependencies = [
  "asupersync",
  "axum",
@@ -6304,7 +6304,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.87"
+version = "1.0.0-beta.88"
 dependencies = [
  "asupersync",
  "aws-lc-rs",
@@ -6373,7 +6373,6 @@ dependencies = [
  "tree-sitter-rust",
  "ureq",
  "url",
- "windows-sys 0.61.2",
  "xattr",
  "zip",
 ]
@@ -6710,7 +6709,6 @@ version = "0.1.0"
 dependencies = [
  "asupersync",
  "async-channel",
- "tokio",
  "tracing",
 ]
 
@@ -6938,7 +6936,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-util",
  "toml",
  "tracedecay-agent-hosts",
  "tracedecay-api",
@@ -7051,7 +7048,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.87"
+version = "1.0.0-beta.88"
 dependencies = [
  "asupersync",
  "rusqlite",
@@ -7141,7 +7138,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-util",
  "tracedecay-capture",
  "tracedecay-domain",
  "tracedecay-graph-db",
@@ -7161,6 +7157,7 @@ dependencies = [
  "async-channel",
  "dunce",
  "futures-util",
+ "libc",
  "proptest",
  "ring",
  "rusqlite",
@@ -7172,6 +7169,7 @@ dependencies = [
  "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
+ "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",
@@ -7874,8 +7872,8 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-rust"
-version = "0.24.0"
-source = "git+https://github.com/vanessa-rodrigues/tree-sitter-rust?rev=877df9f82f320243ab23929589a940208faa9d15#877df9f82f320243ab23929589a940208faa9d15"
+version = "0.24.2"
+source = "git+https://github.com/ScriptedAlchemy/tree-sitter-rust?rev=d737577441bf238d18be428ee6207779a55140aa#d737577441bf238d18be428ee6207779a55140aa"
 dependencies = [
  "cc",
  "tree-sitter-language",

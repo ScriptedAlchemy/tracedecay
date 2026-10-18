@@ -268,6 +268,51 @@ async fn protected_replay_locator_re_resolves_the_authoritative_native_lifecycle
     assert_eq!(session_id.as_str(), "session.native.codex");
 }
 
+/// Replay redrive resolves a protected locator on every sweep, so each
+/// `observations` access must be a session-index seek. A scan reads every
+/// observation body, and the GROUP BY form spilled those bodies into a
+/// multi-gigabyte SQLite sort file per sweep (#4152).
+#[tokio::test]
+async fn native_session_enumeration_seeks_the_session_index() {
+    let temporary = TempDir::new().unwrap();
+    let project_id = id::<ProjectId>("project.native.enumeration");
+    let runtime = project_runtime(&temporary, &project_id).await;
+    let sessions = runtime
+        .registered_database_arc(HostAdmissionScope::Project)
+        .unwrap();
+    sessions
+        .observation_store()
+        .persist_observation(durable_native_observation(&project_id))
+        .await
+        .unwrap();
+
+    let snapshot = sessions.read_snapshot().await.unwrap();
+    let explain = format!("EXPLAIN QUERY PLAN {NATIVE_SESSION_IDS_QUERY}");
+    let mut rows = snapshot.query(&explain, ()).await.unwrap();
+    let mut plan = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        plan.push(row.get::<String>(3).unwrap());
+    }
+    let observation_steps: Vec<_> = plan
+        .iter()
+        .filter(|detail| detail.contains("observations"))
+        .collect();
+    assert!(
+        !observation_steps.is_empty(),
+        "plan must read observations: {plan:?}"
+    );
+    assert!(
+        observation_steps.iter().all(|detail| detail.starts_with(
+            "SEARCH observations USING INDEX idx_observations_valid_session_sequence"
+        )),
+        "every observations access must seek the session index: {plan:?}"
+    );
+    assert!(
+        plan.iter().all(|detail| !detail.contains("TEMP B-TREE")),
+        "session enumeration must not sort into a temp b-tree: {plan:?}"
+    );
+}
+
 #[tokio::test]
 async fn zero_hook_identifiers_are_rejected_before_registration() {
     let temporary = TempDir::new().unwrap();

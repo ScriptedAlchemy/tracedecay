@@ -1,6 +1,8 @@
 ---
 name: discovering-tracedecay
-description: Find the supported TraceDecay operation for a code-intelligence, memory, or administration task.
+description: Use when you know the task but not which TraceDecay tool or operation covers it, including memory and administration tasks. Skip when routing-tracedecay already names a call for the question. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Discovering TraceDecay
@@ -23,3 +25,6 @@ does not establish daemon failure; see `using-the-cli` when transport matters.
 For project and multi-root identity, configuration changes, Context Scout
 controls, or storage recovery, read
 [administration authority](references/administration-authority.md).
+
+**Report:** the skill or operation that covers the task and the one call to make
+next. Do not list the catalog.

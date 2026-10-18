@@ -10,12 +10,14 @@ use std::{
         mpsc::{Receiver, RecvTimeoutError},
     },
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use tracedecay_store::{RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1};
 
-use super::super::{ReaderQueryExecutor, ReaderWorkerError, unavailable_read, worker};
+use super::super::{
+    READ_SNAPSHOT_LIFETIME, ReaderQueryExecutor, ReaderWorkerError, unavailable_read, worker,
+};
 use super::outcome::{ReaderAcquireError, interruption, map_worker_error, validate_probe};
 use super::{
     AvailableWorker, DEFERRED_SNAPSHOT_END_LIMIT, PoolInner, ReaderLane, SNAPSHOT_END_GRACE,
@@ -155,7 +157,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         skip_all
     )]
     pub fn begin_snapshot(&mut self) -> Result<SnapshotLease<'_, E>, ReaderWorkerError> {
-        self.start_snapshot()?;
+        self.start_snapshot(READ_SNAPSHOT_LIFETIME)?;
         Ok(SnapshotLease { lease: self })
     }
 
@@ -196,7 +198,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         &mut self,
         statement: ExactSqlStatement,
     ) -> Result<ExactSqlRows, ExactSqlError> {
-        self.start_snapshot()
+        self.start_snapshot(READ_SNAPSHOT_LIFETIME)
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         self.checkout
             .worker
@@ -209,8 +211,11 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         level = "trace",
         skip_all
     )]
-    pub(super) fn begin_exact_sql_snapshot(&mut self) -> Result<(), ExactSqlError> {
-        self.start_snapshot()
+    pub(super) fn begin_exact_sql_snapshot(
+        &mut self,
+        lifetime: Duration,
+    ) -> Result<(), ExactSqlError> {
+        self.start_snapshot(lifetime)
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         self.checkout.worker.client.pin_exact_sql()
     }
@@ -241,7 +246,8 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         &mut self,
         reply_bound: std::time::Duration,
     ) -> Result<worker::StoreSizeTelemetrySample, ReaderAcquireError> {
-        self.start_snapshot().map_err(ReaderAcquireError::Worker)?;
+        self.start_snapshot(READ_SNAPSHOT_LIFETIME)
+            .map_err(ReaderAcquireError::Worker)?;
         self.checkout
             .worker
             .client
@@ -254,7 +260,8 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         &mut self,
         reply_bound: std::time::Duration,
     ) -> Result<Vec<worker::TableSizeTelemetrySample>, ReaderAcquireError> {
-        self.start_snapshot().map_err(ReaderAcquireError::Worker)?;
+        self.start_snapshot(READ_SNAPSHOT_LIFETIME)
+            .map_err(ReaderAcquireError::Worker)?;
         self.checkout
             .worker
             .client
@@ -280,18 +287,17 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
             .map_err(|error| ReaderAcquireError::Worker(ReaderWorkerError::Storage(error)))
     }
 
-    fn start_snapshot(&mut self) -> Result<(), ReaderWorkerError> {
+    fn start_snapshot(&mut self, lifetime: Duration) -> Result<(), ReaderWorkerError> {
         self.settle_deferred_end()?;
         if self.snapshot_active
-            || !self
-                .checkout
-                .inner
-                .checkpoint_blockers
-                .begin(self.checkout.worker.id)
+            || !self.checkout.inner.checkpoint_blockers.begin(
+                self.checkout.worker.id,
+                self.checkout.worker.client.revoker(),
+            )
         {
             return Err(ReaderWorkerError::SnapshotAlreadyActive);
         }
-        if let Err(error) = self.checkout.worker.client.begin() {
+        if let Err(error) = self.checkout.worker.client.begin(lifetime) {
             self.checkout
                 .inner
                 .checkpoint_blockers
@@ -565,7 +571,9 @@ mod snapshot_return_tests {
         let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
         let other = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
         let reader_id = lease.checkout.worker.id;
-        lease.begin_exact_sql_snapshot().unwrap();
+        lease
+            .begin_exact_sql_snapshot(crate::reader::READ_SNAPSHOT_LIFETIME)
+            .unwrap();
 
         // Route the real worker's asynchronous rollback acknowledgement
         // through deferred return without depending on the 5ms grace race.
@@ -622,7 +630,9 @@ mod snapshot_return_tests {
         let read = request(&store.binding, OperationPriorityV1::Foreground);
         let probe = Probe::for_request(&read);
         let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
-        lease.start_snapshot().unwrap();
+        lease
+            .start_snapshot(crate::reader::READ_SNAPSHOT_LIFETIME)
+            .unwrap();
         let receive = lease.checkout.worker.client.begin_end().unwrap();
         lease.snapshot_active = false;
         lease.defer_snapshot_end(receive);

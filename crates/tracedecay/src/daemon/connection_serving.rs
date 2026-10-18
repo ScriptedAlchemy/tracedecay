@@ -2112,6 +2112,150 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     Ok(())
 }
 
+/// A request parked on a barrier gives its connection's admission slot back
+/// through `park_admission`, which reads the connection's task-local lease.
+/// Dispatch must run inside the connection task's scope for that read to
+/// succeed; polled on another thread, the park keeps the slot.
+#[cfg(all(test, unix))]
+mod broker_dispatch_admission_tests {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader};
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use tracedecay_daemon_protocol::{
+        BrokerStream, DaemonClientIdentity, DaemonHandshake, DaemonInvocationProblem,
+        DaemonInvocationRequest, DaemonInvocationResponse, MovedStoreAdoption,
+    };
+    use tracedecay_daemon_service::shutdown::DaemonLifecycle;
+    use tracedecay_mcp::BrokerStreamTransport;
+    use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+
+    use super::{DaemonInvocationState, drive_retained_invocation_responses};
+    use crate::daemon::{
+        DaemonClientAdmission, DaemonClientAdmissionOutcome, park_admission,
+        with_connection_admission,
+    };
+
+    const REQUEST_ID: &str = "request.parked-dispatch";
+
+    fn handshake() -> DaemonHandshake {
+        let profile_root = PathBuf::from("/profiles/parked-dispatch");
+        DaemonHandshake {
+            project_path: None,
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: DaemonClientIdentity {
+                global_db_path: profile_root.join("global.db"),
+                profile_root,
+            },
+            client_version: String::new(),
+            client_instance_id: "client.parked-dispatch".to_owned(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+            moved_store_adoption: MovedStoreAdoption::Never,
+        }
+    }
+
+    fn request() -> DaemonInvocationRequest {
+        let now = tracedecay_contracts::now_micros();
+        DaemonInvocationRequest::profile_graph_tool(
+            REQUEST_ID,
+            tracedecay_tool_catalog::ApplicationSurfaceOperation::AffectedTests,
+            serde_json::Map::new(),
+            now,
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(now.0 + 30_000_000))
+                .expect("deadline"),
+            tracedecay_contracts::CancellationContext::active("cancel.parked-dispatch")
+                .expect("cancellation"),
+        )
+    }
+
+    #[test]
+    fn a_dispatch_parked_on_a_barrier_releases_its_admission_slot() {
+        let admission = DaemonClientAdmission::with_reserved_capacity(2, 1);
+        let DaemonClientAdmissionOutcome::Admitted(permit) = admission.try_admit() else {
+            panic!("the first client is admitted");
+        };
+        assert_eq!(admission.available_general_permits(), 0);
+
+        let (daemon_end, client) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        daemon_end
+            .set_nonblocking(true)
+            .expect("nonblocking daemon end");
+        let daemon_end = BrokerStream::Unix(
+            asupersync::net::unix::UnixStream::from_std(daemon_end).expect("daemon end"),
+        );
+        let (barrier, lifted) = tokio::sync::watch::channel(false);
+        let invocation = DaemonInvocationState::default();
+        let connection = NativeTask::spawn(with_connection_admission(permit, async move {
+            let mut transport = BrokerStreamTransport::new(daemon_end);
+            drive_retained_invocation_responses(
+                Ok(request()),
+                &mut transport,
+                &invocation.service,
+                &handshake(),
+                &DaemonLifecycle::default(),
+                &mut HashMap::new(),
+                |request| {
+                    let mut lifted = lifted.clone();
+                    Box::pin(async move {
+                        park_admission(async {
+                            while !*lifted.borrow_and_update() {
+                                lifted.changed().await.expect("barrier sender retained");
+                            }
+                        })
+                        .await;
+                        DaemonInvocationResponse::problem(
+                            request.request_id,
+                            DaemonInvocationProblem::Unavailable,
+                        )
+                    })
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }))
+        .expect("native connection task");
+
+        let parked_by = Instant::now() + Duration::from_secs(10);
+        while admission.available_general_permits() == 0 && Instant::now() < parked_by {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let released = admission.available_general_permits();
+        barrier.send(true).expect("lift the barrier");
+
+        client
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("client read timeout");
+        let mut line = String::new();
+        BufReader::new(&client)
+            .read_line(&mut line)
+            .expect("read the response");
+        let response: DaemonInvocationResponse =
+            serde_json::from_str(&line).expect("the connection answers the parked request");
+        assert_eq!(response.request_id, REQUEST_ID);
+        client
+            .shutdown(std::net::Shutdown::Both)
+            .expect("close the client");
+        assert_eq!(
+            native_runtime::block_on(connection.wait()).expect("process runtime"),
+            NativeTaskOutcome::Completed(Ok(()))
+        );
+        assert_eq!(
+            released, 1,
+            "the parked dispatch kept its connection's admission slot"
+        );
+        assert_eq!(
+            admission.available_general_permits(),
+            1,
+            "the connection returns its slot when it ends"
+        );
+    }
+}
+
 #[cfg(test)]
 mod delivery_ack_tests {
     use super::{

@@ -63,6 +63,12 @@ pub struct TraceDecay {
         Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
     _standalone_maintenance_scope:
         Option<Arc<tracedecay_runtime_core::db::OwnedMaintenanceDatabaseScope>>,
+    /// The Context Scout owner this writable graph started or joined. The
+    /// process-global registry only routes to it, so the owner and its clone
+    /// of `db` end with the last graph that holds it.
+    _context_scout_owner: Option<
+        Arc<tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1>,
+    >,
 }
 
 impl TraceDecay {

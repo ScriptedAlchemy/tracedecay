@@ -12,7 +12,7 @@ use tracedecay_store::{
 
 use crate::observation::decode_observation_json;
 
-use super::state::{read_observation, reaggregate_output_state_for_output, storage};
+use super::state::{read_observation, storage};
 
 #[derive(Clone, Copy)]
 pub(super) enum SourceTransitionTarget<'a> {
@@ -120,11 +120,10 @@ pub(super) async fn settle_native_source_transition(
     };
     let old = predecessor.observation_id().as_str();
     let new = successor.observation_id().as_str();
-    let mut affected = Vec::new();
     let mut rows = conn
         .query(
             &format!(
-                "SELECT prior.output_provider, prior.output_message_id, next.observation_id
+                "SELECT next.observation_id
             FROM {provenance} AS prior
             LEFT JOIN {provenance} AS next ON next.projector_version = prior.projector_version
               AND next.observation_id = ?3 AND next.output_provider = prior.output_provider
@@ -151,18 +150,12 @@ pub(super) async fn settle_native_source_transition(
         .map_err(|error| storage("read native source predecessor outputs", error))?
     {
         if row
-            .get::<Option<String>>(2)
+            .get::<Option<String>>(0)
             .map_err(|error| storage("read native source successor output", error))?
             .is_none()
         {
             return Err(ProjectionStoreError::ProvenanceCollision);
         }
-        affected.push((
-            row.get::<String>(0)
-                .map_err(|error| storage("read native source predecessor outputs", error))?,
-            row.get::<String>(1)
-                .map_err(|error| storage("read native source predecessor outputs", error))?,
-        ));
     }
     drop(rows);
     // Transfer ownership before deleting the predecessor; output identity remains stable.
@@ -259,9 +252,6 @@ pub(super) async fn settle_native_source_transition(
     }
     if generation.is_none() {
         promote_native_source_anchor(conn, &predecessor, successor).await?;
-        for (provider, message) in affected {
-            reaggregate_output_state_for_output(conn, &provider, &message).await?;
-        }
         Box::pin(verify_native_source_supersession(conn, &predecessor)).await?;
     }
     Ok(())

@@ -1,6 +1,8 @@
 ---
 name: investigating-unexpected-changes
-description: "Attribute unexpected working-tree, branch, or commit changes using Git evidence and correlated sessions while preserving other agents' work."
+description: 'Use when the user finds working-tree, branch, or commit changes they did not expect and asks who made them or why, while preserving other agents'' work. Load this skill before the first tool call.'
+metadata:
+  opencode/slash: "true"
 ---
 
 # Investigating unexpected changes
@@ -21,3 +23,7 @@ that a peer's change can be overwritten.
 
 When changes overlap active work, resolve ownership and intent before editing.
 For retrieving the underlying conversation, use `managing-session-context`.
+
+**Report:** what changed according to Git, the session that produced or observed
+it, and the coverage of the session search. Say the author is unknown when
+attribution is missing; do not revert or overwrite the change.

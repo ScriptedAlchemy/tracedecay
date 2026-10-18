@@ -926,6 +926,140 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
     service.expire_all().await;
 }
 
+/// A write that missed its persistence deadline is a gap in the stream, not
+/// an owner still running: the producer worker still joins. Quiescence has
+/// already taken the root's runtime out of the registry by then, so it must
+/// report the root quiesced rather than fail the capacity retirement.
+#[tokio::test]
+async fn quiescence_survives_a_producer_write_that_missed_its_deadline() {
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-quiesce-missed-write").await;
+    let root = PathBuf::from("/project/observability-quiesce-missed-write");
+    let service = DaemonInvocationService::default();
+    let producer = service
+        .mount_observability_producer(
+            root.clone(),
+            database.clone(),
+            project_id.clone(),
+            digest('3'),
+            digest('4'),
+        )
+        .await
+        .expect("producer");
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    producer
+        .try_emit(envelope(&project_id, "quiesce:missed-write"))
+        .expect("enqueue the event whose write misses its deadline");
+
+    let lsp_registry = Arc::new(tokio::sync::Mutex::new(
+        tracedecay_lsp::LspSessionRegistry::default(),
+    ));
+    let profile_id = database.binding().shard_id.profile_id.clone();
+    let quiescing_service = service.clone();
+    let quiescing_project = project_id.clone();
+    let quiescence = tokio::spawn(async move {
+        quiescing_service
+            .quiesce_project(
+                &lsp_registry,
+                &profile_id,
+                &quiescing_project,
+                &BTreeSet::from([root]),
+            )
+            .await
+    });
+    while !producer.shutdown_joined() && !quiescence.is_finished() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    blocker.commit().await.expect("release registered writer");
+
+    let quiescence = quiescence
+        .await
+        .expect("quiescence task")
+        .expect("a missed persistence deadline must not fail quiescence");
+    assert_eq!(
+        producer
+            .try_emit(envelope(&project_id, "quiesce:after-drain"))
+            .expect_err("quiescence closes the producer"),
+        "observability_producer_closed"
+    );
+    drop(quiescence);
+    service.expire_all().await;
+}
+
+/// A daemon shutdown after a producer missed a write deadline joins every
+/// owner. The missed write is lost work to report, not an owner that failed
+/// to stop, so the shutdown receipt stays clean.
+#[tokio::test]
+async fn daemon_shutdown_stays_clean_after_a_producer_write_missed_its_deadline() {
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-shutdown-missed-write").await;
+    let root = PathBuf::from("/project/observability-shutdown-missed-write");
+    let service = DaemonInvocationService::default();
+    let producer = service
+        .mount_observability_producer(
+            root,
+            database.clone(),
+            project_id.clone(),
+            digest('3'),
+            digest('4'),
+        )
+        .await
+        .expect("producer");
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    producer
+        .try_emit(envelope(&project_id, "shutdown:missed-write"))
+        .expect("enqueue the event whose write misses its deadline");
+
+    let shutdown = tokio::spawn(async move {
+        tracedecay_daemon_service::shutdown::join_shutdown_owners(
+            std::time::Instant::now() + Duration::from_secs(30),
+            vec![
+                tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
+                    "invocation",
+                    || {},
+                    move |_| async move { service.expire_all().await },
+                ),
+            ],
+        )
+        .await
+    });
+    while !producer.shutdown_joined() && !shutdown.is_finished() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    blocker.commit().await.expect("release registered writer");
+
+    let receipt = shutdown.await.expect("shutdown task");
+    assert!(
+        producer.shutdown_joined(),
+        "the producer worker joined despite the missed write"
+    );
+    assert_eq!(
+        receipt.owners[0].status,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::Clean,
+        "a missed persistence deadline must not make daemon shutdown unclean"
+    );
+    assert!(receipt.unfinished().is_empty());
+    let [lost] = receipt.lost_work.as_slice() else {
+        panic!(
+            "the missed write is reported exactly once: {:?}",
+            receipt.lost_work
+        );
+    };
+    assert_eq!(lost.owner, "invocation");
+    assert!(
+        lost.work.contains("observability-shutdown-missed-write")
+            && lost.work.contains("observability_persistence_deadline"),
+        "lost work names the project and the missed deadline: {}",
+        lost.work
+    );
+}
+
 #[tokio::test]
 async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finishes() {
     let (_project, project_id, database, _runtime) =
@@ -1390,10 +1524,13 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
 
 #[tokio::test]
 async fn registered_blocked_writer_retries_settlement_only_on_mount_demand() {
+    // The shutdown budget must outlast scheduling delays before the worker's
+    // reply and the released writer's fence, so it keeps the production
+    // value. Only the persistence deadline is short, so held writes fail fast.
     assert_blocked_writer_retirement(
         ObservabilityProducerDeadlinesV1 {
             persistence: Duration::from_millis(50),
-            shutdown: Duration::from_millis(250),
+            ..ObservabilityProducerDeadlinesV1::default()
         },
         "observability_persistence_deadline",
         true,
@@ -1447,25 +1584,14 @@ async fn assert_blocked_writer_retirement(
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    if worker_settled {
-        // The worker must reply inside the shutdown budget, so the blocked
-        // batch fails before shutdown begins: a startup rollup pass may wait
-        // one deadline before the worker takes the event, whose write then
-        // waits another.
-        registered
-            .producer()
-            .try_emit(envelope(&project_id, "shutdown:blocked"))
-            .expect("enqueue blocked event");
-        tokio::time::sleep(deadlines.persistence * 6).await;
-    } else {
-        // The shutdown deadline must elapse first, so the blocked batch is
-        // still in flight when shutdown begins.
-        registered
-            .producer()
-            .try_emit(envelope(&project_id, "shutdown:blocked"))
-            .expect("enqueue blocked event");
-        tokio::task::yield_now().await;
-    }
+    registered
+        .producer()
+        .try_emit(envelope(&project_id, "shutdown:blocked"))
+        .expect("enqueue blocked event");
+    // The batch is still in flight when shutdown begins. A shutdown budget
+    // no longer than the persistence deadline therefore expires before the
+    // worker can reply.
+    tokio::task::yield_now().await;
 
     let retained = registered.producer();
     let error = registered

@@ -2,7 +2,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 
 use super::*;
 use tracedecay_contracts::RegisteredRootLocatorV1;
@@ -88,7 +89,7 @@ type HookOrchestrationWorkV1 = dyn Fn(
     + Send
     + Sync;
 /// Native admissions share one cycle for the same project, worktree, and
-/// hook event. An explicit request additionally carries its public effect
+/// hook event. An explicit request also carries its public effect
 /// identity, so its retries join each other without joining native delivery.
 type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16], Option<ManifestDigest>);
 /// Stable per-session work address. A newer boundary at the same address
@@ -116,7 +117,7 @@ struct HookOrchestrationInFlightV1 {
 struct HookOrchestrationTaskOwnerV1 {
     accepting: bool,
     failed: bool,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Vec<NativeTask<()>>,
 }
 
 impl Default for HookOrchestrationTaskOwnerV1 {
@@ -132,16 +133,13 @@ impl Default for HookOrchestrationTaskOwnerV1 {
 impl HookOrchestrationTaskOwnerV1 {
     fn reap_finished(&mut self) {
         let tasks = std::mem::take(&mut self.tasks);
-        for mut task in tasks {
-            if !task.is_finished() {
-                self.tasks.push(task);
-                continue;
-            }
-            let waker = Waker::noop();
-            let mut cx = Context::from_waker(waker);
-            match Pin::new(&mut task).poll(&mut cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(_)) | Poll::Pending => self.failed = true,
+        for task in tasks {
+            match task.try_finished() {
+                None => self.tasks.push(task),
+                Some(NativeTaskOutcome::Completed(())) => {}
+                Some(NativeTaskOutcome::Cancelled | NativeTaskOutcome::Panicked(_)) => {
+                    self.failed = true;
+                }
             }
         }
     }
@@ -209,6 +207,7 @@ impl BoundedHookOrchestratorV1 {
         address: &HookOrchestrationAddressV1,
         operation: &Arc<HookOrchestrationInFlightEntryV1>,
         emit_terminal: bool,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let completions = {
             let mut in_flight = in_flight
@@ -235,6 +234,12 @@ impl BoundedHookOrchestratorV1 {
             {
                 in_flight.events.remove(&operation.event);
             }
+            // Admission checks the in-flight maps and takes a permit under
+            // this lock, so the cycle leaves both in one step: no admission
+            // sees it gone yet still holding its permit, or sees its permit
+            // free while it still looks in flight. Its terminals, the host's
+            // cue to send the session's next boundary, follow.
+            drop(permit);
             completions
         };
         if emit_terminal {
@@ -275,14 +280,6 @@ impl BoundedHookOrchestratorV1 {
         tracedecay_runtime_core::cancellation::CancellationToken,
         HookOrchestrationAdmissionV1,
     > {
-        // The production work runs the advisory feedback cycle, which the LSP
-        // runtime spawner in `registrars/lsp.rs` also runs on Tokio; both
-        // move to the native runtime together.
-        let Some(runtime_handle) = tracedecay_runtime_core::native_runtime::tokio_handle(
-            "daemon-service.hook_orchestration.admit",
-        ) else {
-            return Err(HookOrchestrationAdmissionV1::Unavailable);
-        };
         let envelope = request.hook.envelope();
         let event = (
             envelope.project_id,
@@ -380,7 +377,10 @@ impl BoundedHookOrchestratorV1 {
         let cancellation = self.cancellation.clone();
         let permits = Arc::clone(&self.permits);
         let operation_cancellation = operation.cancellation.clone();
-        let task = runtime_handle.spawn(async move {
+        let spawned_in_flight = Arc::clone(&in_flight);
+        let spawned_address = address.clone();
+        let spawned_operation = Arc::clone(&operation);
+        let task = NativeTask::spawn(async move {
             let work_cancellation = operation.cancellation.clone();
             let permit = match permit {
                 Some(permit) => Some(permit),
@@ -395,14 +395,14 @@ impl BoundedHookOrchestratorV1 {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, None);
                 return;
             };
             if cancellation.is_cancelled() || work_cancellation.is_cancelled() {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, Some(permit));
                 return;
             }
             let resumable = request.clone();
@@ -462,9 +462,24 @@ impl BoundedHookOrchestratorV1 {
                         .load(std::sync::atomic::Ordering::Acquire)
                 }
             };
-            Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
-            drop(permit);
+            Self::settle_operation(
+                &in_flight,
+                &address,
+                &operation,
+                emit_terminal,
+                Some(permit),
+            );
         });
+        let Ok(task) = task else {
+            Self::settle_operation(
+                &spawned_in_flight,
+                &spawned_address,
+                &spawned_operation,
+                false,
+                None,
+            );
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
+        };
         task_owner.tasks.push(task);
         Ok(operation_cancellation)
     }
@@ -487,14 +502,14 @@ impl BoundedHookOrchestratorV1 {
         }
         let deadline =
             std::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
-        for mut task in tasks {
-            match tracedecay_runtime_core::native_runtime::timeout_at(deadline, &mut task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => clean = false,
+        for task in tasks {
+            match tracedecay_runtime_core::native_runtime::timeout_at(deadline, task.wait()).await {
+                Ok(NativeTaskOutcome::Completed(())) => {}
+                Ok(NativeTaskOutcome::Cancelled | NativeTaskOutcome::Panicked(_)) => clean = false,
                 // An unavailable timer aborts the task as if its deadline passed.
                 Err(_) => {
                     task.abort();
-                    let _ = task.await;
+                    task.wait().await;
                     clean = false;
                 }
             }
@@ -861,6 +876,11 @@ pub struct RegisteredWorkRuntime {
 }
 
 impl RegisteredWorkRuntime {
+    /// The registered grant, bounded to one request observed at `observed_at`.
+    pub(crate) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
+        mounted_grant_at(&self.grant, observed_at)
+    }
+
     /// Cancel every retained background recovery owner without awaiting.
     ///
     /// Hoisted out of [`Self::shut_down_background_recovery`] so daemon
@@ -896,6 +916,13 @@ pub struct RegisteredRetainedRuntime {
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
     pub(super) ports: Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>>,
+}
+
+impl RegisteredRetainedRuntime {
+    /// The registered grant, bounded to one request observed at `observed_at`.
+    pub(super) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
+        mounted_grant_at(&self.grant, observed_at)
+    }
 }
 
 pub struct RegisteredFeedbackRuntime {
@@ -1320,6 +1347,13 @@ pub struct AuthorizedDaemonLspWorkspace {
 }
 
 impl DaemonLspInvocationOwner {
+    /// The scope grant, bounded to one request observed at `observed_at`.
+    pub(super) fn scope_grant_at(&self, observed_at: UtcMicros) -> Option<CapabilityGrantSnapshot> {
+        self.scope_grant
+            .as_ref()
+            .map(|grant| mounted_grant_at(grant, observed_at))
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn for_test_project(
         factory: Arc<DaemonLspSessionFactory>,
@@ -1419,31 +1453,32 @@ pub(super) struct SharedGitTransactionPort {
 }
 
 impl GitIndexTransactionPort for SharedGitTransactionPort {
-    fn preview(
+    async fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
     ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
-        self.service.preview(request)
+        self.service.preview(request).await
     }
 
-    fn apply(
+    async fn apply(
         &self,
         request: &GitIndexApplyRequestV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.cancellation.as_ref().map_or_else(
-            || self.service.apply(request),
-            |emitter| {
+        match &self.cancellation {
+            None => self.service.apply(request).await,
+            Some(emitter) => {
                 self.service
                     .apply_cancellable(request, || emitter.cancellation_requested_at())
-            },
-        )
+                    .await
+            }
+        }
     }
 
-    fn recover(
+    async fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError> {
-        self.service.recover(request)
+        self.service.recover(request).await
     }
 }
 

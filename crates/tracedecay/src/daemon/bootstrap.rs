@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::task::JoinSet;
+use futures_util::TryFutureExt;
 
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
@@ -13,7 +13,7 @@ use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTaskOutcome};
 
 use super::*;
 #[cfg(unix)]
@@ -28,6 +28,14 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 /// after the coordinator returns.
 const DAEMON_SHUTDOWN_COORDINATION_DEADLINE: std::time::Duration =
     DAEMON_SHUTDOWN_DEADLINE.saturating_sub(std::time::Duration::from_millis(100));
+
+/// How a client connection task ended. The error is rendered because a
+/// native task's outcome must be `Clone`.
+pub(super) type ClientOutcome = NativeTaskOutcome<std::result::Result<(), String>>;
+
+/// The accepted client connections. Dropping the set aborts every connection
+/// still running.
+pub(super) type ClientTasks = native_runtime::NativeTaskSet<std::result::Result<(), String>>;
 
 #[tracing::instrument(name = "daemon.bootstrap.catalog_prewarm", level = "trace", skip_all)]
 fn prewarm_static_daemon_bootstrap_catalog() {
@@ -79,8 +87,6 @@ async fn run_foreground_loopback(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    tracedecay_runtime_core::native_runtime::process_runtime()
-        .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = native_runtime::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
@@ -187,6 +193,7 @@ async fn run_foreground_loopback(
         },
     )
     .await;
+    let lateness_canary = spawn_lateness_canary();
     let spooled_hook_opener = hook_v2_replay_consumer::spawn_spooled_hook_opener(
         hook_v2_replay_consumer::PortableSpoolOpenerOwners {
             lifecycle: lifecycle.clone(),
@@ -199,7 +206,7 @@ async fn run_foreground_loopback(
     );
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
-    let mut clients: JoinSet<Result<()>> = JoinSet::new();
+    let mut clients = ClientTasks::default();
     let mut shutdown_signals = ShutdownSignals::listen()?;
     log_daemon_event(
         "daemon_ready",
@@ -218,8 +225,8 @@ async fn run_foreground_loopback(
                 }
             },
             completed = clients.join_next(), if !clients.is_empty() => {
-                if let Some(Err(error)) = completed {
-                    log_daemon_event("daemon_client", &[("outcome", error.to_string())]);
+                if let Some(completed) = completed {
+                    log_client_task_result(completed);
                 }
                 continue;
             },
@@ -241,30 +248,41 @@ async fn run_foreground_loopback(
         let invocation = invocation.clone();
         let http_application_registry = http_application_registry.clone();
         let per_client_admission = per_client_admission.clone();
-        clients.spawn(tracing::Instrument::instrument(
-            with_connection_admission(permit, async move {
-                Box::pin(serve_windows_broker_client_with_class_and_invocation(
-                    stream,
-                    &auth_token,
-                    &client_lifecycle,
-                    store_administration,
-                    project_open_gates,
-                    invocation,
-                    http_application_registry,
-                    per_client_admission,
-                    admission_class,
-                    #[cfg(test)]
-                    None,
-                ))
-                .await
-            }),
-            tracing::trace_span!("daemon.bootstrap.broker_connection"),
-        ));
+        let spawned = clients.spawn(
+            tracing::Instrument::instrument(
+                with_connection_admission(permit, async move {
+                    Box::pin(serve_windows_broker_client_with_class_and_invocation(
+                        stream,
+                        &auth_token,
+                        &client_lifecycle,
+                        store_administration,
+                        project_open_gates,
+                        invocation,
+                        http_application_registry,
+                        per_client_admission,
+                        admission_class,
+                        #[cfg(test)]
+                        None,
+                    ))
+                    .await
+                }),
+                tracing::trace_span!("daemon.bootstrap.broker_connection"),
+            )
+            .map_err(|error| error.to_string()),
+        );
+        if let Err(error) = spawned {
+            log_client_spawn_refusal(error);
+        }
     }
     lifecycle.begin_draining();
     tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
     drop(listener);
-    spooled_hook_opener.abort();
+    if let Some(opener) = spooled_hook_opener {
+        opener.abort();
+    }
+    if let Some(canary) = lateness_canary {
+        canary.abort();
+    }
     cancel_retained_session_history(&store_administration).await;
     let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
@@ -378,9 +396,9 @@ async fn run_foreground_loopback(
         tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
             || {},
-            move |_| async move {
+            move |deadline| async move {
                 memory_graph_reconciliation_join
-                    .close_stores_for_shutdown()
+                    .close_stores_for_shutdown(deadline)
                     .await
             },
         );
@@ -408,6 +426,7 @@ async fn run_foreground_loopback(
     log_client_drain_shutdown_receipt(&shutdown);
     log_background_shutdown_receipt(&shutdown.background);
     log_project_server_shutdown_receipt(&shutdown.project_servers);
+    log_runtime_hazards();
     endpoint_cleanup
 }
 
@@ -434,6 +453,16 @@ fn log_client_drain_shutdown_receipt(
 }
 
 fn log_background_shutdown_receipt(receipt: &tracedecay_daemon_service::shutdown::ShutdownReceipt) {
+    for lost in &receipt.lost_work {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "background_task_lost_work".to_string()),
+                ("owner", lost.owner.to_string()),
+                ("detail", lost.work.clone()),
+            ],
+        );
+    }
     for owner in receipt.unfinished() {
         // The receipt keeps each owner's typed status; the log must carry it
         // too, or every unfinished owner reads as the same anonymous hang.
@@ -464,6 +493,54 @@ fn log_background_shutdown_receipt(receipt: &tracedecay_daemon_service::shutdown
             ],
         );
     }
+}
+
+/// The daemon's lifetime count of Tokio-only paths skipped for want of a Tokio
+/// runtime, and of writer and reader waits that parked a native thread. Zero
+/// is the only healthy value for each. Long native polls are listed by spawn
+/// site, and the lateness canary reports timer wakes that ran late.
+fn log_runtime_hazards() {
+    let long_native_polls = native_runtime::long_native_polls()
+        .into_iter()
+        .map(|(site, polls)| format!("{site}={polls}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let lateness = native_runtime::scheduling_lateness();
+    log_daemon_event(
+        "daemon_runtime_hazards",
+        &[
+            (
+                "tokio_runtime_missing",
+                native_runtime::tokio_runtime_missing_total().to_string(),
+            ),
+            (
+                "native_thread_writer_waits",
+                native_runtime::native_thread_writer_waits().to_string(),
+            ),
+            (
+                "native_thread_reader_waits",
+                tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits().to_string(),
+            ),
+            ("long_native_polls", long_native_polls),
+            ("late_timer_wakes", lateness.late_ticks.to_string()),
+            (
+                "worst_timer_lateness_ms",
+                lateness.worst.as_millis().to_string(),
+            ),
+        ],
+    );
+}
+
+/// Measures, for the daemon's lifetime, how late native timer wakes run.
+fn spawn_lateness_canary() -> Option<native_runtime::NativeTask<()>> {
+    native_runtime::spawn_lateness_canary()
+        .inspect_err(|error| {
+            log_daemon_event(
+                "daemon_lateness_canary_unavailable",
+                &[("error", error.clone())],
+            );
+        })
+        .ok()
 }
 
 fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::ShutdownTaskReceipt) {
@@ -498,7 +575,7 @@ fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::Shutd
 /// Aborts the accepted client connections and joins them. An aborted client is
 /// clean; a client that failed or panicked is reported.
 pub(super) fn client_shutdown_owner(
-    mut clients: JoinSet<Result<()>>,
+    mut clients: ClientTasks,
 ) -> tracedecay_daemon_service::shutdown::ShutdownOwner {
     tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
         "clients",
@@ -507,11 +584,8 @@ pub(super) fn client_shutdown_owner(
             clients.abort_all();
             let mut failures = Vec::new();
             while let Some(completed) = clients.join_next().await {
-                match completed {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => failures.push(error.to_string()),
-                    Err(error) if error.is_cancelled() => {}
-                    Err(error) => failures.push(error.to_string()),
+                if let Some(failure) = client_failure(completed) {
+                    failures.push(failure);
                 }
             }
             if failures.is_empty() {
@@ -546,8 +620,6 @@ async fn run_foreground_unix(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    tracedecay_runtime_core::native_runtime::process_runtime()
-        .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = native_runtime::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
@@ -731,10 +803,11 @@ async fn run_foreground_unix(
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
     let mut shutdown_signals = ShutdownSignals::listen()?;
+    let lateness_canary = spawn_lateness_canary();
     let spooled_hook_opener =
         hook_v2_replay_consumer::spawn_spooled_hook_opener(engine.clone(), profile.clone());
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
-    let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
+    let mut client_tasks = ClientTasks::default();
     // launchd appends this daemon's stderr to a plain file with no rotation
     // of its own; the journal (systemd) or a terminal is not a regular file
     // and is left alone. Detection is truthful about what fd 2 is, so a
@@ -793,16 +866,26 @@ async fn run_foreground_unix(
             auth_token,
             admission_class,
         ));
-        client_tasks.spawn(tracing::Instrument::instrument(
-            with_connection_admission(permit, client),
-            tracing::trace_span!("daemon.bootstrap.socket_connection"),
-        ));
+        if let Err(error) = client_tasks.spawn(
+            tracing::Instrument::instrument(
+                with_connection_admission(permit, client),
+                tracing::trace_span!("daemon.bootstrap.socket_connection"),
+            )
+            .map_err(|error| error.to_string()),
+        ) {
+            log_client_spawn_refusal(error);
+        }
     }
     engine.lifecycle.begin_draining();
     tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
-    spooled_hook_opener.abort();
+    if let Some(opener) = spooled_hook_opener {
+        opener.abort();
+    }
     if let Some(rotation) = stderr_log_rotation {
         rotation.abort();
+    }
+    if let Some(canary) = lateness_canary {
+        canary.abort();
     }
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
@@ -864,6 +947,7 @@ async fn run_foreground_unix(
     log_client_drain_shutdown_receipt(&shutdown);
     log_background_shutdown_receipt(&shutdown.background);
     log_project_server_shutdown_receipt(&shutdown.project_servers);
+    log_runtime_hazards();
     endpoint_cleanup
 }
 
@@ -982,16 +1066,33 @@ impl ShutdownSignals {
     }
 }
 
-fn log_client_task_result(completed: std::result::Result<Result<()>, tokio::task::JoinError>) {
-    let error = match completed {
-        Ok(Ok(())) => return,
-        Ok(Err(error)) => error.to_string(),
-        Err(error) if error.is_cancelled() => return,
-        Err(error) => error.to_string(),
-    };
+/// A client that failed or panicked; an aborted client is clean.
+fn client_failure(completed: ClientOutcome) -> Option<String> {
+    match completed {
+        NativeTaskOutcome::Completed(Ok(())) | NativeTaskOutcome::Cancelled => None,
+        NativeTaskOutcome::Completed(Err(error)) => Some(error),
+        NativeTaskOutcome::Panicked(panic) => Some(panic.to_string()),
+    }
+}
+
+fn log_client_task_result(completed: ClientOutcome) {
+    if let Some(error) = client_failure(completed) {
+        log_daemon_event(
+            "daemon_client",
+            &[("outcome", "error".to_string()), ("error", error)],
+        );
+    }
+}
+
+/// The native runtime refused the connection's task, so the accepted stream
+/// is closed unserved.
+fn log_client_spawn_refusal(error: String) {
     log_daemon_event(
         "daemon_client",
-        &[("outcome", "error".to_string()), ("error", error)],
+        &[
+            ("outcome", "runtime_unavailable".to_string()),
+            ("error", error),
+        ],
     );
 }
 
