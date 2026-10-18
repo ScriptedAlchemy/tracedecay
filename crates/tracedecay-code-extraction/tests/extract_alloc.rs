@@ -11,6 +11,10 @@
 //! This suite is its own test binary (not a `main.rs` module) because the
 //! byte budget needs a counting `#[global_allocator]`, which is
 //! binary-global.
+//!
+//! It names every extractor to prove signature identity across the whole
+//! language set, so it compiles only in the `extras` profile (`full` tier).
+#![cfg(feature = "full")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

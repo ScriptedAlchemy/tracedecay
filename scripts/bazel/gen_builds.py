@@ -207,6 +207,14 @@ RUNTIME_BINARIES = (
 )
 
 
+# The explicit opt-in grammar profile. `tracedecay-cli/extras` is the Cargo
+# feature that selects it; `//:grammars_extras` is the Bazel setting that
+# holds under `--//:grammars=extras`. A crate variant is widened only when its
+# feature set names one of the shipped-tier markers.
+GRAMMAR_EXTRAS_FEATURE = "tracedecay-cli/extras"
+GRAMMAR_EXTRAS_SETTING = "//:grammars_extras"
+GRAMMAR_TIER_MARKERS = frozenset({"lite", "core", "production"})
+
 # Marks a resolution context that Cargo builds with `--no-default-features`.
 NO_DEFAULT_FEATURES = "!no-default-features"
 
@@ -665,6 +673,35 @@ def main():
             fmap[member] = normalize_default_alias(fmap[member], table)
 
     base = {n: frozenset(contexts[(n, "normal,build", frozenset())][n]) for n in members}
+
+    # Grammar profile axis. Every resolution above is the `core` profile, the
+    # one the shipped binary builds. `--//:grammars=extras` widens the crates
+    # that declare the niche grammar features by what Cargo itself enables for
+    # `tracedecay-cli/extras`, so the extras build is Cargo's resolution and
+    # no feature list is kept by hand.
+    core_ws = feature_map(None, "normal,build", ())
+    extras_ws = feature_map(None, "normal,build", {GRAMMAR_EXTRAS_FEATURE})
+    extras_features = {}
+    extras_only_packages = {}
+    for member, widened in sorted(extras_ws.items()):
+        added = widened - core_ws.get(member, set())
+        if member not in members or not added:
+            continue
+        extras_features[member] = sorted(added)
+        table = feature_tables[member]
+        optional_keys = {
+            item[len("dep:"):]
+            for feature in added
+            for item in table.get(feature, [])
+            if item.startswith("dep:")
+        }
+        packages = sorted(
+            d["name"]
+            for d in members[member]["dependencies"]
+            if (d.get("rename") or d["name"]) in optional_keys and d["kind"] is None
+        )
+        if packages:
+            extras_only_packages[member] = packages
 
     # Cargo resolves a member's member-deps inside the consuming build's own
     # graph, so a lib variant's identity is (edge-context kind, the member's
@@ -1391,9 +1428,54 @@ def main():
         out.extend(formatting_rules(dir_of[name], formatting_sources))
         return "\n".join(out)
 
+    def apply_grammar_profile(member, text):
+        """Make the `extras` grammar profile a Bazel configuration axis.
+
+        A variant that builds the shipped grammar tier (its feature set names
+        a tier marker) widens by the features Cargo enables for `extras` when
+        `//:grammars_extras` holds, and the optional grammar crates only
+        `extras` needs leave its deps in the default `core` profile."""
+        widened = extras_features.get(member)
+        if not widened:
+            return text
+        config = json.dumps(GRAMMAR_EXTRAS_SETTING)
+
+        def select_features(match):
+            listed = re.findall(r'"([^"]+)"', match.group("items"))
+            extra = [f for f in widened if f not in listed]
+            if not GRAMMAR_TIER_MARKERS & set(listed) or not extra:
+                return match.group(0)
+            return (
+                f'{match.group("indent")}crate_features = [{q(listed)}] + '
+                f'select({{{config}: [{q(extra)}], "//conditions:default": []}}),'
+            )
+
+        text = re.sub(
+            r"^(?P<indent>[ \t]*)crate_features = \[(?P<items>[^\]]*)\],$",
+            select_features,
+            text,
+            flags=re.M,
+        )
+        packages = extras_only_packages.get(member)
+        if packages:
+            text = re.sub(
+                r"deps = all_crate_deps\((normal = True[^)]*)\) \+ \[",
+                lambda m: f"deps = grammar_deps(all_crate_deps({m.group(1)}), "
+                f"[{q(packages)}]) + [",
+                text,
+            )
+            text = text.replace(
+                '"perf_rustc_flags", "rust_test")',
+                '"grammar_deps", "perf_rustc_flags", "rust_test")',
+                1,
+            )
+        return text
+
     outputs = {}
     for p in meta["packages"]:
-        outputs[Path(p["manifest_path"]).parent / "BUILD.bazel"] = render_build(p)
+        outputs[Path(p["manifest_path"]).parent / "BUILD.bazel"] = apply_grammar_profile(
+            p["name"], render_build(p)
+        )
 
     def package_rules(pkg_dir, exports):
         """Generated rules for the out-of-package sources under pkg_dir,

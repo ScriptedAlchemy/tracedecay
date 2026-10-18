@@ -61,8 +61,21 @@ def main() -> int:
     features = manifest.get("features", {})
     if features.get("default") != ["production"]:
         raise SystemExit("default feature must delegate only to production")
-    required_production = {"token-counting", "lite", "full"}
-    if not required_production.issubset(set(features.get("production", []))):
+    production_members = set(features.get("production", []))
+    if not {"token-counting", "lite"}.issubset(production_members):
+        raise SystemExit("production feature set lost a required member")
+    if "extras" in features:
+        # Release archives ship the core grammar profile. `full` or `extras`
+        # in production would silently ship the opt-in niche grammar sets
+        # (docs/grammar-profiles.md). Tags that predate the profile split
+        # declare no `extras` feature and still pair `lite` with `full`.
+        if "core" not in production_members:
+            raise SystemExit("production feature set lost the core grammar profile")
+        if {"full", "extras"} & production_members:
+            raise SystemExit(
+                "production feature directly enables the extras grammar profile"
+            )
+    elif "full" not in production_members:
         raise SystemExit("production feature set lost a required member")
     if "test-transport" in features["production"]:
         raise SystemExit("production feature directly enables test-transport")

@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@npm//:defs.bzl", "npm_link_all_packages")
 load("@rules_rust//rust:toolchain.bzl", "current_rustfmt_toolchain")
 
@@ -35,6 +36,26 @@ genrule(
 config_setting(
     name = "opt_mode",
     values = {"compilation_mode": "opt"},
+    visibility = ["//visibility:public"],
+)
+
+# The grammar profile: `core` is what the shipped binary indexes, `extras`
+# adds the niche grammar sets (docs/grammar-profiles.md). Select it with
+# `--//:grammars=extras`; the generator widens each crate's features and
+# optional grammar dependencies by what Cargo enables for `extras`.
+string_flag(
+    name = "grammars",
+    build_setting_default = "core",
+    values = [
+        "core",
+        "extras",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "grammars_extras",
+    flag_values = {":grammars": "extras"},
     visibility = ["//visibility:public"],
 )
 

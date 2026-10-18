@@ -6397,6 +6397,7 @@ dependencies = [
  "tree-sitter-language",
  "tree-sitter-md",
  "tree-sitter-rust",
+ "tree-sitter-toml-ng",
 ]
 
 [[package]]

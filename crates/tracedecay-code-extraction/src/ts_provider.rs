@@ -242,10 +242,7 @@ fn build_language_table() -> HashMap<&'static str, Language> {
         tracedecay_large_treesitters::quint::LANGUAGE.into(),
     );
     #[cfg(feature = "lang-toml")]
-    languages.insert(
-        "toml",
-        tracedecay_large_treesitters::languages::tree_sitter_toml_ng::LANGUAGE.into(),
-    );
+    languages.insert("toml", tree_sitter_toml_ng::LANGUAGE.into());
     #[cfg(feature = "lang-lean")]
     languages.insert(
         "lean",

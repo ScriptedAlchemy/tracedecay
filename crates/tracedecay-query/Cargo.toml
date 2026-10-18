@@ -46,7 +46,7 @@ test-helpers = ["tracedecay-temporal-query/test-helpers"]
 # `tracedecay-cli`'s `production` forwards `tracedecay/production`. Only the
 # `tracedecay-index-bench` binary needs it: a profiling run must parse the
 # same languages production parses, or it measures a workload no user has.
-production = ["tracedecay-code-index/lite", "tracedecay-code-index/full"]
+production = ["tracedecay-code-index/lite", "tracedecay-code-index/core"]
 
 [dev-dependencies]
 static_assertions = "1.1.0"

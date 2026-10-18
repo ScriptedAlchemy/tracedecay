@@ -74,10 +74,12 @@ edition = "2024"
 
 [features]
 default = ["production"]
-production = ["token-counting", "lite", "full"]
+production = ["token-counting", "lite", "core"]
 token-counting = []
 lite = []
+core = []
 full = []
+extras = ["production", "full"]
 """
     )
     if production.returncode != 0:
@@ -89,6 +91,52 @@ full = []
     ):
         raise SystemExit(
             f"unexpected production profile output: {production.github_output!r}"
+        )
+
+    extras_in_production = run_fixture(
+        """[package]
+name = "tracedecay"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["production"]
+production = ["token-counting", "lite", "core", "full"]
+token-counting = []
+lite = []
+core = []
+full = []
+extras = ["production", "full"]
+"""
+    )
+    if extras_in_production.returncode == 0:
+        raise SystemExit("production enabling the extras grammar sets was accepted")
+    if not extras_in_production.stderr.startswith(
+        "production feature directly enables the extras grammar profile\n"
+    ):
+        raise SystemExit(
+            "extras contamination failed for an unexpected reason: "
+            f"{extras_in_production.stderr}"
+        )
+
+    legacy_production = run_fixture(
+        """[package]
+name = "tracedecay"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["production"]
+production = ["token-counting", "lite", "full"]
+token-counting = []
+lite = []
+full = []
+"""
+    )
+    if legacy_production.returncode != 0:
+        raise SystemExit(
+            "a tag that predates the grammar profiles must still resolve: "
+            f"{legacy_production.stderr}"
         )
 
     contaminated_production = run_fixture(

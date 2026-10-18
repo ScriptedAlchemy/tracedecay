@@ -222,6 +222,17 @@ def perf_rustc_flags(opt_level):
         ],
     })
 
+def grammar_deps(deps, extras_only):
+    """`deps` without the optional grammar crates only the `extras` profile
+    needs; `--//:grammars=extras` adds them back. Cargo never compiles an
+    optional dependency no enabled feature names, and a default build here
+    must not build the large grammar bundle either."""
+    only = [d for d in deps if any([name in str(d) for name in extras_only])]
+    return [d for d in deps if d not in only] + select({
+        "//:grammars_extras": only,
+        "//conditions:default": [],
+    })
+
 def rust_test(name, tags = [], runfiles_env = {}, **kwargs):
     """rules_rust's rust_test behind the isolating launcher.
 

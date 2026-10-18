@@ -12,7 +12,9 @@ doctest = false
 
 [features]
 lite = ["tracedecay-code-extraction/lite", "tracedecay-code-index/lite"]
+core = ["tracedecay-code-extraction/core", "tracedecay-code-index/core"]
 full = ["tracedecay-code-extraction/full", "tracedecay-code-index/full"]
+extras = ["tracedecay-code-extraction/extras", "tracedecay-code-index/extras"]
 # Forwards the kernel test-transport seam so this crate's unit tests can
 # reach `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test`.
 test-transport = ["tracedecay-runtime-core/test-transport"]

@@ -18,7 +18,7 @@ include = [
 ]
 
 [features]
-default = ["lite", "medium", "full"]
+default = ["core"]
 test-helpers = []
 # Markdown rides in `lite` as well as `full`: docs are architecture content and
 # every repository has them, so no shipped tier may index code without also
@@ -28,11 +28,15 @@ test-helpers = []
 # Kotlin is registered from arborium-kotlin (through `medium-grammars`), not from the
 # medium bundle's former tree-sitter-kotlin-sg dependency, so `full` never
 # links two Kotlin parse tables.
-lite = ["medium-grammars", "lang-markdown", "lang-json"]
+lite = ["medium-grammars", "lang-markdown", "lang-json", "lang-toml"]
+# The shipping grammar profile. Every grammar here is already compiled for
+# `lite` (the medium bundle) or is a small dedicated crate, so the profile pays
+# no large-bundle build or link cost. See docs/grammar-profiles.md.
+core = ["lite", "lang-bash", "lang-dart", "lang-php", "lang-ruby", "lang-lua"]
 # The two grammar bundles supply native parse tables. Every `lang-*` feature
 # names the bundle that ships its grammar, and `ts_provider` registers only the
 # languages whose features are on so unused tables can be linker-GC'd when a
-# tier omits a language. The shipping `full` set matches master.
+# tier omits a language.
 medium-grammars = ["dep:tracedecay-medium-treesitters", "dep:arborium-kotlin"]
 large-grammars = ["dep:tracedecay-large-treesitters"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
@@ -78,8 +82,15 @@ lang-erlang = ["large-grammars"]
 lang-elixir = ["large-grammars"]
 lang-fsharp = ["large-grammars"]
 lang-quint = ["large-grammars"]
-lang-toml = ["large-grammars"]
+# TOML rides in `lite` because Rust does: the cross-crate resolver reads each
+# `Cargo.toml` package name from the TOML extractor. Its grammar is the
+# dedicated `tree-sitter-toml-ng` crate (the same crate the large bundle
+# re-exports), so `lite` never links the large bundle for it.
+lang-toml = ["dep:tree-sitter-toml-ng"]
 lang-lean = ["large-grammars"]
+# The explicit opt-in profile: everything `core` indexes plus every niche
+# grammar. Official release archives ship `core`; build `extras` from source.
+extras = ["core", "medium", "full"]
 
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
@@ -97,6 +108,7 @@ tree-sitter = "0.27"
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
 tree-sitter-json = { version = "0.24", optional = true }
 tree-sitter-md = { version = "=0.5.3", default-features = false, optional = true }
+tree-sitter-toml-ng = { version = "0.7", optional = true }
 tree-sitter-language = "0.1"
 # Resolved through the workspace [patch.crates-io] git pin, which carries the
 # struct-pattern field attribute fix (tree-sitter/tree-sitter-rust#301).
@@ -110,8 +122,3 @@ sha2 = "0.11"
 [build-dependencies]
 cc = "1.8"
 
-# Names every shipped extractor to prove signature identity across the whole
-# language set, so it only builds once the full tier registers them.
-[[test]]
-name = "extract_alloc"
-required-features = ["full"]
