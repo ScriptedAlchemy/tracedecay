@@ -75,8 +75,8 @@ BUILD_SCRIPT_DATA = {
     "tracedecay-sdk": ["//:Cargo.toml"],
     "tracedecay-cli": [
         "//dashboard:dashboard_sources",
-        "//dashboard:app_dist",
-        "//dashboard:bundle_sha256",
+        "//scripts/bazel/windows_check:dashboard_app_dist",
+        "//scripts/bazel/windows_check:dashboard_bundle_sha256",
         "//:version.txt",
         "//:product_git_sha",
     ],
@@ -159,8 +159,8 @@ BUILD_SCRIPT_SRCS_EXTRA = {
 BUILD_SCRIPT_ENV = {
     "tracedecay-cli": {
         "TRACEDECAY_SKIP_DASHBOARD_BUILD": "1",
-        "TRACEDECAY_DASHBOARD_DIST_DIR": "$(location //dashboard:app_dist)",
-        "TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE": "$(location //dashboard:bundle_sha256)",
+        "TRACEDECAY_DASHBOARD_DIST_DIR": "$(location //scripts/bazel/windows_check:dashboard_app_dist)",
+        "TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE": "$(location //scripts/bazel/windows_check:dashboard_bundle_sha256)",
         "TRACEDECAY_RELEASE_GIT_SHA_FILE": "$(location //:product_git_sha)",
     },
 }

@@ -18,8 +18,8 @@ cargo_build_script(
     pkg_name = "tracedecay-cli",
     version = "1.0.0-beta.88",
     crate_features = ["alloc-mimalloc", "default", "production"],
-    data = ["//dashboard:dashboard_sources", "//dashboard:app_dist", "//dashboard:bundle_sha256", "//:version.txt", "//:product_git_sha"],
-    build_script_env = {"TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE": "$(location //dashboard:bundle_sha256)", "TRACEDECAY_DASHBOARD_DIST_DIR": "$(location //dashboard:app_dist)", "TRACEDECAY_RELEASE_GIT_SHA_FILE": "$(location //:product_git_sha)", "TRACEDECAY_SKIP_DASHBOARD_BUILD": "1"},
+    data = ["//dashboard:dashboard_sources", "//scripts/bazel/windows_check:dashboard_app_dist", "//scripts/bazel/windows_check:dashboard_bundle_sha256", "//:version.txt", "//:product_git_sha"],
+    build_script_env = {"TRACEDECAY_DASHBOARD_BUNDLE_SHA256_FILE": "$(location //scripts/bazel/windows_check:dashboard_bundle_sha256)", "TRACEDECAY_DASHBOARD_DIST_DIR": "$(location //scripts/bazel/windows_check:dashboard_app_dist)", "TRACEDECAY_RELEASE_GIT_SHA_FILE": "$(location //:product_git_sha)", "TRACEDECAY_SKIP_DASHBOARD_BUILD": "1"},
 )
 
 rust_binary(

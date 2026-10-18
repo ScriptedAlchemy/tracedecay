@@ -605,28 +605,14 @@ jobs:
         run: bazel build --config=ci --config=clippy //...
 
       # Master pushes run no Windows lane, so `cfg(windows)` code otherwise
-      # first compiles in the release build. Bazel has no MSVC toolchain on
-      # Linux, so this cross-target type check stays on Cargo: `cargo check`
-      # needs no linker, and mingw supplies the C compiler the native build
-      # scripts run. macOS has no equivalent: its build scripts need the Apple
-      # SDK headers.
-      - name: Install pinned toolchain and Windows check target
-        run: |
-          rustup toolchain install
-          rustup target add x86_64-pc-windows-gnu
-
-      - uses: ./.github/actions/setup-pnpm
-
-      - name: Install the Windows C cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
-
-      - name: Check the Windows target
-        run: >-
-          cargo check --workspace --all-targets --locked
-          --target x86_64-pc-windows-gnu
-          --features tracedecay/test-transport,tracedecay/test-helpers,tracedecay-cli/test-transport
+      # first compiles in the release build. This type-checks it from Linux:
+      # clippy's check-only actions against the Windows target link nothing,
+      # and the hermetic zig toolchain compiles build scripts' C. macOS has no
+      # equivalent: its build scripts need the Apple SDK headers. Only
+      # `//crates/...` carries Rust code; JS packages cannot build for a
+      # Windows target on Linux.
+      - name: Type-check the Windows target
+        run: bazel build --config=ci --config=windows-check //crates/...
 
       - name: Save compiled Bazel actions
         if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
