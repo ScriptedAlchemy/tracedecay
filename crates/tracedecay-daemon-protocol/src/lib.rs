@@ -71,12 +71,12 @@ pub use application_surface::{
 };
 pub use client::{
     AdapterInvocation, BindingResolution, BoundInvocation, CanonicalInvocation,
-    CatalogBindingResolver, DaemonInvocationClient, DaemonInvocationDelivery,
-    DaemonInvocationError, DaemonInvocationExecutor, DaemonInvocationExecutorFuture,
-    DaemonInvocationResult, DaemonLspSessionClient, DispatchError, DispatchInput,
-    DispatchedInvocation, InvocationCancellationPolicy, InvocationControls, ResolvedBinding,
-    ScopeSelector, deadline_remaining, handshake_refusal_error, map_invocation_error,
-    resolve_dispatch, wait_for_cancellation,
+    CatalogBindingResolver, DAEMON_AUTHENTICATION_REJECTED, DaemonInvocationClient,
+    DaemonInvocationDelivery, DaemonInvocationError, DaemonInvocationExecutor,
+    DaemonInvocationExecutorFuture, DaemonInvocationResult, DaemonLspSessionClient, DispatchError,
+    DispatchInput, DispatchedInvocation, InvocationCancellationPolicy, InvocationControls,
+    ResolvedBinding, ScopeSelector, deadline_remaining, handshake_refusal_error,
+    map_invocation_error, refusal_behind_failed_write, resolve_dispatch, wait_for_cancellation,
 };
 pub use client_identity::DaemonClientIdentity;
 pub use connection::{

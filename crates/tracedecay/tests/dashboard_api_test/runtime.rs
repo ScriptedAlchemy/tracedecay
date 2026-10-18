@@ -62,6 +62,7 @@ impl CodeGraphProjectionReadPort for DashboardTestCodeGraphProjectionV1 {
                 ),
                 RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
+                RequestAdmission::GrantExpired => Err(CodeGraphReadError::Denied),
             }
         })
     }

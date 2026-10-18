@@ -29,8 +29,8 @@ use crate::observation::{
 };
 use crate::runtime::hosts::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
-    ClaudeSourceFrame, identify_claude_source, is_claude_session_transcript,
-    try_scan_claude_source_frames_with_resume,
+    ClaudeSourceFrame, ClaudeSourceScanIdentity, identify_claude_source,
+    is_claude_session_transcript, try_scan_claude_source_frames_with_resume,
 };
 use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::observation::jsonl_observation_admission::is_deterministic_content_refusal;
@@ -38,8 +38,8 @@ use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     HostProviderCoverage, JsonlPrefixRecovery, JsonlResumeState, STRICT_JSONL_BATCH_BYTES,
-    TranscriptDiscoveryBounds, TranscriptIngestError, persist_host_provider_coverage,
-    run_blocking_transcript_section,
+    TranscriptDiscoveryBounds, TranscriptIngestError, jsonl_file_identity,
+    persist_host_provider_coverage, run_blocking_transcript_section,
 };
 use tracedecay_privacy::PrivacySanitizerError;
 
@@ -615,6 +615,66 @@ struct SourceProcessingContext<'a, A: ?Sized> {
     cancellation: &'a ObservationCancellation,
 }
 
+/// Chooses the key a transcript's cursor and observations live under. New
+/// transcripts use the path key. A transcript ingested under the stem key
+/// keeps it while its physical file still owns the stem cursor; any other
+/// file with that stem uses its path key instead of contending for the cursor.
+async fn resolve_claude_source<A>(
+    context: &SourceProcessingContext<'_, A>,
+    identity: &ClaudeSourceScanIdentity,
+) -> Result<
+    (
+        ObservationSourceIdentityV1,
+        Option<ObservationSourceCursorV1>,
+    ),
+    ClaudeObservationIngestError,
+>
+where
+    A: HostAdmission + ?Sized,
+{
+    let session_id = SessionId::new(identity.session_id.clone())?;
+    let path_source = ObservationSourceIdentityV1::for_source(
+        session_id.clone(),
+        SessionId::new(identity.source_id.clone())?,
+    )?;
+    let path_cursor = context
+        .admission
+        .get_source_cursor(&path_source, context.scope)
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?;
+    if path_cursor.is_some() {
+        return Ok((path_source, path_cursor));
+    }
+    let stem_source = ObservationSourceIdentityV1::for_source(
+        session_id,
+        SessionId::new(identity.stem_source_id.clone())?,
+    )?;
+    let Some(stem_cursor) = context
+        .admission
+        .get_source_cursor(&stem_source, context.scope)
+        .await
+        .map_err(|outcome| host_admission_error("claude", outcome))?
+    else {
+        return Ok((path_source, None));
+    };
+    let owns_stem_cursor = match stem_cursor.file_identity() {
+        // A cursor without a recorded identity cannot be attributed; it keeps
+        // the behavior it had before path keying.
+        None => true,
+        Some(recorded) => {
+            let path = identity.source_path.clone();
+            run_blocking_transcript_section("claude", move || jsonl_file_identity(&path))
+                .await?
+                .is_ok_and(|physical| physical == recorded)
+        }
+    };
+    Ok(if owns_stem_cursor {
+        (stem_source, Some(stem_cursor))
+    } else {
+        (path_source, None)
+    })
+}
+
 async fn prepare_source<A>(
     context: &SourceProcessingContext<'_, A>,
     path: &Path,
@@ -628,8 +688,9 @@ where
     }
     let identity = {
         run_blocking_transcript_section("claude", {
+            let projects_dir = context.source_adapter.projects_dir().to_path_buf();
             let path = path.to_path_buf();
-            move || identify_claude_source(&path)
+            move || identify_claude_source(&projects_dir, &path)
         })
         .await?
     };
@@ -645,15 +706,7 @@ where
         }
         .into());
     };
-    let source = ObservationSourceIdentityV1::for_source(
-        SessionId::new(identity.session_id.clone())?,
-        SessionId::new(identity.source_id.clone())?,
-    )?;
-    let observation_cursor = context
-        .admission
-        .get_source_cursor(&source, context.scope)
-        .await
-        .map_err(|outcome| host_admission_error("claude", outcome))?;
+    let (source, observation_cursor) = resolve_claude_source(context, &identity).await?;
     let previous = scanner_cursor(observation_cursor.as_ref());
     let resume_state = observation_cursor.as_ref().and_then(|cursor| {
         Some(JsonlResumeState {

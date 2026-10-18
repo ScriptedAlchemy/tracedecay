@@ -60,8 +60,8 @@ use tracedecay_application::observability::{
     record_work_operation_resource,
 };
 use tracedecay_contracts::{
-    WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1,
-    WorkAttemptEffectStoragePortV1, WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1,
+    ApplicationProblem, WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1,
+    WorkAttemptEffectResolutionV1, WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1,
     WorkProviderAvailabilityV1, WorkProviderFallbackRecordV1, WorkflowArtifactPayload,
     WorkflowArtifactStorePort, workflow_artifact_payload_digest,
 };
@@ -94,10 +94,10 @@ use operation_resource::{AttemptAdmissionTimingV1, work_operation_resource_obser
 use provider_launch::ProviderProcess;
 use provider_output::{overflow_outcome, provider_session, stream_summary};
 
-fn provider_stdout_artifacts<S: WorkflowArtifactStorePort>(
+async fn provider_stdout_artifacts(
     identity: &WorkAttemptIdentityV1,
     captured: Option<&(Vec<u8>, u64)>,
-    store: Option<&S>,
+    store: Option<&tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority>,
 ) -> Result<Vec<WorkArtifactRefV1>, ()> {
     let Some((bytes, total)) = captured.filter(|(bytes, total)| {
         !bytes.is_empty() && *total == u64::try_from(bytes.len()).unwrap_or(u64::MAX)
@@ -141,18 +141,175 @@ fn provider_stdout_artifacts<S: WorkflowArtifactStorePort>(
                 "work attempt provider stdout payload could not be verified"
             );
         })?;
-    store.persist(&payload).map_err(|error| {
-        tracing::warn!(
-            task = identity.task_id().as_str(),
-            ?error,
-            "work attempt provider stdout payload could not be persisted"
-        );
-    })?;
+    store
+        .transact(move |storage| storage.persist(&payload))
+        .await
+        .unwrap_or(Err(
+            tracedecay_contracts::WorkflowArtifactStoreError::Unavailable,
+        ))
+        .map_err(|error| {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?error,
+                "work attempt provider stdout payload could not be persisted"
+            );
+        })?;
     Ok(vec![artifact])
 }
 
 #[cfg(test)]
 mod tests;
+
+/// The durable attempt and effect-holder steps the provider driver awaits
+/// between process events. The registered Work services run each one as a
+/// writer job, so a step never parks the task's thread on the writer.
+pub(super) trait AttemptStepsV1: Sync {
+    fn mark_running(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        actual_route: WorkProviderRouteV1,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send;
+
+    fn mark_provider_unavailable(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        observed_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send;
+
+    fn fail_recovery(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send;
+
+    fn acknowledge_cancellation(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        acknowledged_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send;
+
+    fn escalate_cancellation(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        escalated_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send;
+
+    fn settle_with_artifacts(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+        artifacts: Vec<WorkArtifactRefV1>,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send;
+
+    fn record_dispatch(
+        &self,
+        context: &RequestContext,
+        attempt: &WorkAttemptV1,
+        dispatched_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptEffectDispatchOutcomeV1, ApplicationProblem>> + Send;
+
+    fn settle_dispatch(
+        &self,
+        context: &RequestContext,
+        attempt: &WorkAttemptIdentityV1,
+        resolution: WorkAttemptEffectResolutionV1,
+        resolved_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptEffectHolderV1, ApplicationProblem>> + Send;
+}
+
+impl AttemptStepsV1 for tracedecay_application::work::RegisteredWorkApplicationServicesV1 {
+    fn mark_running(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        actual_route: WorkProviderRouteV1,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        self.mark_running(context.clone(), identity.clone(), actual_route)
+    }
+
+    fn mark_provider_unavailable(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        observed_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        self.mark_provider_unavailable(context.clone(), identity.clone(), observed_at)
+    }
+
+    fn fail_recovery(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        self.fail_recovery(context.clone(), identity.clone(), evidence.clone())
+    }
+
+    fn acknowledge_cancellation(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        acknowledged_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        self.acknowledge_cancellation(context.clone(), identity.clone(), acknowledged_at)
+    }
+
+    fn escalate_cancellation(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        escalated_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        self.escalate_cancellation(context.clone(), identity.clone(), escalated_at)
+    }
+
+    fn settle_with_artifacts(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+        artifacts: Vec<WorkArtifactRefV1>,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        self.settle_with_artifacts(
+            context.clone(),
+            identity.clone(),
+            evidence.clone(),
+            artifacts,
+        )
+    }
+
+    fn record_dispatch(
+        &self,
+        context: &RequestContext,
+        attempt: &WorkAttemptV1,
+        dispatched_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptEffectDispatchOutcomeV1, ApplicationProblem>> + Send
+    {
+        self.record_effect_dispatch(
+            context.clone(),
+            attempt.identity().clone(),
+            attempt.execution().effect_state(),
+            dispatched_at,
+            attempt.execution().deadline(),
+        )
+    }
+
+    fn settle_dispatch(
+        &self,
+        context: &RequestContext,
+        attempt: &WorkAttemptIdentityV1,
+        resolution: WorkAttemptEffectResolutionV1,
+        resolved_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptEffectHolderV1, ApplicationProblem>> + Send {
+        self.settle_effect_dispatch(context.clone(), attempt.clone(), resolution, resolved_at)
+    }
+}
 
 /// How long an acknowledged cancellation may run before escalation to
 /// forced termination.
@@ -292,10 +449,7 @@ impl WorkAttemptProcessRegistryV1 {
         let task_key = key.clone();
         let (start, started) = tokio::sync::oneshot::channel();
         let future = task(Arc::clone(&cancellation));
-        // The attempt calls synchronous Work storage ports (`mark_running`,
-        // the settle paths) that park their thread on the writer, so it runs
-        // on a blocking-pool thread rather than a native worker.
-        let Ok(task) = native_runtime::NativeTask::spawn_off_native_thread(async move {
+        let Ok(task) = native_runtime::NativeTask::spawn(async move {
             let admitted = tokio::select! {
                 result = started => result.is_ok(),
                 () = task_lifecycle.cancelled() => false,
@@ -347,7 +501,7 @@ impl WorkAttemptProcessRegistryV1 {
             .is_some_and(|holder| holder.worktree_id.as_ref() == Some(worktree_id))
     }
 
-    pub(super) fn holds_worktree(&self, worktree_id: &WorktreeId) -> bool {
+    pub fn holds_worktree(&self, worktree_id: &WorktreeId) -> bool {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -527,7 +681,8 @@ pub(super) fn spawn_attempt_execution(
             &project_root,
             &identity,
             observability_producer,
-        );
+        )
+        .await;
     });
 }
 
@@ -560,15 +715,17 @@ async fn run_attempt(
             return;
         }
     };
-    let attempts = services.attempts();
-    let attempt_effects = services.attempt_effects();
-    let workflow_artifacts = registered.database.workflow_storage().map_err(|error| {
-        tracing::warn!(
-            task = attempt.identity().task_id().as_str(),
-            ?error,
-            "work attempt provider output store could not be attached"
-        );
-    });
+    let workflow_artifacts = registered
+        .database
+        .workflow_storage()
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                task = attempt.identity().task_id().as_str(),
+                ?error,
+                "work attempt provider output store could not be attached"
+            );
+        });
     let identity = attempt.identity().clone();
     // The registration-pinned work topology policy carries the concurrency
     // policy this attempt was admitted under; its canonical digest is the
@@ -585,15 +742,29 @@ async fn run_attempt(
         }
     };
 
-    match select_with_resolver(
-        &registered.proposal_routing.executable_binding_resolver,
-        &attempt,
-    ) {
+    let resolver = registered
+        .proposal_routing
+        .executable_binding_resolver
+        .clone();
+    let resolving = attempt.clone();
+    let selection =
+        native_runtime::spawn_blocking(move || select_with_resolver(&resolver, &resolving))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    task = identity.task_id().as_str(),
+                    %error,
+                    "work provider binding could not be resolved on the blocking pool"
+                );
+                Err(ProviderDenial::preferred(
+                    WorkProviderAvailabilityV1::Unavailable,
+                ))
+            });
+    match selection {
         Ok(selection) => match selection.provider.protocol {
             WorkProviderProtocol::CodexAppServerJsonRpc => {
                 execute_app_server(
-                    attempts,
-                    attempt_effects,
+                    &services,
                     workflow_artifacts.as_ref().ok(),
                     &context,
                     &attempt,
@@ -608,8 +779,7 @@ async fn run_attempt(
             }
             _ => {
                 execute_provider_with_environment(
-                    attempts,
-                    attempt_effects,
+                    &services,
                     workflow_artifacts.as_ref().ok(),
                     &context,
                     &attempt,
@@ -625,7 +795,7 @@ async fn run_attempt(
         },
         Err(denial) => {
             settle_unstarted(
-                attempts,
+                &services,
                 &context,
                 &identity,
                 &attempt,
@@ -634,7 +804,8 @@ async fn run_attempt(
                 },
                 denial.fallback,
                 observability_producer.as_deref(),
-            );
+            )
+            .await;
         }
     }
 }
@@ -795,32 +966,34 @@ fn availability_state(error: WorkExecutableBindingError) -> WorkProviderAvailabi
 
 /// Seals a terminal denial for an attempt whose provider never started:
 /// fence to `RecoveryRequired`, then fail recovery with the typed outcome.
-fn settle_unstarted<S>(
-    attempts: &tracedecay_contracts::WorkAttemptService<S>,
+async fn settle_unstarted(
+    steps: &impl AttemptStepsV1,
     context: &RequestContext,
     identity: &WorkAttemptIdentityV1,
     attempt: &WorkAttemptV1,
     outcome: WorkAttemptProviderOutcomeV1,
     provider_fallback: Option<WorkProviderFallbackRecordV1>,
     observability_producer: Option<&BoundedObservabilityProducerV1>,
-) where
-    S: tracedecay_contracts::WorkAttemptStoragePort,
-{
+) {
     let observed_at = now_micros();
-    if let Err(problem) = attempts.mark_provider_unavailable(context, identity, observed_at) {
+    if let Err(problem) = steps
+        .mark_provider_unavailable(context, identity, observed_at)
+        .await
+    {
         tracing::warn!(
             task = identity.task_id().as_str(),
             ?problem,
             "work attempt could not be fenced for provider unavailability"
         );
         seal_cancellation_before_running(
-            attempts,
+            steps,
             context,
             attempt,
             None,
             provider_fallback,
             observability_producer,
-        );
+        )
+        .await;
         return;
     }
     let evidence = WorkAttemptEvidenceRecordV1 {
@@ -834,7 +1007,7 @@ fn settle_unstarted<S>(
         provider_fallback,
         observed_at,
     };
-    match attempts.fail_recovery(context, identity, &evidence) {
+    match steps.fail_recovery(context, identity, &evidence).await {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
         }
@@ -852,20 +1025,19 @@ fn settle_unstarted<S>(
 /// the race: the row is `CancellationRequested`, which cannot become
 /// `Running`, and no provider is left to exit. Seal it here as `Cancelled`.
 /// Any other refusal leaves the durable row as the authority.
-fn seal_cancellation_before_running<S>(
-    attempts: &tracedecay_contracts::WorkAttemptService<S>,
+async fn seal_cancellation_before_running(
+    steps: &impl AttemptStepsV1,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     actual_route: Option<WorkProviderRouteV1>,
     provider_fallback: Option<WorkProviderFallbackRecordV1>,
     observability_producer: Option<&BoundedObservabilityProducerV1>,
-) where
-    S: tracedecay_contracts::WorkAttemptStoragePort,
-{
+) {
     let identity = attempt.identity();
     let observed_at = now_micros();
-    if attempts
+    if steps
         .acknowledge_cancellation(context, identity, observed_at)
+        .await
         .is_err()
     {
         return;
@@ -881,7 +1053,10 @@ fn seal_cancellation_before_running<S>(
         provider_fallback,
         observed_at,
     };
-    match attempts.settle_with_artifacts(context, identity, &evidence, Vec::new()) {
+    match steps
+        .settle_with_artifacts(context, identity, &evidence, Vec::new())
+        .await
+    {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
         }
@@ -901,21 +1076,12 @@ enum EffectDispatchAdmission {
     Unavailable,
 }
 
-fn record_effect_dispatch<S>(
-    effects: &WorkAttemptEffectServiceV1<S>,
+async fn record_effect_dispatch(
+    steps: &impl AttemptStepsV1,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
-) -> EffectDispatchAdmission
-where
-    S: WorkAttemptEffectStoragePortV1,
-{
-    match effects.record_dispatch(
-        context,
-        attempt.identity().clone(),
-        attempt.execution().effect_state(),
-        now_micros(),
-        attempt.execution().deadline(),
-    ) {
+) -> EffectDispatchAdmission {
+    match steps.record_dispatch(context, attempt, now_micros()).await {
         Ok(WorkAttemptEffectDispatchOutcomeV1::Recorded(_)) => EffectDispatchAdmission::Recorded,
         Ok(WorkAttemptEffectDispatchOutcomeV1::Replayed(_)) => {
             tracing::warn!(
@@ -935,15 +1101,12 @@ where
     }
 }
 
-fn settle_effect_dispatch<S>(
-    effects: &WorkAttemptEffectServiceV1<S>,
+async fn settle_effect_dispatch(
+    steps: &impl AttemptStepsV1,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
     provider_started: bool,
-) -> bool
-where
-    S: WorkAttemptEffectStoragePortV1,
-{
+) -> bool {
     let resolution = if !provider_started
         || attempt.execution().effect_state() == tracedecay_domain::WorkEffectStateV1::Observational
     {
@@ -951,7 +1114,10 @@ where
     } else {
         WorkAttemptEffectResolutionV1::Unknown
     };
-    if let Err(problem) = effects.settle(context, attempt.identity(), resolution, now_micros()) {
+    if let Err(problem) = steps
+        .settle_dispatch(context, attempt.identity(), resolution, now_micros())
+        .await
+    {
         tracing::warn!(
             task = attempt.identity().task_id().as_str(),
             ?problem,
@@ -985,9 +1151,8 @@ fn admitted_provider_environment(
     level = "trace",
     skip_all
 )]
-async fn execute_provider_with_environment<S>(
-    attempts: &tracedecay_contracts::WorkAttemptService<S>,
-    attempt_effects: &WorkAttemptEffectServiceV1<S>,
+async fn execute_provider_with_environment(
+    steps: &impl AttemptStepsV1,
     workflow_artifacts: Option<&tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
@@ -997,9 +1162,7 @@ async fn execute_provider_with_environment<S>(
     observability_producer: Option<&BoundedObservabilityProducerV1>,
     topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
-) where
-    S: tracedecay_contracts::WorkAttemptStoragePort + WorkAttemptEffectStoragePortV1,
-{
+) {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
     let resolved = &selection.provider;
@@ -1017,12 +1180,12 @@ async fn execute_provider_with_environment<S>(
         command.env(key, value);
     }
 
-    match record_effect_dispatch(attempt_effects, context, attempt) {
+    match record_effect_dispatch(steps, context, attempt).await {
         EffectDispatchAdmission::Recorded => {}
         EffectDispatchAdmission::Replayed => return,
         EffectDispatchAdmission::Unavailable => {
             settle_unstarted(
-                attempts,
+                steps,
                 context,
                 &identity,
                 attempt,
@@ -1031,7 +1194,8 @@ async fn execute_provider_with_environment<S>(
                 },
                 selection.fallback.clone(),
                 observability_producer,
-            );
+            )
+            .await;
             return;
         }
     }
@@ -1051,22 +1215,26 @@ async fn execute_provider_with_environment<S>(
                 ?error,
                 "work attempt provider process could not be spawned"
             );
-            if !settle_effect_dispatch(attempt_effects, context, attempt, false) {
+            if !settle_effect_dispatch(steps, context, attempt, false).await {
                 return;
             }
             settle_unstarted(
-                attempts,
+                steps,
                 context,
                 &identity,
                 attempt,
                 WorkAttemptProviderOutcomeV1::LaunchFailed,
                 selection.fallback.clone(),
                 observability_producer,
-            );
+            )
+            .await;
             return;
         }
     };
-    let running = match attempts.mark_running(context, &identity, selection.actual_route.clone()) {
+    let running = match steps
+        .mark_running(context, &identity, selection.actual_route.clone())
+        .await
+    {
         Ok(running) => running,
         Err(problem) => {
             // The lease no longer admits this task (fenced by recovery or a
@@ -1079,15 +1247,16 @@ async fn execute_provider_with_environment<S>(
             );
             process.signal(TerminationSignal::Kill);
             let _ = process.wait().await;
-            if settle_effect_dispatch(attempt_effects, context, attempt, true) {
+            if settle_effect_dispatch(steps, context, attempt, true).await {
                 seal_cancellation_before_running(
-                    attempts,
+                    steps,
                     context,
                     attempt,
                     Some(selection.actual_route.clone()),
                     selection.fallback.clone(),
                     observability_producer,
-                );
+                )
+                .await;
             }
             return;
         }
@@ -1110,7 +1279,7 @@ async fn execute_provider_with_environment<S>(
     let outcome = match ending {
         Ok(Some(Ok(status))) => exit_outcome(status),
         Ok(Some(Err(_))) => WorkAttemptProviderOutcomeV1::LaunchFailed,
-        Ok(None) => cancel_ladder(attempts, context, &identity, &mut process).await,
+        Ok(None) => cancel_ladder(steps, context, &identity, &mut process).await,
         // An unavailable timer fails closed as an elapsed wall budget.
         Err(_) => {
             let stalled_for = started.elapsed();
@@ -1135,6 +1304,7 @@ async fn execute_provider_with_environment<S>(
     let mut outcome = overflow_outcome(outcome, &stdout, &stderr);
     let artifacts =
         provider_stdout_artifacts(&identity, captured_stdout.as_ref(), workflow_artifacts)
+            .await
             .unwrap_or_else(|()| {
                 outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
                 Vec::new()
@@ -1151,10 +1321,13 @@ async fn execute_provider_with_environment<S>(
         provider_fallback: selection.fallback.clone(),
         observed_at: now_micros(),
     };
-    if !settle_effect_dispatch(attempt_effects, context, attempt, true) {
+    if !settle_effect_dispatch(steps, context, attempt, true).await {
         return;
     }
-    match attempts.settle_with_artifacts(context, &identity, &evidence, artifacts) {
+    match steps
+        .settle_with_artifacts(context, &identity, &evidence, artifacts)
+        .await
+    {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
             if let Some(observation) =
@@ -1207,9 +1380,8 @@ struct AppServerSessionOutput {
     level = "trace",
     skip_all
 )]
-async fn execute_app_server<S>(
-    attempts: &tracedecay_contracts::WorkAttemptService<S>,
-    attempt_effects: &WorkAttemptEffectServiceV1<S>,
+async fn execute_app_server(
+    steps: &impl AttemptStepsV1,
     workflow_artifacts: Option<&tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
@@ -1219,19 +1391,17 @@ async fn execute_app_server<S>(
     observability_producer: Option<&BoundedObservabilityProducerV1>,
     topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
-) where
-    S: tracedecay_contracts::WorkAttemptStoragePort + WorkAttemptEffectStoragePortV1,
-{
+) {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
     let snapshot = envelope.execution_snapshot();
 
-    match record_effect_dispatch(attempt_effects, context, attempt) {
+    match record_effect_dispatch(steps, context, attempt).await {
         EffectDispatchAdmission::Recorded => {}
         EffectDispatchAdmission::Replayed => return,
         EffectDispatchAdmission::Unavailable => {
             settle_unstarted(
-                attempts,
+                steps,
                 context,
                 &identity,
                 attempt,
@@ -1240,7 +1410,8 @@ async fn execute_app_server<S>(
                 },
                 selection.fallback.clone(),
                 observability_producer,
-            );
+            )
+            .await;
             return;
         }
     }
@@ -1248,7 +1419,10 @@ async fn execute_app_server<S>(
     // The launch and the protocol session are one indivisible blocking call
     // here, so the attempt is marked Running before it starts; a launch that
     // never happens surfaces as a typed failure on the settle path instead.
-    let running = match attempts.mark_running(context, &identity, selection.actual_route.clone()) {
+    let running = match steps
+        .mark_running(context, &identity, selection.actual_route.clone())
+        .await
+    {
         Ok(running) => running,
         Err(problem) => {
             tracing::warn!(
@@ -1256,15 +1430,16 @@ async fn execute_app_server<S>(
                 ?problem,
                 "work attempt could not be marked running; app-server was not started"
             );
-            if settle_effect_dispatch(attempt_effects, context, attempt, false) {
+            if settle_effect_dispatch(steps, context, attempt, false).await {
                 seal_cancellation_before_running(
-                    attempts,
+                    steps,
                     context,
                     attempt,
                     None,
                     selection.fallback.clone(),
                     observability_producer,
-                );
+                )
+                .await;
             }
             return;
         }
@@ -1343,7 +1518,9 @@ async fn execute_app_server<S>(
                 // the whole process tree, so the ladder acknowledges and stops
                 // there rather than pretending an interrupt was survived.
                 if let Err(problem) =
-                    attempts.acknowledge_cancellation(context, &identity, now_micros())
+                    steps
+                        .acknowledge_cancellation(context, &identity, now_micros())
+                        .await
                 {
                     tracing::warn!(
                         task = identity.task_id().as_str(),
@@ -1414,6 +1591,7 @@ async fn execute_app_server<S>(
     let mut outcome = overflow_outcome(outcome, &stdout, &None);
     let artifacts =
         provider_stdout_artifacts(&identity, captured_stdout.as_ref(), workflow_artifacts)
+            .await
             .unwrap_or_else(|()| {
                 outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
                 Vec::new()
@@ -1433,14 +1611,19 @@ async fn execute_app_server<S>(
         observed_at: now_micros(),
     };
     if !settle_effect_dispatch(
-        attempt_effects,
+        steps,
         context,
         attempt,
         launch_receipt.started_at().is_some(),
-    ) {
+    )
+    .await
+    {
         return;
     }
-    match attempts.settle_with_artifacts(context, &identity, &evidence, artifacts) {
+    match steps
+        .settle_with_artifacts(context, &identity, &evidence, artifacts)
+        .await
+    {
         Ok(settled) => {
             let _ = record_terminal_attempt_product_views(observability_producer, &settled);
             if let Some(observation) = launch_receipt.started_at().and_then(|started| {
@@ -1513,16 +1696,16 @@ fn offer_no_progress_observation(
     level = "trace",
     skip_all
 )]
-async fn cancel_ladder<S>(
-    attempts: &tracedecay_contracts::WorkAttemptService<S>,
+async fn cancel_ladder(
+    steps: &impl AttemptStepsV1,
     context: &RequestContext,
     identity: &WorkAttemptIdentityV1,
     process: &mut ProviderProcess,
-) -> WorkAttemptProviderOutcomeV1
-where
-    S: tracedecay_contracts::WorkAttemptStoragePort,
-{
-    if let Err(problem) = attempts.acknowledge_cancellation(context, identity, now_micros()) {
+) -> WorkAttemptProviderOutcomeV1 {
+    if let Err(problem) = steps
+        .acknowledge_cancellation(context, identity, now_micros())
+        .await
+    {
         tracing::warn!(
             task = identity.task_id().as_str(),
             ?problem,
@@ -1534,7 +1717,10 @@ where
         .await
         .is_err()
     {
-        if let Err(problem) = attempts.escalate_cancellation(context, identity, now_micros()) {
+        if let Err(problem) = steps
+            .escalate_cancellation(context, identity, now_micros())
+            .await
+        {
             tracing::warn!(
                 task = identity.task_id().as_str(),
                 ?problem,

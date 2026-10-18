@@ -205,7 +205,9 @@ fn clone_lane_unavailable_error(
         return TraceDecayError::project_route(
             "application_surface_invalid_request",
             false,
-            format!("the maintained clone {lane} lane refused the request as invalid"),
+            format!(
+                "the maintained clone {lane} lane refused the request as invalid; check its limits, match_classes, and paths against the tool schema"
+            ),
         );
     }
     TraceDecayError::ProjectRoute {
@@ -393,7 +395,7 @@ mod tests {
             Some((
                 "application_surface_invalid_request",
                 false,
-                "the maintained clone similarity lane refused the request as invalid",
+                "the maintained clone similarity lane refused the request as invalid; check its limits, match_classes, and paths against the tool schema",
             ))
         );
     }

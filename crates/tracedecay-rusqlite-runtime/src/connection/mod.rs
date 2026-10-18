@@ -16,7 +16,7 @@ use rusqlite::{
     limits::Limit,
 };
 use sha2::{Digest, Sha256};
-use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
+use tracedecay_store::{StoreShardScopeV1, WAL_SOFT_LIMIT_BYTES};
 
 const PROGRESS_INTERVAL_OPS: i32 = 1_000;
 
@@ -416,6 +416,39 @@ pub(crate) enum ConnectionMode {
     Maintenance,
 }
 
+/// How a writer commit reaches the disk. `Full` syncs the WAL on every
+/// commit, so a power loss cannot drop a commit the writer acknowledged;
+/// `Normal` syncs only at checkpoints and may lose the newest commits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Durability {
+    Full,
+    Normal,
+}
+
+impl Durability {
+    /// Durable memory (facts and the anchors they cite) lives in the project
+    /// and profile-memory stores and is never rebuilt, so those commit at
+    /// `Full`. The other stores keep `Normal` until their durable rows move
+    /// into classes of their own (docs/plans/storage).
+    pub(crate) const fn for_scope(scope: &StoreShardScopeV1) -> Self {
+        match scope {
+            StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileMemory => Self::Full,
+            StoreShardScopeV1::Profile
+            | StoreShardScopeV1::ProfileSessions
+            | StoreShardScopeV1::RemoteNode { .. }
+            | StoreShardScopeV1::ProjectSessions { .. }
+            | StoreShardScopeV1::Code { .. } => Self::Normal,
+        }
+    }
+
+    const fn pragma(self) -> (&'static str, i64) {
+        match self {
+            Self::Full => ("FULL", 2),
+            Self::Normal => ("NORMAL", 1),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum WriterOpenError {
     Policy(ConnectionPolicyError),
@@ -504,13 +537,14 @@ impl VerifiedReader {
 
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
     let (connection, fresh_writer) = open_raw(path, mode)?;
-    finish_open(connection, mode, fresh_writer)
+    finish_open(connection, mode, fresh_writer, Durability::Normal)
 }
 
 pub(crate) fn open_writer(
     path: &Path,
     opened_database: Option<&OpenedDatabaseFile>,
     canonical_path: &Path,
+    durability: Durability,
 ) -> Result<Connection, WriterOpenError> {
     let (connection, fresh_writer) =
         open_raw(path, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
@@ -519,7 +553,7 @@ pub(crate) fn open_writer(
             .verify_connection(&connection, canonical_path)
             .map_err(WriterOpenError::Identity)?;
     }
-    let connection = finish_open(connection, ConnectionMode::Writer, fresh_writer)
+    let connection = finish_open(connection, ConnectionMode::Writer, fresh_writer, durability)
         .map_err(WriterOpenError::Policy)?;
     if let Some(opened_database) = opened_database {
         opened_database
@@ -645,11 +679,12 @@ fn finish_open(
     connection: Connection,
     mode: ConnectionMode,
     fresh_writer: bool,
+    durability: Durability,
 ) -> Result<Connection, ConnectionPolicyError> {
     {
         let _span = tracing::trace_span!("rusqlite.connection.configure").entered();
         {
-            apply_pragmas(&connection, mode, fresh_writer)?;
+            apply_pragmas(&connection, mode, fresh_writer, durability)?;
             assert_compile_options(&connection)?;
             apply_limits(&connection, mode)?;
             connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
@@ -697,7 +732,12 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
             let connection =
                 Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-            apply_pragmas(&connection, ConnectionMode::Reader, false)?;
+            apply_pragmas(
+                &connection,
+                ConnectionMode::Reader,
+                false,
+                Durability::Normal,
+            )?;
             assert_compile_options(&connection)?;
             apply_limits(&connection, ConnectionMode::Reader)?;
             connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
@@ -772,7 +812,9 @@ fn apply_pragmas(
     connection: &Connection,
     mode: ConnectionMode,
     fresh_writer: bool,
+    durability: Durability,
 ) -> Result<(), ConnectionPolicyError> {
+    let (synchronous, synchronous_value) = durability.pragma();
     // SQLite must never wait past the runtime's own queue/deadline authority.
     connection
         .busy_timeout(Duration::ZERO)
@@ -809,7 +851,7 @@ fn apply_pragmas(
             .pragma_update(None, "wal_autocheckpoint", 0_i64)
             .map_err(|source| policy("WAL auto-checkpoint", source))?;
         connection
-            .pragma_update(None, "synchronous", "NORMAL")
+            .pragma_update(None, "synchronous", synchronous)
             .map_err(|source| policy("synchronous mode", source))?;
     }
     // Applied after the journal mode is settled, on every lane that can reset
@@ -844,7 +886,7 @@ fn apply_pragmas(
         ConnectionMode::Writer => {
             verify_pragma_text(connection, "journal_mode", "wal")?;
             verify_pragma_i64(connection, "wal_autocheckpoint", 0)?;
-            verify_pragma_i64(connection, "synchronous", 1)?;
+            verify_pragma_i64(connection, "synchronous", synchronous_value)?;
             verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
         }
         ConnectionMode::Reader => verify_pragma_i64(connection, "query_only", 1)?,

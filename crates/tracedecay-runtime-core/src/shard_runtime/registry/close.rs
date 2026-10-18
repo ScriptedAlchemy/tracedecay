@@ -15,6 +15,41 @@ use super::{
 use crate::db::DatabaseAuthority;
 use crate::shard_runtime::shard::ShardRuntimeEvictionBlocker;
 
+const SHUTDOWN_HOLD_DRAIN_POLL: Duration = Duration::from_millis(10);
+
+/// What still keeps one mounted runtime from closing at shutdown.
+struct RuntimeHold {
+    blockers: Vec<ShardRuntimeEvictionBlocker>,
+    profile_pins: usize,
+    graph_leases: usize,
+}
+
+impl RuntimeHold {
+    fn of(
+        state: &super::RegistryState,
+        key: &StoreRuntimeKey,
+        owner: &StoreRuntimeOwnerAttachment,
+    ) -> Self {
+        let mut blockers = owner
+            .runtime()
+            .eviction_eligibility(Duration::ZERO)
+            .blockers;
+        blockers.retain(|blocker| !matches!(blocker, ShardRuntimeEvictionBlocker::PinnedProfile));
+        Self {
+            blockers,
+            profile_pins: state.profile_pin_tokens.get(key).map_or(0, BTreeSet::len),
+            graph_leases: state
+                .graph_publications
+                .get(key)
+                .map_or(0, |retained| retained.lease_tokens.len()),
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        self.blockers.is_empty() && self.profile_pins == 0 && self.graph_leases == 0
+    }
+}
+
 /// Proof that one exact runtime reached `Closed` after all physical `SQLite`
 /// handles joined and before its registry entry was removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,50 +154,81 @@ impl StoreRuntimeRegistry {
     /// checkpoint. The daemon process exits with this registry reachable, so
     /// no destructor closes these attachments otherwise. In-flight opens are
     /// cancelled and joined first, so none publishes or keeps a physical
-    /// handle after the scan. Held runtimes stay mounted and are logged with
-    /// their blockers. Each reserved runtime owns its own writer and readers,
-    /// so they close concurrently and the shutdown waits for the slowest
-    /// checkpoint rather than their sum. Returns the number of runtimes
-    /// closed.
+    /// handle after the scan. Each reserved runtime owns its own writer and
+    /// readers, so they close concurrently and the shutdown waits for the
+    /// slowest checkpoint rather than their sum.
+    ///
+    /// A held runtime is scanned again until its holders let go or `deadline`
+    /// passes: owners joined before store close can still be unwinding the
+    /// tasks that hold their leases, and under load that tail outlasts the
+    /// owner join (#4138). The deadline is the caller's store-close budget, so
+    /// the drain spends whatever the phases before it left. The last pass is
+    /// the last poll that fits before `deadline`, so the close returns, and
+    /// logs each runtime still held with its blockers, before the caller's
+    /// own deadline cancels it. A runtime still held then stays mounted.
+    /// Returns the number of runtimes closed.
     #[tracing::instrument(
         name = "runtime_core.registry.close_idle_for_shutdown",
         level = "trace",
         skip_all
     )]
-    pub async fn close_idle_for_shutdown(&self) -> Result<usize, StoreRuntimeRegistryFailure> {
+    pub async fn close_idle_for_shutdown(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<usize, StoreRuntimeRegistryFailure> {
         let cx =
             crate::native_runtime::cx().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
                 operation: "close idle registered runtimes for shutdown",
             })?;
         self.cancel_and_join_opens_for_shutdown(&cx).await?;
-        let (reservations, reserve_failure) = {
+        let mut closed = 0;
+        loop {
+            let final_pass = std::time::Instant::now() + SHUTDOWN_HOLD_DRAIN_POLL >= deadline;
+            let (batch, held) = self.close_idle_batch(final_pass).await?;
+            closed += batch;
+            if !held || final_pass {
+                return Ok(closed);
+            }
+            if crate::native_runtime::sleep_until(
+                std::time::Instant::now() + SHUTDOWN_HOLD_DRAIN_POLL,
+            )
+            .await
+            .is_err()
+            {
+                return self
+                    .close_idle_batch(true)
+                    .await
+                    .map(|(batch, _)| closed + batch);
+            }
+        }
+    }
+
+    /// Closes every runtime idle right now and reports whether any stays
+    /// held. Only the final pass logs the held ones.
+    async fn close_idle_batch(
+        &self,
+        final_pass: bool,
+    ) -> Result<(usize, bool), StoreRuntimeRegistryFailure> {
+        let (reservations, held, reserve_failure) = {
             let mut state = self.lock_state();
             let mut idle = Vec::new();
+            let mut held = false;
             for (key, entry) in &state.entries {
                 let RegistryEntry::Ready(ready) = entry else {
                     continue;
                 };
-                let mut blockers = ready
-                    .owner
-                    .runtime()
-                    .eviction_eligibility(Duration::ZERO)
-                    .blockers;
-                blockers.retain(|blocker| {
-                    !matches!(blocker, ShardRuntimeEvictionBlocker::PinnedProfile)
-                });
-                let profile_pins = state.profile_pin_tokens.get(key).map_or(0, BTreeSet::len);
-                let graph_leases = state
-                    .graph_publications
-                    .get(key)
-                    .map_or(0, |retained| retained.lease_tokens.len());
-                if blockers.is_empty() && profile_pins == 0 && graph_leases == 0 {
+                let hold = RuntimeHold::of(&state, key, &ready.owner);
+                if hold.is_idle() {
                     idle.push(key.clone());
-                } else {
+                    continue;
+                }
+                held = true;
+                if final_pass {
                     tracing::warn!(
                         path = %ready.owner.locator().path().display(),
-                        ?blockers,
-                        profile_pins,
-                        graph_leases,
+                        blockers = ?hold.blockers,
+                        profile_pins = hold.profile_pins,
+                        graph_leases = hold.graph_leases,
                         "store runtime still held at shutdown; its WAL is not truncated"
                     );
                 }
@@ -178,7 +244,7 @@ impl StoreRuntimeRegistry {
                     }
                 }
             }
-            (reservations, reserve_failure)
+            (reservations, held, reserve_failure)
         };
         let closed = reservations.len();
         let mut first_failure = reserve_failure;
@@ -209,7 +275,7 @@ impl StoreRuntimeRegistry {
                 first_failure.get_or_insert(failure);
             }
         }
-        first_failure.map_or(Ok(closed), Err)
+        first_failure.map_or(Ok((closed, held)), Err)
     }
 
     #[tracing::instrument(name = "runtime_core.registry.close_path", level = "trace", skip_all)]
@@ -873,6 +939,8 @@ mod tests {
         drop(profile);
     }
 
+    /// A spent store-close budget makes one final pass: the held runtime stays
+    /// mounted instead of the drain waiting on it.
     #[asupersync::test]
     async fn runtime_held_through_shutdown_close_still_closes_exactly_once_released() {
         let temporary = tempfile::tempdir().unwrap();
@@ -880,7 +948,10 @@ mod tests {
         let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
         let binding = code.binding().clone();
 
-        registry.close_idle_for_shutdown().await.unwrap();
+        registry
+            .close_idle_for_shutdown(std::time::Instant::now())
+            .await
+            .unwrap();
         assert!(matches!(
             registry.lookup(&binding),
             StoreRuntimeLookup::Ready(_)
@@ -896,6 +967,35 @@ mod tests {
         drop(profile);
     }
 
+    /// A lease released after store close begins can still have its WAL
+    /// truncated before the caller's deadline. The pinned profile runtime
+    /// keeps the drain running to its last poll before that deadline, so the
+    /// close still returns before the caller's own deadline cancels it.
+    #[asupersync::test]
+    async fn shutdown_close_waits_for_a_lease_released_while_it_runs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
+        let binding = code.binding().clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(4));
+            drop(code);
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        assert_eq!(registry.close_idle_for_shutdown(deadline).await.unwrap(), 1);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the drain must return before its caller's deadline"
+        );
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        release.join().unwrap();
+        drop(profile);
+    }
+
     #[asupersync::test]
     async fn refused_shutdown_close_still_settles_its_reserved_runtime() {
         let temporary = tempfile::tempdir().unwrap();
@@ -906,7 +1006,9 @@ mod tests {
 
         registry.inner.operations.begin_shutdown();
         assert!(matches!(
-            registry.close_idle_for_shutdown().await,
+            registry
+                .close_idle_for_shutdown(std::time::Instant::now())
+                .await,
             Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "spawn shutdown close of idle registered runtimes",
                 ..

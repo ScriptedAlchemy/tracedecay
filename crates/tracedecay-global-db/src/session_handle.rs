@@ -57,6 +57,16 @@ impl SessionWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
     fn commit(self) -> impl Future<Output = Result<(), EngineError>> + Send {
         RegisteredGlobalDbWriteTransaction::commit(self)
     }
+
+    fn commit_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        RegisteredGlobalDbWriteTransaction::commit_with_on_commit(self, on_commit)
+    }
 }
 
 impl SessionQuery for RegisteredGlobalDbWriterConnection<'_> {

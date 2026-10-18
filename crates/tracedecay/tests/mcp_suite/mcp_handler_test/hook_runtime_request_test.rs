@@ -7,6 +7,7 @@
 #![cfg(feature = "test-transport")]
 
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 use crate::support::{
@@ -54,6 +55,60 @@ fn invalid(detail: &str) -> Value {
         "code": "application.surface.invalid_request",
         "message": detail,
     })
+}
+
+/// Appends one delivered `search` hint to the served project's hook log, the
+/// row a host hook writes when it surfaces a hint.
+async fn write_search_hint(fixture: &ProductionCompositionFixture, agent: &str, session_id: &str) {
+    let hook_log = fixture
+        .harness
+        .project_data_root(&fixture.project_root)
+        .await
+        .expect("project data root")
+        .join("hook_analytics.jsonl");
+    std::fs::write(
+        &hook_log,
+        format!(
+            "{}\n",
+            json!({
+                "agent": agent,
+                "event": "hint_emitted",
+                "session_id": session_id,
+                "category": "search",
+                "hint_id": "hint-search-1",
+                "ts_unix_ms": (current_timestamp() - 120) * 1000,
+            })
+        ),
+    )
+    .expect("write hook analytics row");
+}
+
+/// The `search` row of the hints analytics section once background
+/// settlement has counted an emitted hint, or the last row read when it never
+/// does within the deadline.
+async fn settled_search_hints(fixture: &ProductionCompositionFixture) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let analytics = answer_tool(
+            fixture,
+            "tracedecay_analytics",
+            json!({"section": "hints", "format": "json"}),
+        )
+        .await;
+        let search = analytics["hints"]["by_category"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["category"] == "search"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        if search["emitted"]
+            .as_u64()
+            .is_some_and(|emitted| emitted > 0)
+            || Instant::now() >= deadline
+        {
+            return search;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[tokio::test]
@@ -137,28 +192,7 @@ async fn hook_runtime_answers_typed_results_and_refuses_what_no_host_sends() {
 #[tokio::test]
 async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile() {
     let fixture = production_composition_fixture().await;
-    let hint_ts_ms = (current_timestamp() - 120) * 1000;
-    let hook_log = fixture
-        .harness
-        .project_data_root(&fixture.project_root)
-        .await
-        .expect("project data root")
-        .join("hook_analytics.jsonl");
-    std::fs::write(
-        &hook_log,
-        format!(
-            "{}\n",
-            json!({
-                "agent": "cursor",
-                "event": "hint_emitted",
-                "session_id": "cursor-session",
-                "category": "search",
-                "hint_id": "hint-search-1",
-                "ts_unix_ms": hint_ts_ms,
-            })
-        ),
-    )
-    .expect("write hook analytics row");
+    write_search_hint(&fixture, "cursor", "cursor-session").await;
     let transcript = fixture
         .harness
         .isolation_root()
@@ -259,6 +293,82 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
             "category": "search",
             "emitted": 1,
             "followed": 1,
+            "ignored": 0,
+            "suppressed": 0,
+        })
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+/// Codex sends no project-scope transcript ingest; its prompt hook's counter
+/// reset is what must carry its delivered hints into analytics.
+#[tokio::test]
+async fn codex_prompt_counter_reset_settles_emitted_hints() {
+    let fixture = production_composition_fixture().await;
+    write_search_hint(&fixture, "codex", "codex-session").await;
+
+    assert_eq!(
+        answer(&fixture, json!({"action": "reset_counter"})).await,
+        json!({"action": "reset_counter", "reset": true})
+    );
+    assert_eq!(
+        settled_search_hints(&fixture).await,
+        json!({
+            "category": "search",
+            "emitted": 1,
+            "followed": 0,
+            "ignored": 0,
+            "suppressed": 0,
+        })
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+/// Cursor reaches the daemon synchronously only at session start, as a
+/// session-boundary admission; that admission settles the project's hints.
+#[tokio::test]
+async fn session_boundary_admission_settles_emitted_hints() {
+    let fixture = production_composition_fixture().await;
+    write_search_hint(&fixture, "cursor", "cursor-session").await;
+    let envelope = tracedecay_hooks::HookEventEnvelopeV2 {
+        schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+        event_id: [1; 16],
+        producer: tracedecay_domain::NativeHostIdentityV1::CursorDesktop,
+        protected_session_id: [2; 32],
+        project_id: [3; 16],
+        repository_id: [4; 16],
+        worktree_id: [5; 16],
+        worktree_epoch: 1,
+        binding_token: [6; 32],
+        ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+        observed_at: tracedecay_domain::UtcMicros(current_timestamp() * 1_000_000),
+        event: tracedecay_hooks::HookEventV2::SessionBoundary {
+            boundary: tracedecay_hooks::HookBoundaryV1::Start,
+        },
+    };
+
+    // The admission verdict for this unbound envelope is irrelevant here;
+    // settlement is keyed to the served project, not to the ledger outcome.
+    call(
+        &fixture,
+        TOOL,
+        json!({
+            "action": "hook_v2_admit",
+            "envelope": envelope,
+            "native_session_id": null,
+            "native_lifecycle": null,
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(
+        settled_search_hints(&fixture).await,
+        json!({
+            "category": "search",
+            "emitted": 1,
+            "followed": 0,
             "ignored": 0,
             "suppressed": 0,
         })

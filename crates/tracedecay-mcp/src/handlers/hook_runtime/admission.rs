@@ -810,16 +810,12 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
             let worktree_id = envelope.worktree_id;
             tracedecay_runtime_core::native_runtime::timeout(
                 std::time::Duration::from_millis(50),
-                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                    tracedecay_agent_hosts::native_integration::github_stack_hook_available(
-                        project_id,
-                        worktree_id,
-                    )
-                }),
+                tracedecay_agent_hosts::native_integration::github_stack_hook_available(
+                    project_id,
+                    worktree_id,
+                ),
             )
             .await
-            .ok()
-            .and_then(std::result::Result::ok)
             .unwrap_or(false)
         } else {
             false

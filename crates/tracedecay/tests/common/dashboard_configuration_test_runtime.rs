@@ -36,7 +36,6 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
-const CONFIGURATION_AUTHORITY_LIFETIME_MICROS: i64 = 3_600_000_000;
 
 #[derive(Clone)]
 struct DashboardConfigurationRuntimeForTestV1 {
@@ -329,12 +328,6 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
     let service = DaemonInvocationService::with_code_index_schedulers(
         CodeIndexSchedulerRegistryV1::with_resident_memory(1, resident_memory),
     );
-    let observed_at = now_micros();
-    let expires_at = UtcMicros(
-        observed_at
-            .0
-            .saturating_add(CONFIGURATION_AUTHORITY_LIFETIME_MICROS),
-    );
     let policy_digest =
         ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).map_err(|error| {
             TraceDecayError::Config {
@@ -353,7 +346,6 @@ pub(crate) async fn dashboard_configuration_authorities_for_test(
             scope.clone(),
             user_profile_id.clone(),
             actor,
-            expires_at,
             None,
             policy_digest,
         )

@@ -7,11 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
 use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::context_scout::{
-    ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimRequestV1,
-    ContextScoutClaimWindowV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
-    ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1,
-    ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
-    ContextScoutWorkV1,
+    ContextScoutAddressV1, ContextScoutClaimRequestV1, ContextScoutClaimWindowV1,
+    ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1,
+    ContextScoutDurableQueueEntryV1, ContextScoutFeedbackV1, ContextScoutLeaseV1,
+    ContextScoutModelBackendV1, ContextScoutModelOutcomeV1, ContextScoutWorkV1,
 };
 use tracedecay_domain::configuration::{ContextScoutIntentKindV1, ContextScoutIntentSettingsV1};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
@@ -562,32 +561,6 @@ impl ProjectContextScoutOwnerV1 {
             .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
-    pub async fn record_delivery_by_handle(
-        &self,
-        claim: &ContextScoutClaimHandleV1,
-        receipt: &ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutDurableStoreOutcomeV1 {
-        let configuration = self.configuration.read().await;
-        let Some(control) = configuration
-            .as_ref()
-            .map(ContextScoutConfigurationPinV1::control)
-        else {
-            return ContextScoutDurableStoreOutcomeV1::Unavailable;
-        };
-        self.store
-            .record_delivery_by_lease(
-                claim.work,
-                claim.envelope_id,
-                ContextScoutLeaseV1 {
-                    lease_id: claim.lease_id,
-                    expires_at: claim.lease_expires_at,
-                },
-                control.configuration_revision,
-                receipt,
-            )
-            .await
-    }
-
     #[tracing::instrument(
         name = "hosts.agent.context_scout.record_feedback",
         level = "trace",
@@ -604,25 +577,6 @@ impl ProjectContextScoutOwnerV1 {
             .record_feedback(receipt, feedback)
             .await
             .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
-    }
-
-    pub async fn record_feedback_exact(
-        &self,
-        address: ContextScoutAddressV1,
-        receipt: &ContextScoutDeliveryReceiptV1,
-        feedback: ContextScoutFeedbackV1,
-    ) -> ContextScoutDurableStoreOutcomeV1 {
-        let Ok(recent) = self.recent_exact(address, STARTUP_RECOVERY_LIMIT).await else {
-            return ContextScoutDurableStoreOutcomeV1::Unavailable;
-        };
-        if !recent
-            .deliveries
-            .iter()
-            .any(|delivery| delivery.receipt == *receipt)
-        {
-            return ContextScoutDurableStoreOutcomeV1::Unavailable;
-        }
-        self.record_feedback(receipt, feedback).await
     }
 
     pub async fn status(
@@ -1055,73 +1009,6 @@ impl ProjectContextScoutOwnerV1 {
         lease: ContextScoutLeaseV1,
     ) -> ContextScoutDurableClaimOutcomeV1 {
         self.store.claim(address, now, lease).await
-    }
-
-    pub async fn claim_delivery_exact(
-        &self,
-        address: ContextScoutAddressV1,
-        window: ContextScoutDeliveryWindowV1,
-        now: UtcMicros,
-        lease: ContextScoutLeaseV1,
-    ) -> ContextScoutDurableClaimOutcomeV1 {
-        if !matches!(
-            window,
-            ContextScoutDeliveryWindowV1::IdleWindow | ContextScoutDeliveryWindowV1::OnRequest
-        ) {
-            return ContextScoutDurableClaimOutcomeV1::Unavailable;
-        }
-        let claimed = self.store.claim(address, now, lease).await;
-        let ContextScoutDurableClaimOutcomeV1::Claimed(claim) = claimed else {
-            return claimed;
-        };
-        if claim.entry.work.address == address && claim.entry.envelope.delivery_window == window {
-            return ContextScoutDurableClaimOutcomeV1::Claimed(claim);
-        }
-        match self.store.requeue(claim).await {
-            ContextScoutDurableStoreOutcomeV1::Unavailable => {
-                ContextScoutDurableClaimOutcomeV1::Unavailable
-            }
-            ContextScoutDurableStoreOutcomeV1::Stored
-            | ContextScoutDurableStoreOutcomeV1::Duplicate
-            | ContextScoutDurableStoreOutcomeV1::Superseded => {
-                ContextScoutDurableClaimOutcomeV1::Empty
-            }
-        }
-    }
-
-    pub async fn claim_delivery_request(
-        &self,
-        request: &ContextScoutClaimRequestV1,
-        now: UtcMicros,
-        expires_at: UtcMicros,
-    ) -> ContextScoutDurableClaimOutcomeV1 {
-        let Some(ContextScoutPublicMutationV1::Claim {
-            address,
-            window,
-            configuration_revision,
-            lease,
-            ..
-        }) = self.public_claim_mutation(request, now, expires_at).await
-        else {
-            return ContextScoutDurableClaimOutcomeV1::Unavailable;
-        };
-        let claimed = self.claim_delivery_exact(address, window, now, lease).await;
-        let ContextScoutDurableClaimOutcomeV1::Claimed(claim) = claimed else {
-            return claimed;
-        };
-        if claim.entry.envelope.configuration_revision == configuration_revision {
-            return ContextScoutDurableClaimOutcomeV1::Claimed(claim);
-        }
-        match self.store.requeue(claim).await {
-            ContextScoutDurableStoreOutcomeV1::Unavailable => {
-                ContextScoutDurableClaimOutcomeV1::Unavailable
-            }
-            ContextScoutDurableStoreOutcomeV1::Stored
-            | ContextScoutDurableStoreOutcomeV1::Duplicate
-            | ContextScoutDurableStoreOutcomeV1::Superseded => {
-                ContextScoutDurableClaimOutcomeV1::Empty
-            }
-        }
     }
 
     pub async fn public_claim_mutation(

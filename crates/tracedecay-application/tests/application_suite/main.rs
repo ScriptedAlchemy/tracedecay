@@ -17,5 +17,8 @@ mod observability_rollup_convergence;
 // root: the work_rollup bench mounts it, and the suite itself uses a subset.
 pub mod observability_runtime_contract;
 mod registered_scope_route;
+mod work_attempt_jobs;
+mod work_leaf_jobs;
+mod work_run_control_jobs;
 mod work_service_composition;
 mod workflow_topology_contract;

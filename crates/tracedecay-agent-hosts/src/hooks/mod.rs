@@ -63,6 +63,7 @@ pub use cursor::{
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
 pub use kiro::hook_kiro_prompt_submit;
 pub use steering::HookWorkspaceStatus;
+pub(crate) use steering::SKILL_MANDATE;
 
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;
@@ -797,10 +798,11 @@ pub(crate) async fn notify_hook_event_with_telemetry(
     project_root: &Path,
     event: DaemonHookEvent,
     telemetry: &analytics::HookTimingSpan,
-) {
+) -> tracedecay_hooks::HookEventNotifyOutcomeV1 {
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
-    (runtime.event_notifier)(&runtime.profile, project_root, event).await;
+    let outcome = (runtime.event_notifier)(&runtime.profile, project_root, event).await;
     telemetry.note_completed_daemon_notification(payload_bytes);
+    outcome
 }
 
 #[tracing::instrument(

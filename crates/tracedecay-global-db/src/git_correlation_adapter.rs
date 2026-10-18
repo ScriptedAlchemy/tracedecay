@@ -56,9 +56,9 @@ impl RegisteredGlobalDb {
     /// Concrete registered-database entry point for callers with a scoped
     /// borrow. The registered authority implements the session-store port
     /// directly, so host-admission futures retain their original lifetime.
-    pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
+    pub async fn converge_session_git_evidence(
         &self,
-        git: &G,
+        git: std::sync::Arc<dyn GitReflogSource>,
         project_root: Option<&std::path::Path>,
     ) -> Result<GitEvidencePassOutcome, GitCorrelationError> {
         converge_git_evidence_pass(self, git, project_root).await
@@ -192,9 +192,9 @@ where
     /// and appends it, with the commit attribution it enables, in one
     /// transaction.
     #[tracing::instrument(name = "global_db.git_correlation.converge", level = "trace", skip_all)]
-    pub async fn converge_session_git_evidence<G: GitReflogSource + ?Sized>(
+    pub async fn converge_session_git_evidence(
         &self,
-        git: &G,
+        git: std::sync::Arc<dyn GitReflogSource>,
         project_root: Option<&std::path::Path>,
     ) -> Result<GitEvidencePassOutcome, GitCorrelationError> {
         converge_git_evidence_pass(self, git, project_root).await
@@ -521,7 +521,7 @@ mod tests {
         let store = GlobalDbGitCorrelationStore::new(harness.registered.clone());
 
         assert!(matches!(
-            store.converge_session_git_evidence(&SystemGit, None).await,
+            store.converge_session_git_evidence(std::sync::Arc::new(SystemGit), None).await,
             Err(GitCorrelationError::Db(message))
                 if message.contains("ProjectSessions")
         ));

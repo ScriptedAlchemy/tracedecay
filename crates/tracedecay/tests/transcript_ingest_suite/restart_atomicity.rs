@@ -270,7 +270,11 @@ pub(super) async fn claude_observation_cursor(
     runtime: &ProjectSessionTestRuntime,
     transcript: &Path,
 ) -> Option<u64> {
-    let identity = identify_claude_source(transcript).unwrap();
+    let projects_dir = transcript
+        .ancestors()
+        .find(|ancestor| ancestor.ends_with(".claude/projects"))
+        .expect("transcript under .claude/projects");
+    let identity = identify_claude_source(projects_dir, transcript).unwrap();
     let source = ObservationSourceIdentityV1::for_source(
         SessionId::new(identity.session_id).unwrap(),
         SessionId::new(identity.source_id).unwrap(),

@@ -1,12 +1,12 @@
 //! Registered-store composition for the hint-outcome correlation port.
 //!
-//! The production caller is the daemon-side transcript ingest
-//! (`tracedecay_hook_runtime` action `ingest_transcript`): freshly ingested
-//! session activity is exactly what resolves previously emitted hints, so
-//! every project-scope ingest ends with a best-effort
-//! `settle_project_hint_outcomes` pass. Settlement imports the hook
-//! JSONL tail (where hooks record `hint_emitted`) into the durable
-//! `analytics_events` authority and then correlates outcomes into the same
+//! The production callers are the daemon's project-routed
+//! `tracedecay_hook_runtime` actions: project-scope `ingest_transcript`
+//! awaits a best-effort `settle_project_hint_outcomes` pass, and
+//! `reset_counter` plus session-boundary `hook_v2_admit` start one off the
+//! hook's response path, so every hint-producing host reaches it. Settlement
+//! imports the hook JSONL tail (where hooks record `hint_emitted`) into the
+//! durable `analytics_events` authority and then correlates outcomes into the same
 //! table, the one the `tracedecay_analytics` hints section and the
 //! dashboard analytics API already read.
 

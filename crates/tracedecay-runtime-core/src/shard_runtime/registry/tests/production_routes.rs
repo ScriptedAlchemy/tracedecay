@@ -217,7 +217,8 @@ async fn assert_health_route(handle: &StoreRuntimeClientLease, writer_expected: 
 
     let (request, probe) = health_request(handle.binding());
     let outcome = handle
-        .dispatch_read(request, &probe)
+        .dispatch_read(request, Arc::new(probe))
+        .await
         .expect("health data port must be mounted");
     assert!(matches!(
         outcome.value(),

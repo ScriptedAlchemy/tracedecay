@@ -69,7 +69,7 @@ jobs:
         run: |
           python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: ${{ steps.pin.outputs.toolchain }}
           targets: ${{ env.TARGET }}
@@ -94,7 +94,7 @@ jobs:
       # The acceptance script runs the packaged Rust-grammar proof and the
       # focused packaged-CLI integration journeys through nextest.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@2eb6de229bc778f7df20e106e4b34e9a364c73e6 # nextest
+        uses: taiki-e/install-action@9252097d36d2d3618ad98f5d873696a962b6897c # nextest
 
       - name: Run distribution acceptance
         run: |

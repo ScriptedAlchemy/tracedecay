@@ -2105,19 +2105,19 @@ describe("TraceDecayClient operation lifecycle", () => {
               ": heartbeat",
               "event: open",
               'data: {"event":"open","data":{"correlation_id":"request.operation",',
-              'data: "frontier":{"next_sequence":1,"retained_from_sequence":1,"resume_token":"resume"}}}',
+              'data: "frontier":{"next_sequence":6,"retained_from_sequence":5,"resume_token":"resume"}}}',
               "",
               "event: resume_gap",
-              "id: 1",
-              'data: {"event":"resume_gap","data":{"sequence":1,"gap":{"first_missing_sequence":0,',
-              'data: "last_missing_sequence":0,"frontier":{"next_sequence":2,"retained_from_sequence":1,"resume_token":"resume"}}}}',
+              "id: 0",
+              'data: {"event":"resume_gap","data":{"sequence":0,"gap":{"first_missing_sequence":0,',
+              'data: "last_missing_sequence":4,"frontier":{"next_sequence":6,"retained_from_sequence":5,"resume_token":"resume"}}}}',
               "",
               "event: partial",
-              "id: 2",
+              "id: 5",
               `data: ${JSON.stringify({
                 event: "partial",
                 data: {
-                  sequence: 2,
+                  sequence: 5,
                   terminal: {
                     termination: "partial",
                     receipt: { ...RECEIPT, termination: "partial" },
@@ -2150,7 +2150,7 @@ describe("TraceDecayClient operation lifecycle", () => {
           data: {
             gap: {
               first_missing_sequence: 0,
-              last_missing_sequence: 0,
+              last_missing_sequence: 4,
             },
           },
         });

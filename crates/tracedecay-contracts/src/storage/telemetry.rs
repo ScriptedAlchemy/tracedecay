@@ -262,7 +262,10 @@ pub enum TableGrowthTelemetryReadV1 {
     /// Authorization to read per-table telemetry was denied.
     Denied { store: StoreKeyV1 },
     /// The per-table telemetry state could not be determined.
-    Unknown { store: StoreKeyV1 },
+    Unknown {
+        store: StoreKeyV1,
+        reason: TableGrowthUnavailableReasonV1,
+    },
 }
 
 impl TableGrowthTelemetryReadV1 {
@@ -273,7 +276,85 @@ impl TableGrowthTelemetryReadV1 {
             | Self::BaselineEstablished { store, .. }
             | Self::Unsupported { store }
             | Self::Denied { store }
-            | Self::Unknown { store } => store,
+            | Self::Unknown { store, .. } => store,
+        }
+    }
+}
+
+/// Why a per-table payload-growth measurement is unavailable.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TableGrowthUnavailableReasonV1 {
+    /// No maintenance pass has measured this store yet.
+    NotYetMeasured,
+    /// No reader could be leased within the measurement's wait.
+    ReaderUnavailable,
+    /// The `dbstat` walk was interrupted by its deadline.
+    DeadlineExceeded,
+    /// The `dbstat` walk was cancelled.
+    Cancelled,
+    /// The store reported corruption.
+    StorageCorrupt,
+    /// The store failed with an infrastructure error.
+    StorageInfrastructure,
+    /// The store failed for another reason.
+    StorageOther,
+    /// `dbstat` named a table that is not a valid table identifier.
+    InvalidTableName,
+    /// The previous watermark is later than the current measurement.
+    ClockRegressed,
+    /// The store is larger than the `dbstat` walk can cover within its
+    /// deadline.
+    ExceedsMeasurementBudget,
+}
+
+impl TableGrowthUnavailableReasonV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotYetMeasured => "not_yet_measured",
+            Self::ReaderUnavailable => "reader_unavailable",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::Cancelled => "cancelled",
+            Self::StorageCorrupt => "storage_corrupt",
+            Self::StorageInfrastructure => "storage_infrastructure",
+            Self::StorageOther => "storage_other",
+            Self::InvalidTableName => "invalid_table_name",
+            Self::ClockRegressed => "clock_regressed",
+            Self::ExceedsMeasurementBudget => "exceeds_measurement_budget",
+        }
+    }
+
+    /// Operator-facing statement of why growth is unmeasured.
+    #[must_use]
+    pub const fn statement(self) -> &'static str {
+        match self {
+            Self::NotYetMeasured => {
+                "table payload growth is unmeasured: no maintenance pass has measured this store yet"
+            }
+            Self::ReaderUnavailable => {
+                "table payload growth is unmeasured: no reader was available within the wait"
+            }
+            Self::DeadlineExceeded => {
+                "table payload growth is unmeasured: the measurement exceeded its deadline"
+            }
+            Self::Cancelled => "table payload growth is unmeasured: the measurement was cancelled",
+            Self::StorageCorrupt => {
+                "table payload growth is unmeasured: the store reported corruption"
+            }
+            Self::StorageInfrastructure => {
+                "table payload growth is unmeasured: the store failed with an infrastructure error"
+            }
+            Self::StorageOther => "table payload growth is unmeasured: the store read failed",
+            Self::InvalidTableName => {
+                "table payload growth is unmeasured: the store named an invalid table"
+            }
+            Self::ClockRegressed => {
+                "table payload growth is unmeasured: the clock moved behind the previous measurement"
+            }
+            Self::ExceedsMeasurementBudget => {
+                "table payload growth is unmeasured: the store is too large to walk within the measurement deadline"
+            }
         }
     }
 }
@@ -329,6 +410,7 @@ pub enum TableGrowthDoctorEvidenceV1 {
     },
     Unknown {
         store: StoreKeyV1,
+        reason: TableGrowthUnavailableReasonV1,
     },
 }
 
@@ -405,9 +487,10 @@ pub fn table_growth_doctor_evidence(
                 store: store.clone(),
             }]
         }
-        TableGrowthTelemetryReadV1::Unknown { store } => {
+        TableGrowthTelemetryReadV1::Unknown { store, reason } => {
             vec![TableGrowthDoctorEvidenceV1::Unknown {
                 store: store.clone(),
+                reason: *reason,
             }]
         }
     }
@@ -526,7 +609,10 @@ mod tests {
 
     #[test]
     fn unavailable_table_growth_is_typed_instead_of_zero() {
-        let read = TableGrowthTelemetryReadV1::Unknown { store: store() };
+        let read = TableGrowthTelemetryReadV1::Unknown {
+            store: store(),
+            reason: TableGrowthUnavailableReasonV1::NotYetMeasured,
+        };
         let serialized = serde_json::to_value(&read).expect("serialize table-growth read");
 
         assert_eq!(
@@ -534,6 +620,7 @@ mod tests {
             serde_json::json!({
                 "kind": "unknown",
                 "store": "sessions.db",
+                "reason": "not_yet_measured",
             })
         );
         assert!(serialized.get("growth_bytes").is_none());
@@ -601,13 +688,16 @@ mod tests {
             crate::doctor::DoctorEvidenceStateV1::Partial
         );
 
-        let unknown =
-            table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Unknown { store: store() });
+        let unknown = table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Unknown {
+            store: store(),
+            reason: TableGrowthUnavailableReasonV1::ReaderUnavailable,
+        });
         assert_eq!(
             unknown[0].state(),
             crate::doctor::DoctorEvidenceStateV1::Unknown
         );
         let serialized = serde_json::to_value(&unknown[0]).expect("serialize evidence");
+        assert_eq!(serialized["reason"], "reader_unavailable");
         assert!(serialized.get("growth_bytes").is_none());
         assert!(serialized.get("current_bytes").is_none());
     }

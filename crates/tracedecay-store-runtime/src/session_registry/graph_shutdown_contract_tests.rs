@@ -158,13 +158,17 @@ async fn healthy_shutdown_joins_workers_then_closes_every_retained_graph_without
         project_sessions,
     ));
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("retained graph runtimes close without a shutdown Conflict");
 
     // The drain is exhaustive: a second pass finds nothing left to close.
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("shutdown close is idempotent after the drain");
 }
@@ -227,7 +231,9 @@ async fn terminal_shutdown_truncates_every_released_session_store_wal() {
         .expect("reconciliation workers join");
     drop((profile_sessions, project_sessions));
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("terminal shutdown closes released runtimes");
 
@@ -263,7 +269,9 @@ async fn terminal_shutdown_refuses_an_in_flight_project_owner_transition() {
         .insert(project_id, ProjectRuntimeOwnerStateV1::Opening);
 
     let error = registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect_err("terminal close must not skip an in-flight owner transition");
     assert!(
@@ -337,7 +345,9 @@ async fn shutdown_joins_an_inline_post_write_pass_before_closing_the_graph() {
         .expect("reconciliation join settles once the inline pass releases the runtime");
     drop(project_memory);
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("retained graph runtimes close without a shutdown Conflict");
 }

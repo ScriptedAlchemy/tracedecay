@@ -155,9 +155,18 @@ pub enum WorkAttemptEffectStorageErrorV1 {
     Unavailable,
 }
 
+/// The effect-holder read: retry safety and execution history consult it.
+pub trait WorkAttemptEffectReadPortV1 {
+    fn load_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptIdentityV1,
+    ) -> Result<Option<WorkAttemptEffectHolderV1>, WorkAttemptEffectStorageErrorV1>;
+}
+
 /// Persistence owned by the exact Work-attempt authority. Implementations
 /// must make the immutable dispatch identity replay-safe and settlement CASed.
-pub trait WorkAttemptEffectStoragePortV1: Send + Sync {
+pub trait WorkAttemptEffectStoragePortV1: WorkAttemptEffectReadPortV1 {
     fn begin_effect_dispatch(
         &self,
         authority: &WorkAuthority,
@@ -171,12 +180,6 @@ pub trait WorkAttemptEffectStoragePortV1: Send + Sync {
         resolution: WorkAttemptEffectResolutionV1,
         resolved_at: UtcMicros,
     ) -> Result<WorkAttemptEffectHolderV1, WorkAttemptEffectStorageErrorV1>;
-
-    fn load_effect_dispatch(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptIdentityV1,
-    ) -> Result<Option<WorkAttemptEffectHolderV1>, WorkAttemptEffectStorageErrorV1>;
 }
 
 /// Application boundary used by the daemon provider runtime and leak source.
@@ -184,14 +187,16 @@ pub struct WorkAttemptEffectServiceV1<S> {
     storage: S,
 }
 
+impl<S> WorkAttemptEffectServiceV1<S> {
+    pub const fn new(storage: S) -> Self {
+        Self { storage }
+    }
+}
+
 impl<S> WorkAttemptEffectServiceV1<S>
 where
     S: WorkAttemptEffectStoragePortV1,
 {
-    pub const fn new(storage: S) -> Self {
-        Self { storage }
-    }
-
     #[tracing::instrument(
         name = "application.work.attempt_effect.record_dispatch",
         level = "trace",
@@ -231,7 +236,12 @@ where
             .settle_effect_dispatch(&authority, attempt, resolution, resolved_at)
             .map_err(effect_problem)
     }
+}
 
+impl<S> WorkAttemptEffectServiceV1<S>
+where
+    S: WorkAttemptEffectReadPortV1,
+{
     #[tracing::instrument(
         name = "application.work.attempt_effect.load",
         level = "trace",

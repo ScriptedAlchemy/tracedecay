@@ -292,7 +292,7 @@ pub enum ContextScoutMutationOperationV1 {
 }
 
 impl ContextScoutMutationOperationV1 {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Cancel => "context_scout_cancel",
             Self::Claim => "context_scout_claim",

@@ -4,6 +4,7 @@ use tracedecay_contracts::clock::now_micros;
 use tracedecay_contracts::{ApplicationProblem, Deadline, RequestContext, SafeDiagnostic};
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
+#[derive(Clone)]
 pub(super) struct DaemonWorkLeakEvidenceV1 {
     pub(super) attempt: tracedecay_domain::WorkAttemptV1,
     pub(super) has_live_owner: bool,
@@ -222,9 +223,15 @@ pub(super) async fn adjudicate_leak(
         &storage,
     )
     .await?;
-    let service =
-        tracedecay_contracts::WorkLeakAdjudicationServiceV1::new(storage.clone(), evidence);
-    service.adjudicate(context, command, observed_at, scan_deadline)
+    services
+        .adjudicate_leak(
+            context.clone(),
+            command,
+            evidence,
+            observed_at,
+            scan_deadline,
+        )
+        .await
 }
 
 #[tracing::instrument(
@@ -240,21 +247,32 @@ async fn read_leak_evidence(
     attempt_identity: &tracedecay_domain::WorkAttemptIdentityV1,
     storage: &tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
 ) -> Result<DaemonWorkLeakEvidenceV1, ApplicationProblem> {
-    let attempt = services.attempts().status(
-        context,
-        &tracedecay_contracts::WorkAttemptStatusRequestV1 {
-            task_id: attempt_identity.task_id().clone(),
-            run_id: attempt_identity.run_id().clone(),
-            attempt_id: attempt_identity.attempt_id().clone(),
-        },
-    )?;
-    let placement = services.placement().status(
-        context,
-        &tracedecay_contracts::WorkPlacementStatusRequestV1 {
-            task_id: attempt.identity().task_id().clone(),
-            run_id: attempt.identity().run_id().clone(),
-        },
-    )?;
+    let (attempt, placement, effect) = {
+        let (context, attempt_identity, storage) =
+            (context.clone(), attempt_identity.clone(), storage.clone());
+        services
+            .read(move |services| {
+                let attempt = services.attempts().status(
+                    &context,
+                    &tracedecay_contracts::WorkAttemptStatusRequestV1 {
+                        task_id: attempt_identity.task_id().clone(),
+                        run_id: attempt_identity.run_id().clone(),
+                        attempt_id: attempt_identity.attempt_id().clone(),
+                    },
+                )?;
+                let placement = services.placement().status(
+                    &context,
+                    &tracedecay_contracts::WorkPlacementStatusRequestV1 {
+                        task_id: attempt.identity().task_id().clone(),
+                        run_id: attempt.identity().run_id().clone(),
+                    },
+                )?;
+                let effect = tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage)
+                    .load(&context, attempt.identity())?;
+                Ok((attempt, placement, effect))
+            })
+            .await?
+    };
     let delivery = registered
         .database
         .work_attempt_delivery_censuses(context.scope().project_id.as_str(), attempt.identity())
@@ -265,8 +283,6 @@ async fn read_leak_evidence(
                 message: "The Work delivery evidence authority is unavailable.".to_owned(),
             })
         })?;
-    let effect = tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage.clone())
-        .load(context, attempt.identity())?;
     let has_live_owner =
         attempt_processes.holds_attempt(&context.scope().worktree_id, attempt.identity());
     Ok(DaemonWorkLeakEvidenceV1 {

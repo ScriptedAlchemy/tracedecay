@@ -207,7 +207,6 @@ async fn profile_configuration_outcome(
     let grants = DaemonConfigurationGrantAuthority::for_layer(
         profile.actor.clone(),
         policy_digest,
-        deadline.expires_at,
         ConfigurationLayerIdV1::UserProfile {
             profile_id: profile.profile_id.clone(),
         },

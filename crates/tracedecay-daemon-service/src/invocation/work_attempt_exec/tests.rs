@@ -42,9 +42,9 @@ use tracedecay_contracts::{
     DisclosureClass, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
     RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
     WorkAttemptCapacityVerdictV1, WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1,
-    WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1, WorkAttemptEffectStorageErrorV1,
-    WorkAttemptEffectStoragePortV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
-    WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
+    WorkAttemptEffectReadPortV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1,
+    WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1, WorkAttemptInsertOutcome,
+    WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
 use tracedecay_domain::{
@@ -81,16 +81,26 @@ use tracedecay_domain::test_fixtures::id;
 use tracedecay_domain::test_fixtures::digest;
 
 /// Runs `future` with no Tokio runtime anywhere on the stack, so any Tokio
-/// reactor, timer or blocking-pool call on the attempt path panics.
-fn without_tokio<F: std::future::Future>(future: F) -> F::Output {
-    let _probe = crate::invocation::NATIVE_WRITER_WAITS_PROBE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    native_runtime::block_on(async {
+/// reactor, timer or blocking-pool call on the attempt path panics. Like
+/// `spawn_for_worktree`, it polls the attempt on a blocking-pool thread, where
+/// synchronous storage ports may park without holding a native worker.
+fn without_tokio<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let outcome = native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_err());
-        future.await
+        native_runtime::NativeTask::spawn_off_native_thread(future)
+            .expect("native blocking pool available")
+            .wait()
+            .await
     })
-    .expect("native runtime available")
+    .expect("native runtime available");
+    match outcome {
+        native_runtime::NativeTaskOutcome::Completed(()) => {}
+        native_runtime::NativeTaskOutcome::Panicked(payload) => panic!("{payload}"),
+        native_runtime::NativeTaskOutcome::Cancelled => panic!("attempt task was cancelled"),
+    }
 }
 
 fn sha256_digest(bytes: &[u8]) -> ManifestDigest {
@@ -117,6 +127,9 @@ struct AttemptRows {
     /// from the terminal row alone.
     observed_states: Vec<WorkAttemptStateV1>,
     effects: BTreeMap<AttemptKey, WorkAttemptEffectHolderV1>,
+    /// When the provider was durably marked running, which is after its
+    /// spawn and before its wall budget is armed.
+    running_at: Option<UtcMicros>,
 }
 
 /// In-memory attempt rows with the same fenced compare-and-swap semantics as
@@ -129,6 +142,10 @@ struct AttemptStore {
 impl AttemptStore {
     fn observed_states(&self) -> Vec<WorkAttemptStateV1> {
         self.inner.lock().unwrap().observed_states.clone()
+    }
+
+    fn running_at(&self) -> Option<UtcMicros> {
+        self.inner.lock().unwrap().running_at
     }
 
     fn sealed_evidence(
@@ -303,6 +320,9 @@ impl WorkAttemptStoragePort for AttemptStore {
         }
         inner.rows.insert(key, payload);
         inner.observed_states.push(next.state());
+        if next.state() == WorkAttemptStateV1::Running {
+            inner.running_at = Some(now_micros());
+        }
         Ok(())
     }
 
@@ -455,7 +475,9 @@ impl WorkAttemptEffectStoragePortV1 for AttemptStore {
         rows.effects.insert(key, next.clone());
         Ok(next)
     }
+}
 
+impl WorkAttemptEffectReadPortV1 for AttemptStore {
     fn load_effect_dispatch(
         &self,
         authority: &WorkAuthority,
@@ -579,6 +601,120 @@ impl Fixture {
         self.rows
             .sealed_evidence(&self.authority, self.identity())
             .expect("terminal evidence is sealed with the attempt row")
+    }
+}
+
+impl Fixture {
+    fn steps(&self) -> FixtureSteps<'_> {
+        FixtureSteps {
+            attempts: &self.attempts,
+            effects: &self.effects,
+        }
+    }
+}
+
+/// The driver's steps answered synchronously by the in-memory services.
+struct FixtureSteps<'fixture> {
+    attempts: &'fixture WorkAttemptService<AttemptStore>,
+    effects: &'fixture WorkAttemptEffectServiceV1<AttemptStore>,
+}
+
+impl AttemptStepsV1 for FixtureSteps<'_> {
+    fn mark_running(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        actual_route: WorkProviderRouteV1,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(self.attempts.mark_running(context, identity, actual_route))
+    }
+
+    fn mark_provider_unavailable(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        observed_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(
+            self.attempts
+                .mark_provider_unavailable(context, identity, observed_at),
+        )
+    }
+
+    fn fail_recovery(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(self.attempts.fail_recovery(context, identity, evidence))
+    }
+
+    fn acknowledge_cancellation(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        acknowledged_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(self.attempts.acknowledge_cancellation(
+            context,
+            identity,
+            acknowledged_at,
+        ))
+    }
+
+    fn escalate_cancellation(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        escalated_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(
+            self.attempts
+                .escalate_cancellation(context, identity, escalated_at),
+        )
+    }
+
+    fn settle_with_artifacts(
+        &self,
+        context: &RequestContext,
+        identity: &WorkAttemptIdentityV1,
+        evidence: &WorkAttemptEvidenceRecordV1,
+        artifacts: Vec<WorkArtifactRefV1>,
+    ) -> impl Future<Output = Result<WorkAttemptV1, ApplicationProblem>> + Send {
+        std::future::ready(
+            self.attempts
+                .settle_with_artifacts(context, identity, evidence, artifacts),
+        )
+    }
+
+    fn record_dispatch(
+        &self,
+        context: &RequestContext,
+        attempt: &WorkAttemptV1,
+        dispatched_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptEffectDispatchOutcomeV1, ApplicationProblem>> + Send
+    {
+        std::future::ready(self.effects.record_dispatch(
+            context,
+            attempt.identity().clone(),
+            attempt.execution().effect_state(),
+            dispatched_at,
+            attempt.execution().deadline(),
+        ))
+    }
+
+    fn settle_dispatch(
+        &self,
+        context: &RequestContext,
+        attempt: &WorkAttemptIdentityV1,
+        resolution: WorkAttemptEffectResolutionV1,
+        resolved_at: UtcMicros,
+    ) -> impl Future<Output = Result<WorkAttemptEffectHolderV1, ApplicationProblem>> + Send {
+        std::future::ready(
+            self.effects
+                .settle(context, attempt, resolution, resolved_at),
+        )
     }
 }
 
@@ -828,8 +964,7 @@ fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
         let admitted_environment =
             admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
         execute_provider_with_environment(
-            &fixture.attempts,
-            &fixture.effects,
+            &fixture.steps(),
             Some(&workflow_artifacts),
             &fixture.context,
             &fixture.attempt,
@@ -874,13 +1009,15 @@ fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
             "artifact.provider.stdout"
         );
         assert_eq!(settled.artifacts()[0].byte_length(), stream.len() as u64);
-        assert_eq!(
-            workflow_artifacts
-                .load(&settled.artifacts()[0])
-                .unwrap()
-                .bytes(),
-            stream.as_bytes()
-        );
+        let artifact = settled.artifacts()[0].clone();
+        let payload = workflow_artifacts
+            .transact(move |storage| {
+                tracedecay_contracts::WorkflowArtifactStorePort::load(&storage, &artifact)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(payload.bytes(), stream.as_bytes());
         let scheduled = std::time::Instant::now();
         let admitted = scheduled + std::time::Duration::from_micros(5);
         let started = scheduled + std::time::Duration::from_micros(10);
@@ -1013,8 +1150,7 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
         std::env::set_var(&ambient_secret, "ambient-secret");
     }
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -1079,8 +1215,7 @@ fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success() {
         let admitted_environment =
             admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
         execute_provider_with_environment(
-            &fixture.attempts,
-            &fixture.effects,
+            &fixture.steps(),
             Some(&workflow_artifacts),
             &fixture.context,
             &fixture.attempt,
@@ -1261,10 +1396,10 @@ fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
             std::future::pending::<()>().await;
         };
 
+        let steps = fixture.steps();
         tokio::select! {
             () = execute_provider_with_environment(
-                &fixture.attempts,
-                &fixture.effects,
+                &steps,
                 Some(&workflow_artifacts),
                 &fixture.context,
                 &fixture.attempt,
@@ -1397,8 +1532,7 @@ async fn a_cancellation_requested_before_mark_running_seals_cancelled() {
     let route = requested_route(WorkProviderBackendV1::ClaudeCodeCli);
 
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -1502,8 +1636,7 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
     let admitted_environment =
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -1543,6 +1676,18 @@ async fn a_wall_exhausted_provider_seals_timed_out_and_emits_the_no_progress_ter
         })
         .await
         .expect("no-progress page");
+    // The budget is armed only once the provider runs, so a spawn that
+    // outlasts it (seen past 2 s under CPU starvation) arms nothing, and the
+    // payload contract refuses a zero budget.
+    let running_at = fixture.rows.running_at().expect("the provider ran");
+    if running_at.0 >= deadline.0 {
+        assert!(
+            page.events.is_empty(),
+            "a zero armed budget emits no terminal: {:?}",
+            page.events
+        );
+        return;
+    }
     assert_eq!(page.events.len(), 1, "exactly one no-progress terminal");
     let envelope = &page.events[0];
     assert_eq!(
@@ -1741,8 +1886,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
     let admitted_environment =
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -1884,7 +2028,7 @@ async fn a_fallback_that_is_also_refused_keeps_both_denials_on_the_record() {
 
     // Sealed exactly as `run_attempt` seals it.
     settle_unstarted(
-        &fixture.attempts,
+        &fixture.steps(),
         &fixture.context,
         fixture.identity(),
         &fixture.attempt,
@@ -1893,7 +2037,8 @@ async fn a_fallback_that_is_also_refused_keeps_both_denials_on_the_record() {
         },
         denial.fallback.clone(),
         None,
-    );
+    )
+    .await;
     assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
     let evidence = fixture.sealed_evidence();
     assert_eq!(
@@ -1987,8 +2132,7 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
     let admitted_environment =
         admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
     execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
+        &fixture.steps(),
         Some(&workflow_artifacts),
         &fixture.context,
         &fixture.attempt,
@@ -2036,7 +2180,7 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
     );
 
     settle_unstarted(
-        &fixture.attempts,
+        &fixture.steps(),
         &fixture.context,
         fixture.identity(),
         &fixture.attempt,
@@ -2045,7 +2189,8 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
         },
         None,
         None,
-    );
+    )
+    .await;
 
     assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
     assert_eq!(
@@ -2053,6 +2198,46 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
         WorkAttemptProviderOutcomeV1::ProviderUnavailable {
             state: WorkProviderAvailabilityV1::Unsupported,
         }
+    );
+}
+
+#[tokio::test]
+async fn a_child_that_settled_after_its_status_read_is_skipped_by_fail_fast() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let fixture = leased_attempt(
+        directory.path(),
+        "Settles before fail-fast cancels it.",
+        &SnapshotShape::default(),
+    );
+    settle_unstarted(
+        &fixture.steps(),
+        &fixture.context,
+        fixture.identity(),
+        &fixture.attempt,
+        WorkAttemptProviderOutcomeV1::ProviderUnavailable {
+            state: WorkProviderAvailabilityV1::Unsupported,
+        },
+        None,
+        None,
+    )
+    .await;
+    let identity = fixture.identity().clone();
+    let refused = fixture
+        .attempts
+        .request_cancellation(
+            &fixture.context,
+            CancelWorkAttemptCommand {
+                task_id: identity.task_id().clone(),
+                run_id: identity.run_id().clone(),
+                attempt_id: identity.attempt_id().clone(),
+                request_id: id("cancellation.work-attempt-exec.after-settle"),
+                occurred_at: now_micros(),
+            },
+        )
+        .expect_err("a settled attempt refuses cancellation");
+    assert!(
+        super::super::work::workflow_fan_out::is_not_cancellable(&refused),
+        "fail-fast must recognize the settled child's refusal: {refused:?}"
     );
 }
 
@@ -2263,6 +2448,6 @@ async fn provider_artifact_store() -> (
     )
     .await
     .unwrap();
-    let store = database.workflow_storage().unwrap();
+    let store = database.workflow_storage().await.unwrap();
     (directory, store)
 }

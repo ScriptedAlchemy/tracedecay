@@ -519,7 +519,7 @@ pub struct WorkEvidenceRetrievalServiceV1<R, A, T, S, H> {
 impl<R, A, T, S, H> WorkEvidenceRetrievalServiceV1<R, A, T, S, H>
 where
     R: WorkEvidenceRootReadPortV1,
-    A: WorkProductOwnerAuthorizationPortV1,
+    A: WorkProductOwnerAuthorizationPortV1 + Send + Sync,
     T: WorkAttemptReceiptReadPortV1,
     S: WorkTaskSessionPortV1,
     H: WorkAnchorHydrationPortV1,
@@ -755,6 +755,9 @@ where
             RequestAdmission::Admitted => {}
             RequestAdmission::Cancelled => return Err(WorkProductApplicationErrorV1::Cancelled),
             RequestAdmission::TimedOut => return Err(WorkProductApplicationErrorV1::TimedOut),
+            RequestAdmission::GrantExpired => {
+                return Err(WorkProductApplicationErrorV1::NotAuthorized);
+            }
         }
         request
             .selection
@@ -798,7 +801,7 @@ impl<R, A, T, S, H> WorkTaskSessionReauthorizationPortV1
     for WorkEvidenceRetrievalServiceV1<R, A, T, S, H>
 where
     R: WorkEvidenceRootReadPortV1,
-    A: WorkProductOwnerAuthorizationPortV1,
+    A: WorkProductOwnerAuthorizationPortV1 + Send + Sync,
     T: WorkAttemptReceiptReadPortV1,
     S: WorkTaskSessionPortV1,
     H: WorkAnchorHydrationPortV1,

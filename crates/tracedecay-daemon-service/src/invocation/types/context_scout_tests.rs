@@ -258,6 +258,54 @@ async fn explicit_request_preserves_a_newer_native_event() {
     assert!(runtime.shutdown().await);
 }
 
+/// A cycle's terminal is the host's cue to send the session's next boundary,
+/// so the cycle must release its permit before it reports that terminal.
+#[tokio::test]
+async fn settled_cycle_admits_the_sessions_next_boundary_from_its_terminal() {
+    let mut first = native_request(221);
+    let mut envelope = first.hook.envelope().clone();
+    envelope.event_id = [229; 16];
+    let binding = HookScopeBindingV1 {
+        host: envelope.producer,
+        project_id: envelope.project_id,
+        repository_id: envelope.repository_id,
+        worktree_id: envelope.worktree_id,
+        worktree_epoch: envelope.worktree_epoch,
+        binding_token: envelope.binding_token,
+        capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
+            family: tracedecay_hooks::HookEventFamily::SavedEdit,
+            support: tracedecay_hooks::stock_event_support(
+                envelope.producer,
+                tracedecay_hooks::HookEventFamily::SavedEdit,
+            ),
+        }],
+    };
+    let next =
+        HookOrchestrationRequestV1::from_envelope(envelope, &binding, None, 1, false).unwrap();
+    let runtime = BoundedHookOrchestratorV1::new(1, |_, _| async {
+        HookOrchestrationWorkOutcomeV1::Completed
+    })
+    .unwrap();
+    let (admitted, admission) = tokio::sync::oneshot::channel();
+    let pending = StdMutex::new(Some((next, admitted)));
+    let owner = Arc::downgrade(&runtime);
+    first.completion = Some(Arc::new(move || {
+        if let Some((next, admitted)) = pending.lock().unwrap().take()
+            && let Some(runtime) = owner.upgrade()
+        {
+            let _ = admitted.send(runtime.admit(next));
+        }
+    }));
+
+    assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
+    assert_eq!(
+        admission.await.unwrap(),
+        HookOrchestrationAdmissionV1::Enqueued,
+        "a settled cycle must not backpressure the boundary its terminal invites"
+    );
+    assert!(runtime.shutdown().await);
+}
+
 /// A boundary of a session with no Context Scout lifecycle runs once and
 /// settles. It reruns only when a later hook of that session carries a
 /// lifecycle, and a newer boundary of the session replaces it.
@@ -355,6 +403,15 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
         Some(([210; 16], true)),
         "only the session's hook that carries a lifecycle resumes the parked boundary"
     );
+    // The resumed cycle reports no terminal. Until it settles, the session's
+    // next boundary supersedes it and inherits its lifecycle.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while runtime.active_tasks() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the resumed cycle settles");
     session_hook(213, Some(lifecycle.clone()));
     let second = saved_edit(214);
     assert_eq!(

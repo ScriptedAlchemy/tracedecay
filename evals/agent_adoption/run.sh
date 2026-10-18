@@ -518,9 +518,10 @@ provision_variant() {
   [[ -d "$d" ]] && return 0
   mkdir -p "$work/plugins"
   cp -R "$plugin_src" "$d"
-  # Point the hook command at the resolved binary (install-time substitution).
+  # Point the hook command at the resolved binary and deploy it where Claude
+  # loads plugin hooks, as the Claude installer does.
   if [[ -f "$d/hooks/hooks-claude.json" ]]; then
-    sed -i "s#__TRACEDECAY_BIN__#$TD#g" "$d/hooks/hooks-claude.json"
+    sed "s#__TRACEDECAY_BIN__#$TD#g" "$d/hooks/hooks-claude.json" > "$d/hooks/hooks.json"
   fi
   # Plugin `commands/` are exposed to Claude as `tracedecay:*` skills too (the
   # Skill tool launches them and their bodies name tracedecay tools), so a
@@ -585,7 +586,7 @@ run_claude() {
   local allowed="Read,Glob,Grep,Task,Agent,Skill,mcp__tracedecay__*,mcp__plugin_tracedecay_graph__*,Bash(tracedecay tool *),Bash($TD tool *)"
   ( cd "$fixture" && HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" PATH="$EVAL_PATH" \
       timeout "$SCENARIO_TIMEOUT" claude -p "$prompt" \
-      --output-format stream-json --verbose \
+      --output-format stream-json --verbose --include-hook-events \
       --model "$model" \
       --permission-mode dontAsk --allowedTools "$allowed" \
       --no-session-persistence \

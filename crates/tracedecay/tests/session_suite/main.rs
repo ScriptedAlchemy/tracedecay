@@ -27,6 +27,7 @@ mod observation_application;
 mod observation_projection;
 mod observation_store;
 mod observation_workflow_projection;
+mod profile_footprint;
 mod session_runtime;
 mod temporal_benchmark;
 #[cfg(unix)]

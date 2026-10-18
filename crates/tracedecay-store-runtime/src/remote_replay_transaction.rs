@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::{Arc, RwLock};
 
 use tracedecay_contracts::OperationBudgetUsage;
 use tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1;
 use tracedecay_contracts::remote::replay::{
     RemoteReplayCommitReceiptV1, RemoteReplayFrameV1, RemoteReplayTransactionErrorV1,
-    RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionPortV1,
+    RemoteReplayTransactionFutureV1, RemoteReplayTransactionOutcomeV1,
+    RemoteReplayTransactionPortV1,
 };
 use tracedecay_domain::{ManifestDigest, ObservationSourceCursorV1, UtcMicros, canonical_sha256};
 use tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1;
 use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
-use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;
 use tracedecay_store::{
     AnchoredObservationWrite, CommandDigestV1, DurabilityClassV1, IdempotencyIdentityV1,
@@ -26,7 +26,6 @@ use tracedecay_store::{
     build_observation_retrieval_anchor,
 };
 
-const CHANNEL_CAPACITY: usize = 128;
 const REPLAY_AUTHORITY_NAMESPACE: &str = "remote-replay.v1";
 
 #[derive(Clone)]
@@ -37,107 +36,31 @@ struct ReplayTargetV1 {
     path: std::path::PathBuf,
 }
 
-enum ReplayCommandV1 {
-    Replay {
-        frame: Box<RemoteReplayFrameV1>,
-        current_writer: Box<RemoteWriterAuthorityV1>,
-        reply: mpsc::SyncSender<
-            Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>,
-        >,
-    },
-    InstallFence {
-        project_id: ProjectId,
-        install: Box<RemoteWriterFenceInstallV1>,
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-        reply: mpsc::SyncSender<Result<StoreCommitReceiptV1, RemoteRecoveryPhysicalEffectErrorV1>>,
-    },
-    ReadFence {
-        project_id: ProjectId,
-        authority_key: ManifestDigest,
-        reply: mpsc::SyncSender<WriterFenceReadV1>,
-    },
-}
-
 type WriterFenceReadV1 = Result<
     Option<(tracedecay_domain::RemoteWriterFenceV1, u64)>,
     RemoteRecoveryPhysicalEffectErrorV1,
 >;
 
+/// Replays and fence installs are writes on the target store's single writer,
+/// each one transaction that checks the stored fence and cursor itself, so
+/// callers dispatch them concurrently without a thread of their own.
 pub struct DaemonRemoteReplayTransactionAuthorityV1 {
-    targets: Arc<RwLock<BTreeMap<ProjectId, ReplayTargetV1>>>,
+    targets: RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     accepting: Arc<AtomicBool>,
-    sender: mpsc::SyncSender<ReplayCommandV1>,
+}
+
+impl Default for DaemonRemoteReplayTransactionAuthorityV1 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DaemonRemoteReplayTransactionAuthorityV1 {
-    pub fn new() -> Result<Self, String> {
-        let targets = Arc::new(RwLock::new(BTreeMap::new()));
-        let accepting = Arc::new(AtomicBool::new(true));
-        let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
-        let worker_targets = Arc::clone(&targets);
-        let worker_accepting = Arc::clone(&accepting);
-        std::thread::Builder::new()
-            .name("tracedecay-remote-replay".to_owned())
-            .spawn(move || {
-                while let Ok(command) = receiver.recv() {
-                    match command {
-                        ReplayCommandV1::Replay {
-                            frame,
-                            current_writer,
-                            reply,
-                        } => {
-                            let outcome = execute_replay(
-                                &worker_targets,
-                                &worker_accepting,
-                                &frame,
-                                &current_writer,
-                            );
-                            if reply.send(outcome).is_err() {
-                                tracing::debug!(
-                                    "remote replay caller ended before transaction receipt delivery"
-                                );
-                            }
-                        }
-                        ReplayCommandV1::InstallFence {
-                            project_id,
-                            install,
-                            probe,
-                            reply,
-                        } => {
-                            let outcome = execute_fence_install(
-                                &worker_targets,
-                                &project_id,
-                                *install,
-                                probe,
-                            );
-                            if reply.send(outcome).is_err() {
-                                tracing::debug!(
-                                    "remote promotion caller ended before fence receipt delivery"
-                                );
-                            }
-                        }
-                        ReplayCommandV1::ReadFence {
-                            project_id,
-                            authority_key,
-                            reply,
-                        } => {
-                            let outcome =
-                                read_writer_fence(&worker_targets, &project_id, &authority_key);
-                            if reply.send(outcome).is_err() {
-                                tracing::debug!(
-                                    "remote recovery caller ended before fence read delivery"
-                                );
-                            }
-                        }
-                    }
-                }
-            })
-            .map_err(|error| format!("spawn remote replay transaction authority: {error}"))?;
-        Ok(Self {
-            targets,
-            accepting,
-            sender,
-        })
+    pub fn new() -> Self {
+        Self {
+            targets: RwLock::new(BTreeMap::new()),
+            accepting: Arc::new(AtomicBool::new(true)),
+        }
     }
 
     pub fn register_target(
@@ -211,45 +134,86 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         Ok((target.binding.clone(), target.path.clone()))
     }
 
-    pub fn install_writer_fence(
+    pub async fn install_writer_fence(
         &self,
         project_id: ProjectId,
         install: RemoteWriterFenceInstallV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
     ) -> Result<StoreCommitReceiptV1, RemoteRecoveryPhysicalEffectErrorV1> {
-        let (reply, response) = mpsc::sync_channel(1);
-        self.sender
-            .try_send(ReplayCommandV1::InstallFence {
-                project_id,
-                install: Box::new(install),
-                probe,
-                reply,
-            })
-            .map_err(|_| unavailable("install remote writer fence", "worker is saturated"))?;
-        response.recv().map_err(|_| {
-            unavailable(
-                "install remote writer fence",
-                "worker ended before replying",
-            )
-        })?
+        let operation = "install remote writer fence";
+        let outcome = submit_fence_install(&self.targets, &project_id, install, probe)
+            .await
+            .map_err(|error| unavailable(operation, error))?;
+        match outcome {
+            RuntimeSubmitOutcomeV1::Committed { receipt }
+            | RuntimeSubmitOutcomeV1::ExactReplay { receipt }
+            | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { receipt, .. } => Ok(receipt),
+            RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. } => {
+                Err(RemoteRecoveryPhysicalEffectErrorV1::Cancelled)
+            }
+            RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. } => {
+                Err(RemoteRecoveryPhysicalEffectErrorV1::TimedOut)
+            }
+            outcome @ (RuntimeSubmitOutcomeV1::IdempotencyConflict { .. }
+            | RuntimeSubmitOutcomeV1::Fenced { .. }
+            | RuntimeSubmitOutcomeV1::Saturated { .. }
+            | RuntimeSubmitOutcomeV1::Unavailable { .. }) => {
+                Err(unavailable(operation, format_args!("{outcome:?}")))
+            }
+        }
     }
 
-    pub fn current_writer_fence(
+    /// One read of the fence row: a committed snapshot, so it never observes
+    /// a fence install or a replay's frontier advance half applied.
+    pub async fn current_writer_fence(
         &self,
         project_id: ProjectId,
         authority_key: ManifestDigest,
     ) -> WriterFenceReadV1 {
-        let (reply, response) = mpsc::sync_channel(1);
-        self.sender
-            .try_send(ReplayCommandV1::ReadFence {
-                project_id,
-                authority_key,
-                reply,
-            })
-            .map_err(|_| unavailable("read remote writer fence", "worker is saturated"))?;
-        response
-            .recv()
-            .map_err(|_| unavailable("read remote writer fence", "worker ended before replying"))?
+        let operation = "read remote writer fence";
+        let target = self
+            .targets
+            .read()
+            .map_err(|_| unavailable(operation, "target registry lock is poisoned"))?
+            .get(&project_id)
+            .cloned()
+            .ok_or_else(|| unavailable(operation, "target is not registered"))?;
+        let lease = issue_target_lease(&target).map_err(|error| unavailable(operation, error))?;
+        let mut rows = lease
+            .read_connection()
+            .query(
+                "SELECT writer_fence_json, frontier_sequence
+                 FROM remote_writer_fences WHERE authority_key = ?1",
+                (authority_key.as_str(),),
+            )
+            .await
+            .map_err(|error| unavailable(operation, error))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| unavailable(operation, error))?
+        else {
+            return Ok(None);
+        };
+        if rows
+            .next()
+            .await
+            .map_err(|error| unavailable(operation, error))?
+            .is_some()
+        {
+            return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
+        }
+        let encoded = row
+            .get::<String>(0)
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+        let frontier = row
+            .get::<i64>(1)
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+        let frontier =
+            u64::try_from(frontier).map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+        let fence = serde_json::from_str(&encoded)
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+        Ok(Some((fence, frontier)))
     }
 
     /// Returns the already-published canonical project runtime used by replay
@@ -259,9 +223,6 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         &self,
         project_id: &ProjectId,
     ) -> Result<tracedecay_runtime_core::db::DatabaseRuntimeClientV1, String> {
-        if !self.accepting.load(Ordering::Acquire) {
-            return Err("remote replay target registry is unavailable".to_owned());
-        }
         let target = self
             .targets
             .read()
@@ -274,28 +235,22 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
 }
 
 impl RemoteReplayTransactionPortV1 for DaemonRemoteReplayTransactionAuthorityV1 {
-    fn commit(
-        &self,
-        frame: &RemoteReplayFrameV1,
-        current_writer: &RemoteWriterAuthorityV1,
-    ) -> Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1> {
-        if !self.accepting.load(Ordering::Acquire) {
-            return Err(RemoteReplayTransactionErrorV1::Unavailable);
-        }
-        let (reply, response) = mpsc::sync_channel(1);
-        self.sender
-            .try_send(ReplayCommandV1::Replay {
-                frame: Box::new(frame.clone()),
-                current_writer: Box::new(current_writer.clone()),
-                reply,
-            })
-            .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
-        response
-            .recv()
-            .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?
+    fn commit<'a>(
+        &'a self,
+        frame: &'a RemoteReplayFrameV1,
+        current_writer: &'a RemoteWriterAuthorityV1,
+    ) -> RemoteReplayTransactionFutureV1<'a> {
+        Box::pin(execute_replay(
+            &self.targets,
+            &self.accepting,
+            frame,
+            current_writer,
+        ))
     }
 }
 
+/// An admitted replay whose caller went away must not commit after the
+/// authority is gone: its probe reports cancellation from then on.
 impl Drop for DaemonRemoteReplayTransactionAuthorityV1 {
     fn drop(&mut self) {
         self.accepting.store(false, Ordering::Release);
@@ -335,35 +290,7 @@ fn unavailable(
     RemoteRecoveryPhysicalEffectErrorV1::Unavailable
 }
 
-fn execute_fence_install(
-    targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
-    project_id: &ProjectId,
-    install: RemoteWriterFenceInstallV1,
-    interruption: Arc<dyn RuntimeRequestProbeV1>,
-) -> Result<StoreCommitReceiptV1, RemoteRecoveryPhysicalEffectErrorV1> {
-    let operation = "install remote writer fence";
-    let outcome = submit_fence_install(targets, project_id, install, interruption)
-        .map_err(|error| unavailable(operation, error))?;
-    match outcome {
-        RuntimeSubmitOutcomeV1::Committed { receipt }
-        | RuntimeSubmitOutcomeV1::ExactReplay { receipt }
-        | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { receipt, .. } => Ok(receipt),
-        RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. } => {
-            Err(RemoteRecoveryPhysicalEffectErrorV1::Cancelled)
-        }
-        RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. } => {
-            Err(RemoteRecoveryPhysicalEffectErrorV1::TimedOut)
-        }
-        outcome @ (RuntimeSubmitOutcomeV1::IdempotencyConflict { .. }
-        | RuntimeSubmitOutcomeV1::Fenced { .. }
-        | RuntimeSubmitOutcomeV1::Saturated { .. }
-        | RuntimeSubmitOutcomeV1::Unavailable { .. }) => {
-            Err(unavailable(operation, format_args!("{outcome:?}")))
-        }
-    }
-}
-
-fn submit_fence_install(
+async fn submit_fence_install(
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     project_id: &ProjectId,
     install: RemoteWriterFenceInstallV1,
@@ -386,61 +313,11 @@ fn submit_fence_install(
         commit_started: AtomicBool::new(false),
     });
     let lease = issue_target_lease(&target)?;
-    native_runtime::block_on(lease.runtime_client().dispatch_submit(request, probe))?
+    lease
+        .runtime_client()
+        .dispatch_submit(request, probe)
+        .await
         .map_err(|error| format!("registered remote fence dispatch failed: {error:?}"))
-}
-
-fn read_writer_fence(
-    targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
-    project_id: &ProjectId,
-    authority_key: &ManifestDigest,
-) -> WriterFenceReadV1 {
-    let operation = "read remote writer fence";
-    let target = targets
-        .read()
-        .map_err(|_| unavailable(operation, "target registry lock is poisoned"))?
-        .get(project_id)
-        .cloned()
-        .ok_or_else(|| unavailable(operation, "target is not registered"))?;
-    let lease = issue_target_lease(&target).map_err(|error| unavailable(operation, error))?;
-    native_runtime::block_on(async move {
-        let mut rows = lease
-            .read_connection()
-            .query(
-                "SELECT writer_fence_json, frontier_sequence
-                 FROM remote_writer_fences WHERE authority_key = ?1",
-                (authority_key.as_str(),),
-            )
-            .await
-            .map_err(|error| unavailable(operation, error))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| unavailable(operation, error))?
-        else {
-            return Ok(None);
-        };
-        if rows
-            .next()
-            .await
-            .map_err(|error| unavailable(operation, error))?
-            .is_some()
-        {
-            return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
-        }
-        let encoded = row
-            .get::<String>(0)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let frontier = row
-            .get::<i64>(1)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let frontier =
-            u64::try_from(frontier).map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let fence = serde_json::from_str(&encoded)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        Ok(Some((fence, frontier)))
-    })
-    .unwrap_or_else(|error| Err(unavailable(operation, error)))
 }
 
 fn prepare_fence_request(
@@ -528,7 +405,7 @@ fn prepare_fence_request(
 }
 
 #[tracing::instrument(name = "daemon.remote.replay.execute", level = "trace", skip_all)]
-fn execute_replay(
+async fn execute_replay(
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     accepting: &Arc<AtomicBool>,
     frame: &RemoteReplayFrameV1,
@@ -560,10 +437,7 @@ fn execute_replay(
     });
     let lease =
         issue_target_lease(&target).map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
-    let submitted =
-        native_runtime::block_on(lease.runtime_client().dispatch_submit(request, probe))
-            .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
-    match submitted {
+    match lease.runtime_client().dispatch_submit(request, probe).await {
         Ok(outcome) => map_submit_outcome(frame, current_writer, prepared.admission_bytes, outcome),
         Err(StoreRuntimeRegistryFailure::StorageRuntime(error))
             if matches!(
@@ -844,3 +718,6 @@ impl RuntimeRequestProbeV1 for ForwardedReplayProbeV1 {
                 .is_ok()
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -29,7 +29,6 @@ pub(super) use schema::{
 };
 pub(crate) use source_transition::verify_native_source_supersession;
 pub(crate) use state::RearmedProjectionRetries;
-pub(super) use state::ensure_projection_output_state_cache;
 #[cfg(test)]
 pub(super) use state::verify_projection_rows;
 pub(super) use state::{

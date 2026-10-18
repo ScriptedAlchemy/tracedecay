@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, ApplicationProblem, ApplicationProblemKind,
@@ -26,8 +25,11 @@ use tracedecay_graph_query::CodeGraphReadError;
 type CurrentCallableCodeAccess =
     dyn Fn(UtcMicros) -> CurrentCallableCodeAccessFuture<'static> + Send + Sync;
 
+pub use tracedecay_application::project_open_authorization::{
+    GRANT_HORIZON, mounted_grant_at, mounted_grant_expires_at,
+};
+
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
-pub const GRANT_HORIZON: Duration = Duration::from_hours(24);
 
 pub fn project_open_source_access_authority()
 -> Result<ProjectOpenSourceAccessAuthorityV1, ApplicationContractError> {

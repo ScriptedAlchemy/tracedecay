@@ -522,7 +522,7 @@ fn configuration_request_authority(
         ConfigurationRoutePolicyV1 {
             actor: &registered.actor,
             scope: &registered.scope,
-            grant_expires_at: registered.grants.expires_at,
+            grant_expires_at: mounted_grant_expires_at(observed_at),
             policy_epoch: registered.grants.policy_epoch,
             policy_digest: &registered.grants.policy_digest,
         },
@@ -624,11 +624,6 @@ pub(super) fn context_scout_request_authority(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> Result<ContextScoutRequestAuthorityV1, ApplicationProblem> {
-    if observed_at >= registered.grants.expires_at {
-        return Err(ApplicationProblem::not_found_or_not_authorized(
-            RetryDirective::Never,
-        ));
-    }
     let application_operation =
         tracedecay_contracts::context_scout::context_scout_surface_operation(operation.as_str())
             .map_err(|_| invalid_configuration_request())?
@@ -652,7 +647,12 @@ pub(super) fn context_scout_request_authority(
         DisclosureClass::Sensitive,
     ))
     .map_err(|_| invalid_configuration_request())?;
-    let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
+    let expires_at = UtcMicros(
+        deadline
+            .expires_at
+            .0
+            .min(mounted_grant_expires_at(observed_at).0),
+    );
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new(format!("grant.daemon.context-scout.{request_id}"))
             .map_err(|_| invalid_configuration_request())?,

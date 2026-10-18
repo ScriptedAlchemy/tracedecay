@@ -731,18 +731,12 @@ async fn execute_context_scout_mutation(
         ),
         _ => return concealed_application_problem(wire_request_id),
     };
-    let operation_name = match operation {
-        ContextScoutMutationOperationV1::Cancel => "context_scout_cancel",
-        ContextScoutMutationOperationV1::Claim => "context_scout_claim",
-        ContextScoutMutationOperationV1::Delivery => "context_scout_delivery",
-        ContextScoutMutationOperationV1::Feedback => "context_scout_feedback",
-    };
     let effect_identity = match derive_logical_effect_idempotency(
         LogicalEffectIdempotencyDomain::ContextScoutEffect,
         &(
             &registered.actor,
             &registered.scope,
-            operation_name,
+            operation.as_str(),
             &idempotency_key,
         ),
     ) {
@@ -847,7 +841,7 @@ async fn execute_context_scout_mutation(
                             return context_scout_mutation_unavailable(wire_request_id);
                         };
                         let now = now_micros();
-                        let expires_at = deadline.expires_at.0.min(registered.grants.expires_at.0);
+                        let expires_at = deadline.expires_at.0.min(mounted_grant_expires_at(now).0);
                         let Ok(remaining) = u64::try_from(expires_at.saturating_sub(now.0)) else {
                             return application_problem(
                                 wire_request_id,

@@ -32,7 +32,7 @@ use super::capture::{
 };
 use super::protocol::{
     REMOTE_CAPTURE_USE_CASE_ID_V1, REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolBodyV1,
-    RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolFailureV1, RemoteProtocolFutureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
     RemoteProtocolResponseV1, remote_capture_result_contract_v1, remote_protocol_problem,
 };
 use super::replay::{RemoteReplayApplicationErrorV1, RemoteReplayPolicyEvidenceV1};
@@ -239,52 +239,54 @@ where
         &self,
         request: RemoteProtocolRequestV1<RemoteCaptureRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        match self.service.capture(&request, &credential) {
-            Ok(outcome) => {
-                // A frame was admitted, so the owning authority was observed
-                // unreachable at admission time; report exactly that state.
-                let authority = CurrentRemoteAuthorityStateV1::Unavailable {
-                    reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
-                    observed_at: outcome.captured_at,
-                };
-                let result = match capture_effect_envelope(request, outcome) {
-                    Ok(envelope) => Ok(envelope),
-                    Err(failure) => Err(remote_protocol_problem(
-                        remote_capture_result_contract_v1(),
-                        request_id.clone(),
-                        failure,
-                    )?),
-                };
-                RemoteProtocolResponseV1::new_or_unavailable(
-                    request_id,
-                    authority,
-                    result,
-                    remote_capture_result_contract_v1(),
-                    observed_at,
-                )
-            }
-            Err(error) => {
-                let failure = capture_protocol_failure(error);
-                let authority = CurrentRemoteAuthorityStateV1::Unavailable {
-                    reason: failure.unavailable_reason(),
-                    observed_at,
-                };
-                RemoteProtocolResponseV1::new_or_unavailable(
-                    request_id.clone(),
-                    authority,
-                    Err(remote_protocol_problem(
-                        remote_capture_result_contract_v1(),
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let request_id = request.request_id.clone();
+            let observed_at = request.sent_at;
+            match self.service.capture(&request, &credential) {
+                Ok(outcome) => {
+                    // A frame was admitted, so the owning authority was observed
+                    // unreachable at admission time; report exactly that state.
+                    let authority = CurrentRemoteAuthorityStateV1::Unavailable {
+                        reason: RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                        observed_at: outcome.captured_at,
+                    };
+                    let result = match capture_effect_envelope(request, outcome) {
+                        Ok(envelope) => Ok(envelope),
+                        Err(failure) => Err(remote_protocol_problem(
+                            remote_capture_result_contract_v1(),
+                            request_id.clone(),
+                            failure,
+                        )?),
+                    };
+                    RemoteProtocolResponseV1::new_or_unavailable(
                         request_id,
-                        failure,
-                    )?),
-                    remote_capture_result_contract_v1(),
-                    observed_at,
-                )
+                        authority,
+                        result,
+                        remote_capture_result_contract_v1(),
+                        observed_at,
+                    )
+                }
+                Err(error) => {
+                    let failure = capture_protocol_failure(error);
+                    let authority = CurrentRemoteAuthorityStateV1::Unavailable {
+                        reason: failure.unavailable_reason(),
+                        observed_at,
+                    };
+                    RemoteProtocolResponseV1::new_or_unavailable(
+                        request_id.clone(),
+                        authority,
+                        Err(remote_protocol_problem(
+                            remote_capture_result_contract_v1(),
+                            request_id,
+                            failure,
+                        )?),
+                        remote_capture_result_contract_v1(),
+                        observed_at,
+                    )
+                }
             }
-        }
+        })
     }
 }
 

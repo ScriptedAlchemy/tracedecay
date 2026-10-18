@@ -247,6 +247,7 @@ where
                     RequestAdmission::Admitted => None,
                     RequestAdmission::Cancelled => Some(DiagnosticProviderState::Cancelled),
                     RequestAdmission::TimedOut => Some(DiagnosticProviderState::TimedOut),
+                    RequestAdmission::GrantExpired => Some(DiagnosticProviderState::Unavailable),
                 };
                 if let Some(state) = interrupted_state {
                     return request

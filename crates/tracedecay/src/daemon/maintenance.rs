@@ -16,12 +16,14 @@ use tracedecay_maintenance::generation::{
 use tracedecay_maintenance::lease::ProjectStoreMaintenanceLeaseV1;
 use tracedecay_maintenance::loop_run::{MaintenanceWake, run_maintenance_loop};
 use tracedecay_maintenance::store_maintenance::RegisteredProjectStoreV1;
-use tracedecay_maintenance::telemetry::StoreTelemetrySamplingOutcome;
+use tracedecay_maintenance::telemetry::{
+    StoreFileIdentityStateV1, StoreTelemetrySamplingOutcome, StoreTelemetrySamplingRegistry,
+};
 use tracedecay_maintenance::tick::{
     MaintenanceContinuation, MaintenanceTickOutcome, cursor_after_attempted_units,
     select_store_window,
 };
-use tracedecay_runtime_core::storage::profile_sharded_data_root;
+use tracedecay_runtime_core::storage::{RESPONSE_HANDLES_DIRECTORY, profile_sharded_data_root};
 
 use super::branch_admin::StoreAdministration;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
@@ -65,6 +67,75 @@ async fn registered_project_stores(
         if exhausted {
             return Ok(stores);
         }
+    }
+}
+
+/// Holds every mounted store whose path no longer names the file this daemon
+/// opened in the reset-required state. A daemon writing into a deleted store
+/// fills an unlinked inode that no size census sees and no reset frees (#4099
+/// wrote 112 GB this way), so status and doctor name the restart instead.
+fn record_lost_store_files(
+    sampling: &StoreTelemetrySamplingRegistry,
+    registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+) {
+    for (path, state) in sampling.check_store_identities() {
+        if matches!(
+            state,
+            StoreFileIdentityStateV1::Missing | StoreFileIdentityStateV1::Replaced
+        ) && registry.record_store_identity_lost(&path)
+        {
+            log_daemon_event(
+                "store_file_identity_lost",
+                &[
+                    ("path", path.display().to_string()),
+                    ("state", format!("{state:?}")),
+                ],
+            );
+        }
+    }
+}
+
+/// Expired response handles are removed from the profile root and every
+/// registered project store, so a daemon that outlives the handle TTL still
+/// reclaims them. The sweep stops between roots once cancellation is
+/// requested.
+async fn sweep_response_handles(
+    handle_roots: Vec<PathBuf>,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+) {
+    let swept = native_runtime::spawn_blocking(move || {
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+        let (mut removed, mut failed) = (0usize, 0usize);
+        for root in &handle_roots {
+            if cancellation.is_cancelled() {
+                break;
+            }
+            match tracedecay_mcp::response_handles::cleanup_expired_response_handles(root, now) {
+                Ok(count) => removed = removed.saturating_add(count),
+                Err(_) => failed = failed.saturating_add(1),
+            }
+        }
+        (handle_roots.len(), removed, failed)
+    })
+    .await;
+    match swept {
+        Ok((roots, removed, failed)) if removed > 0 || failed > 0 => log_daemon_event(
+            "response_handle_cleanup",
+            &[
+                ("roots", roots.to_string()),
+                ("removed_expired", removed.to_string()),
+                ("failed_roots", failed.to_string()),
+            ],
+        ),
+        Ok(_) => {}
+        Err(error) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "response_handles".to_owned()),
+                ("failure", "blocking_pool_unavailable".to_owned()),
+                ("error", error),
+            ],
+        ),
     }
 }
 
@@ -779,6 +850,17 @@ impl MaintenanceCoordinator {
                     (Vec::new(), false)
                 }
             };
+        if continuation.is_none() && !self.cancellation.is_cancelled() {
+            let handle_roots = std::iter::once(profile_root)
+                .chain(
+                    registered_projects
+                        .iter()
+                        .map(|(_, store)| store.data_root.as_path()),
+                )
+                .map(|root| root.join(RESPONSE_HANDLES_DIRECTORY))
+                .collect();
+            sweep_response_handles(handle_roots, self.cancellation.clone()).await;
+        }
         let mounted_store_roots = project_graphs
             .iter()
             .map(|graph| graph.code_index_store_root.clone())
@@ -834,7 +916,11 @@ impl MaintenanceCoordinator {
             .map(|graph| graph.project_root.clone())
             .collect::<BTreeSet<_>>();
         maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
-        let telemetry_sampling = if continuation.is_none() {
+        // A capacity retirement releasing stores skips this pass: sampling
+        // leases every sampled store until it ends.
+        let telemetry_sampling = if continuation.is_none()
+            && let Ok(_clients) = administration.maintenance_store_clients().try_lock()
+        {
             maintenance_observations
                 .advance_registered(
                     &active_telemetry_paths,
@@ -845,6 +931,11 @@ impl MaintenanceCoordinator {
         } else {
             StoreTelemetrySamplingOutcome::default()
         };
+        if continuation.is_none()
+            && let Some(registry) = administration.mounted_session_runtime_registry().await
+        {
+            record_lost_store_files(&maintenance_observations, &registry);
+        }
 
         // Bounded, round-robin slice of mounted stores. Writer admission is
         // per unit so one busy store defers only itself, and the cursor
@@ -861,6 +952,9 @@ impl MaintenanceCoordinator {
             }
             let admitted = administration
                 .try_with_writer(|| async {
+                    let Ok(_clients) = administration.maintenance_store_clients().try_lock() else {
+                        return MaintenanceTickOutcome::Retry;
+                    };
                     let (key, unit) = &work[index];
                     match unit {
                         MaintenanceStoreWork::Session(database_path) => {
@@ -1261,70 +1355,13 @@ mod tests {
     use std::time::Duration;
 
     use tokio::sync::Notify;
-    use tracedecay_contracts::storage::{
-        StorageByteSizeV1, StoreKeyV1, TableGrowthTelemetryReadV1, TableNameV1,
-    };
-    use tracedecay_domain::UtcMicros;
 
     use super::{MaintenanceCoordinator, NativeTask, run_resident_memory_sampler_loop};
-    use tracedecay_maintenance::telemetry::{
-        StoreTelemetrySamplingRegistry, TableGrowthObservation, compare_table_growth,
-    };
+    use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
     use tracedecay_maintenance::tick::{
         MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
         cursor_after_attempted_units, select_store_window,
     };
-
-    #[test]
-    fn table_growth_preview_never_mutates_the_maintenance_baseline() {
-        let store = StoreKeyV1::new("project.db").expect("store key");
-        let table = TableNameV1::new("messages").expect("table name");
-        let mut watermarks = None;
-
-        let preview = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table.clone(), StorageByteSizeV1(10))]),
-            UtcMicros(1),
-            &mut watermarks,
-            TableGrowthObservation::Preview,
-        );
-        assert!(matches!(
-            preview,
-            TableGrowthTelemetryReadV1::Unknown { .. }
-        ));
-        assert!(
-            watermarks.is_none(),
-            "preview must not establish a baseline"
-        );
-
-        let baseline = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table.clone(), StorageByteSizeV1(10))]),
-            UtcMicros(2),
-            &mut watermarks,
-            TableGrowthObservation::Advance,
-        );
-        assert!(matches!(
-            baseline,
-            TableGrowthTelemetryReadV1::BaselineEstablished {
-                tables_observed: 1,
-                ..
-            }
-        ));
-
-        let observed = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table, StorageByteSizeV1(20))]),
-            UtcMicros(3),
-            &mut watermarks,
-            TableGrowthObservation::Preview,
-        );
-        let TableGrowthTelemetryReadV1::Observed { samples, .. } = observed else {
-            panic!("preview should compare with the maintenance baseline");
-        };
-        assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].growth_bytes().get(), 10);
-    }
 
     #[test]
     fn cadence_rate_limits_failures_and_successes() {
@@ -1497,6 +1534,73 @@ mod tests {
                 "count={count} budget={budget}: not every store reached within {ticks} ticks"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_mounted_store_deleted_under_the_daemon_requires_a_restart() {
+        let temporary = tempfile::tempdir().expect("store identity fixture root");
+        let profile_root = temporary.path().join("profile");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            44,
+            "maintenance store identity",
+        )
+        .expect("daemon database scope");
+        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("daemon session runtime registry");
+        let database_path = temporary.path().join("project.db");
+        tracedecay_global_db::register_registered_schema_installer();
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &database_path,
+            "maintenance store identity fixture",
+        )
+        .expect("store identity fixture authority");
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("store identity fixture database");
+        let scope = tracedecay_contracts::ResolvedScope::new(
+            tracedecay_domain::ProjectId::new("project.store-identity").expect("project identity"),
+            tracedecay_domain::RepositoryId::new("repository.store-identity")
+                .expect("repository identity"),
+            tracedecay_domain::WorktreeId::new("worktree.store-identity")
+                .expect("worktree identity"),
+            None,
+        )
+        .expect("resolved scope");
+        let sampling = StoreTelemetrySamplingRegistry::default();
+        assert!(sampling.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        let lost = |registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1| {
+            registry
+                .reset_required_stores()
+                .into_iter()
+                .filter(|store| store.store == database_path.display().to_string())
+                .map(|store| store.remedy)
+                .collect::<Vec<_>>()
+        };
+
+        super::record_lost_store_files(&sampling, &registry);
+        assert_eq!(
+            lost(&registry),
+            Vec::<String>::new(),
+            "a live store is not lost"
+        );
+
+        std::fs::remove_file(&database_path).expect("delete the mounted store");
+        super::record_lost_store_files(&sampling, &registry);
+        assert_eq!(
+            lost(&registry),
+            [tracedecay_domain::errors::DAEMON_RESTART_COMMAND.to_owned()],
+            "a store deleted under the daemon must be reset-required, naming the restart"
+        );
     }
 
     #[tokio::test]
@@ -1687,7 +1791,8 @@ mod tests {
 
     /// A registered project nothing has mounted since the daemon started is
     /// collected by the first full tick and converges on its continuation,
-    /// instead of waiting for a client to mount it.
+    /// instead of waiting for a client to mount it. A tick that runs while a
+    /// capacity release holds the maintenance store clients defers it.
     #[test]
     fn a_full_tick_collects_an_unmounted_registered_project_without_a_tokio_runtime() {
         let hazards = crate::test_support::native_runtime_hazards();
@@ -1753,6 +1858,26 @@ mod tests {
         let branch_gc = super::BranchStoreGcCadenceV1 { branch_gc_days: 30 };
         assert_eq!(generation_files(), 6);
 
+        let release = administration.maintenance_store_clients().lock().await;
+        let deferred = coordinator
+            .run_tick(
+                &profile_root,
+                &profile_database,
+                &administration,
+                &schedulers,
+                &retention,
+                branch_gc,
+                None,
+            )
+            .await;
+        assert_eq!(deferred, MaintenanceTickOutcome::Retry);
+        assert_eq!(
+            generation_files(),
+            6,
+            "a tick leases no store while a capacity release runs"
+        );
+        drop(release);
+
         coordinator
             .run_tick(
                 &profile_root,
@@ -1779,6 +1904,76 @@ mod tests {
             .await;
         assert_eq!(continuation, MaintenanceTickOutcome::Complete);
         assert_eq!(generation_files(), 1);
+    }
+
+    #[test]
+    fn a_full_tick_sweeps_expired_response_handles_from_the_profile_and_each_store() {
+        tracedecay_runtime_core::native_runtime::block_on(async {
+            use tracedecay_session_memory::response_handles::{
+                inventory_response_handles, store_response_handle,
+            };
+
+            let temp = tempfile::TempDir::new().expect("temp root");
+            let profile_root = temp.path().join("profile");
+            let checkout = temp.path().join("checkout");
+            std::fs::create_dir_all(&checkout).expect("checkout");
+            let runtime =
+                tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+                    &profile_root,
+                )
+                .await
+                .expect("profile database");
+            let profile_database = runtime.profile_database_arc();
+            let project = profile_database
+                .upsert_code_project("proj_handles", &checkout, None, None, None)
+                .await
+                .expect("register project");
+            let store_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
+                &profile_root,
+                &project.project_id,
+            );
+            std::fs::create_dir_all(&store_root).expect("project store");
+            let roots = [
+                profile_root.join(super::RESPONSE_HANDLES_DIRECTORY),
+                store_root.join(super::RESPONSE_HANDLES_DIRECTORY),
+            ];
+            let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+            for root in &roots {
+                store_response_handle(root, "expired", 1).expect("expired handle");
+                store_response_handle(root, "fresh", now).expect("fresh handle");
+                assert_eq!(inventory_response_handles(root).expect("inventory").file_count, 2);
+            }
+            let coordinator = MaintenanceCoordinator {
+                background_cpu: Some(Arc::new(
+                    tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
+                        std::num::NonZeroUsize::MIN,
+                    ),
+                )),
+                ..MaintenanceCoordinator::default()
+            };
+
+            coordinator
+                .run_tick(
+                    &profile_root,
+                    &profile_database,
+                    &super::StoreAdministration::default(),
+                    &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+                    &tracedecay_configuration::RetentionConfig::default(),
+                    super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
+                    None,
+                )
+                .await;
+
+            for root in &roots {
+                assert_eq!(
+                    inventory_response_handles(root).expect("inventory").file_count,
+                    1,
+                    "the tick removes the expired handle and keeps the fresh one under {}",
+                    root.display()
+                );
+            }
+        })
+        .expect("native runtime");
     }
 
     /// Tick state released 200 ms after its tick drops, past the abort

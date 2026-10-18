@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 use tracedecay_contracts::{
     WorkAttemptStorageError, WorkAttemptStoragePort, WorkRunControlStorageError,
-    WorkRunControlStoragePort,
+    WorkRunControlStoragePort, WorkRunControlTransitionPort, WorkRunReservationPort,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId,
@@ -338,10 +338,13 @@ fn run_admission_reads_the_deadline_and_live_frontier_off_the_attempt_rows() {
     );
     // Journal binding is pause-only evidence. It must not promote a terminal
     // attempt into a new blocked interval during a later run-control pause.
-    let bindings = store
-        .storage()
-        .workflow_bound_live_attempts(&authority, &task(), &run())
-        .unwrap();
+    let bindings = {
+        let authority = authority.clone();
+        in_job(&store, move |storage| {
+            storage.workflow_bound_live_attempts(&authority, &task(), &run())
+        })
+        .unwrap()
+    };
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].attempt_id, id::<AttemptId>("attempt.rc.1"));
     assert_eq!(bindings[0].step_id, None);
@@ -366,11 +369,14 @@ fn publication_refuses_an_attempt_frontier_changed_after_snapshot() {
     let authority = authority("actor.run-control.frontier-race");
     let first = attempt("attempt.frontier-race.1");
     store.storage().insert(&authority, &first).unwrap();
-    let frontier = store
-        .storage()
-        .run_control_frontier(&authority, &task(), &run())
+    let frontier = {
+        let authority = authority.clone();
+        in_job(&store, move |storage| {
+            storage.run_control_frontier(&authority, &task(), &run())
+        })
         .unwrap()
-        .expect("frontier");
+        .expect("frontier")
+    };
 
     // This admission lands after pause prepared its frontier. The storage CAS
     // must observe it in the same write transaction as publication.
@@ -382,10 +388,13 @@ fn publication_refuses_an_attempt_frontier_changed_after_snapshot() {
         frontier.admission.live_attempts.clone(),
     );
     assert_eq!(
-        store
-            .storage()
-            .publish_run_control_at_frontier(&authority, &frontier, &control, &[])
-            .expect_err("changed attempt frontier"),
+        {
+            let authority = authority.clone();
+            in_job(&store, move |storage| {
+                storage.publish_run_control_at_frontier(&authority, &frontier, &control, &[])
+            })
+            .expect_err("changed attempt frontier")
+        },
         WorkRunControlStorageError::AuthorityConflict
     );
     assert_eq!(
@@ -394,6 +403,73 @@ fn publication_refuses_an_attempt_frontier_changed_after_snapshot() {
             .load_run_control(&authority, &task(), &run())
             .unwrap(),
         None
+    );
+}
+
+#[test]
+fn a_run_control_job_publishes_with_its_frontier_read_or_not_at_all() {
+    use tracedecay_rusqlite_runtime::native_runtime::block_on;
+
+    let store = RegisteredWorkStore::start_with_setup("run-control-job", |connection| {
+        install_workflow_schema(connection).unwrap();
+    });
+    let authority = authority("actor.run-control.job");
+    store
+        .storage()
+        .insert(&authority, &attempt("attempt.job.1"))
+        .unwrap();
+    let pause_in_job = |verdict: Result<(), &'static str>| {
+        let authority = authority.clone();
+        block_on(store.storage().transact(move |storage| {
+            let frontier = storage
+                .run_control_frontier(&authority, &task(), &run())
+                .map_err(|error| format!("{error:?}"))?
+                .ok_or("the run has an attempt")?;
+            let bound = storage
+                .workflow_bound_live_attempts(&authority, &task(), &run())
+                .map_err(|error| format!("{error:?}"))?;
+            let control = paused(
+                WorkRunControlReasonV1::OperatorRequest,
+                UtcMicros(400),
+                bound
+                    .into_iter()
+                    .map(|attempt| attempt.attempt_id)
+                    .collect(),
+            );
+            storage
+                .publish_run_control_at_frontier(&authority, &frontier, &control, &[])
+                .map_err(|error| format!("{error:?}"))?;
+            verdict.map(|()| control).map_err(str::to_owned)
+        }))
+        .expect("native runtime")
+        .expect("the writer runs the job")
+    };
+
+    assert_eq!(
+        pause_in_job(Err("refused after publishing")),
+        Err("refused after publishing".to_owned())
+    );
+    assert_eq!(
+        store
+            .storage()
+            .load_run_control(&authority, &task(), &run())
+            .unwrap(),
+        None,
+        "a refused job leaves no control row"
+    );
+
+    let control = pause_in_job(Ok(())).expect("the accepted job commits");
+    assert_eq!(
+        control.fenced_attempts(),
+        [id::<AttemptId>("attempt.job.1")]
+    );
+    assert_eq!(
+        store
+            .storage()
+            .load_run_control(&authority, &task(), &run())
+            .unwrap(),
+        Some(control),
+        "an accepted job commits its control row"
     );
 }
 
@@ -718,4 +794,18 @@ fn terminal_attempt_closes_its_open_blocked_interval_in_the_same_fenced_cas() {
             .unwrap(),
         vec![settled]
     );
+}
+
+fn in_job<R: Send + 'static, E: Send + 'static>(
+    store: &RegisteredWorkStore,
+    call: impl Fn(
+        tracedecay_rusqlite_runtime::work_run_control::WorkSqliteJobStorage<'_>,
+    ) -> Result<R, E>
+    + Send
+    + Sync
+    + 'static,
+) -> Result<R, E> {
+    tracedecay_rusqlite_runtime::native_runtime::block_on(store.storage().transact(call))
+        .expect("native runtime")
+        .expect("the writer runs the job")
 }

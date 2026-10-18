@@ -21,6 +21,10 @@ fn claude_native_identity_encoding_remains_byte_exact() {
         claude::observation_source_id(b"session-42"),
         "tracedecay-claude-observation-source-v1-sha256-79e3ce0c2602f9b58b30d97366d5c1dc656c28a248b3015f5a076d283d22028c"
     );
+    assert_eq!(
+        claude::observation_path_source_id(b"account-one/session.jsonl"),
+        "tracedecay-claude-observation-source-v2-sha256-c616d6158ad32ca1c204938215042bdc4125db7f48ea51b6ed5e577605430536"
+    );
 }
 
 #[test]

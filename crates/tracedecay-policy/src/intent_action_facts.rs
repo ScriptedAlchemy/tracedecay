@@ -112,6 +112,50 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
         intent: ContextScoutIntentKindV1::SemanticSearch,
         matches: |facts| is_semantic_search_tool(facts.input),
     },
+    // Tool-action rules precede the free-text rules: on a tool event the text
+    // is the tool's own arguments (a grep pattern, a shell command), so a
+    // pattern such as "impact" must not outrank the search the tool performed.
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::MemoryStore,
+        matches: |facts| is_memory_store_edit(facts.input),
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::EditRedundancy,
+        matches: |facts| is_redundancy_candidate_edit(facts.input),
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::FileLookup,
+        matches: |facts| {
+            facts
+                .tool_name
+                .is_some_and(|name| matches_normalized(name, &["glob", "listdir", "list_dir"]))
+                || facts.command.is_some_and(is_file_lookup_command)
+        },
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::FileRead,
+        matches: |facts| facts.command.is_some_and(is_shell_file_read_command),
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::Search,
+        matches: |facts| facts.command.is_some_and(is_shell_search_command),
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::Search,
+        matches: |facts| {
+            facts
+                .tool_name
+                .is_some_and(|name| matches_normalized(name, &["grep", "search"]))
+        },
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::ToolDescriptorRead,
+        matches: |facts| is_tracedecay_tool_descriptor_read(facts.input),
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::FileRead,
+        matches: |facts| is_single_file_read(facts.input),
+    },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::UnexpectedChanges,
         matches: |facts| signals_unexpected_change(&facts.text),
@@ -164,47 +208,6 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
     ClassificationRule {
         intent: ContextScoutIntentKindV1::Search,
         matches: |facts| asks_for_text_search(&facts.text),
-    },
-    ClassificationRule {
-        intent: ContextScoutIntentKindV1::MemoryStore,
-        matches: |facts| is_memory_store_edit(facts.input),
-    },
-    ClassificationRule {
-        intent: ContextScoutIntentKindV1::EditRedundancy,
-        matches: |facts| is_redundancy_candidate_edit(facts.input),
-    },
-    ClassificationRule {
-        intent: ContextScoutIntentKindV1::FileLookup,
-        matches: |facts| {
-            facts
-                .tool_name
-                .is_some_and(|name| matches_normalized(name, &["glob", "listdir", "list_dir"]))
-                || facts.command.is_some_and(is_file_lookup_command)
-        },
-    },
-    ClassificationRule {
-        intent: ContextScoutIntentKindV1::FileRead,
-        matches: |facts| facts.command.is_some_and(is_shell_file_read_command),
-    },
-    ClassificationRule {
-        intent: ContextScoutIntentKindV1::Search,
-        matches: |facts| facts.command.is_some_and(is_shell_search_command),
-    },
-    ClassificationRule {
-        intent: ContextScoutIntentKindV1::Search,
-        matches: |facts| {
-            facts
-                .tool_name
-                .is_some_and(|name| matches_normalized(name, &["grep", "search"]))
-        },
-    },
-    ClassificationRule {
-        intent: ContextScoutIntentKindV1::ToolDescriptorRead,
-        matches: |facts| is_tracedecay_tool_descriptor_read(facts.input),
-    },
-    ClassificationRule {
-        intent: ContextScoutIntentKindV1::FileRead,
-        matches: |facts| is_single_file_read(facts.input),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::BroadRead,
@@ -771,7 +774,6 @@ pub fn asks_for_broad_read(text: &str) -> bool {
 
 pub fn asks_for_project_context(text: &str) -> bool {
     mentions_external_project_scope(text)
-        || mentions_project_path(text)
         || asks_for_repo_discovery(text)
         || asks_for_project_architecture(text)
 }
@@ -812,10 +814,6 @@ pub fn asks_for_project_architecture(text: &str) -> bool {
             "system",
         ],
     )
-}
-
-pub fn mentions_project_path(text: &str) -> bool {
-    contains_any(text, &["/projects/", "~/projects/", "$home/projects/"])
 }
 
 pub fn mentions_external_project_scope(text: &str) -> bool {

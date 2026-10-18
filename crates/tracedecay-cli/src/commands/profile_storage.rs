@@ -405,23 +405,31 @@ async fn handle_storage_report(
         let mut report =
             brokered_storage_report(profile, project_id.as_deref(), project_root.as_deref())
                 .await?;
-        // The daemon pages stores; the profile total comes from one read-only
-        // census of the whole profile, as the offline report takes it.
+        // The daemon pages stores; the profile total and footprint come from
+        // one read-only census of the whole profile, as the offline report
+        // takes them.
         if project_id.is_none() {
             let census_root = profile_root.clone();
-            report.full_profile_size = Some(
-                native_runtime::spawn_blocking(move || {
-                    tracedecay_maintenance::retention::storage_report::scan_full_profile_size(
-                        &census_root,
-                    )
-                })
-                .await
-                .map_err(|message| {
-                    tracedecay_domain::errors::TraceDecayError::Config {
-                        message: format!("profile size census failed: {message}"),
-                    }
-                })?,
-            );
+            let registered_roots = report
+                .stores
+                .iter()
+                .map(|store| (store.project_id.clone(), store.canonical_root.clone()))
+                .collect();
+            let footprint = native_runtime::spawn_blocking(move || {
+                tracedecay_maintenance::retention::footprint::census_profile_footprint(
+                    &census_root,
+                    &registered_roots,
+                    &std::collections::BTreeMap::new(),
+                )
+            })
+            .await
+            .map_err(|message| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("profile footprint census failed: {message}"),
+                }
+            })?;
+            report.full_profile_size = Some(footprint.full_profile_size());
+            report.footprint = Some(footprint);
         }
         report
     } else {
@@ -491,8 +499,11 @@ async fn handle_storage_report(
             ),
             _ => "free pages not sampled (store busy or unreadable)".to_string(),
         };
+        let root_state = store
+            .root_state
+            .map_or("root not probed", |state| state.label());
         println!(
-            "    {} ({}): {} total, {free}",
+            "    {} ({}, {root_state}): {} total, {free}",
             store.project_id,
             store.canonical_root,
             format_bytes(store.total_bytes),
@@ -503,6 +514,8 @@ async fn handle_storage_report(
             ("sealed graph", kinds.sealed_graph),
             ("text artifacts", kinds.text_artifacts),
             ("generation artifacts", kinds.generation_artifacts),
+            ("graph container", kinds.graph_container),
+            ("graph replay pool", kinds.graph_replay_pool),
             ("sessions", kinds.sessions),
             ("other", kinds.other),
         ] {
@@ -575,6 +588,11 @@ async fn handle_storage_report(
     if report.unregistered_dir_count > 0 {
         println!("  run the daemon's automatic sweep to reclaim unregistered directories");
     }
+    if let Some(footprint) = &report.footprint {
+        for line in footprint_lines(footprint) {
+            println!("{line}");
+        }
+    }
     if report.coverage.state
         == tracedecay_maintenance::retention::storage_report::StorageReportCoverageState::Partial
     {
@@ -588,6 +606,86 @@ async fn handle_storage_report(
         );
     }
     Ok(())
+}
+
+/// The footprint section: every entry against its bound, largest first, then
+/// the profile total.
+fn footprint_lines(
+    footprint: &tracedecay_maintenance::retention::footprint::ProfileFootprintV1,
+) -> Vec<String> {
+    let line = |label: &str, bytes: u64, bound: u64| {
+        let over = if bytes > bound { " OVER BOUND" } else { "" };
+        format!(
+            "    {label}: {} of {}{over}",
+            format_bytes(bytes),
+            format_bytes(bound)
+        )
+    };
+    let mut entries = footprint.entries.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| right.bytes.cmp(&left.bytes).then(left.key.cmp(&right.key)));
+    let floor = if footprint.full_profile_size().state
+        == tracedecay_maintenance::retention::storage_report::ProfileTotalCoverageStateV1::Partial
+    {
+        " (at least)"
+    } else {
+        ""
+    };
+    std::iter::once(format!("  footprint{floor}:"))
+        .chain(
+            entries
+                .into_iter()
+                .map(|entry| line(&entry.key, entry.bytes, entry.bound_bytes)),
+        )
+        .chain(std::iter::once(line(
+            "profile total",
+            footprint.total_bytes,
+            footprint.total_bound_bytes,
+        )))
+        .collect()
+}
+
+#[cfg(test)]
+mod footprint_output_tests {
+    use tracedecay_maintenance::retention::footprint::{
+        ProfileFamilyV1, ProfileFootprintEntryV1, ProfileFootprintV1,
+    };
+
+    use super::footprint_lines;
+
+    fn entry(key: &str, bytes: u64, bound_bytes: u64) -> ProfileFootprintEntryV1 {
+        ProfileFootprintEntryV1 {
+            key: key.to_owned(),
+            family: ProfileFamilyV1::Other,
+            bytes,
+            unavailable_entry_count: 0,
+            bound_bytes,
+            project: None,
+            kinds: None,
+        }
+    }
+
+    #[test]
+    fn footprint_lists_entries_largest_first_and_marks_overages() {
+        let footprint = ProfileFootprintV1 {
+            entries: vec![
+                entry("maintenance", 10, 64),
+                entry("projects/proj_a/tracedecay.db-wal", 2_048, 1_024),
+            ],
+            total_bytes: 2_058,
+            unavailable_entry_count: 0,
+            truncated: false,
+            total_bound_bytes: 4_096,
+        };
+        assert_eq!(
+            footprint_lines(&footprint),
+            [
+                "  footprint:",
+                "    projects/proj_a/tracedecay.db-wal: 2.0 KB of 1.0 KB OVER BOUND",
+                "    maintenance: 10 B of 64 B",
+                "    profile total: 2.0 KB of 4.0 KB",
+            ]
+        );
+    }
 }
 
 #[cfg(test)]

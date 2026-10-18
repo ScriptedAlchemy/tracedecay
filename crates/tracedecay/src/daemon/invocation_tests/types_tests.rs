@@ -161,6 +161,11 @@ async fn hook_orchestration_backpressures_without_waiting() {
     );
 }
 
+thread_local! {
+    /// Set while this thread is inside a hook admission call.
+    static ADMITTING_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[tokio::test]
 async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
     let ran_synchronously = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -171,7 +176,12 @@ async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
         let ran = Arc::clone(&work_ran);
         let ran_synchronously = Arc::clone(&work_ran_synchronously);
         async move {
-            ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
+            // The work runs on a native worker and may start before the
+            // admitting thread resumes, so only a run on the admitting
+            // thread inside the call counts as synchronous.
+            if ADMITTING_HOOK.get() {
+                ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
+            }
             ran.notify_one();
         }
     })
@@ -180,25 +190,25 @@ async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
         [3; 16], [5; 16], &runtime
     ));
 
-    assert_eq!(
-        admit_registered_hook_orchestration(
-            hook_envelope(HookEventV2::SavedEdit {
-                file_id: [7; 16],
-                changed_range_count: 1,
-            }),
-            hook_binding(),
-            None,
-            1,
-            false,
-            None,
-        ),
-        HookOrchestrationAdmissionV1::Enqueued
+    ADMITTING_HOOK.set(true);
+    let admission = admit_registered_hook_orchestration(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        hook_binding(),
+        None,
+        1,
+        false,
+        None,
     );
+    ADMITTING_HOOK.set(false);
+    assert_eq!(admission, HookOrchestrationAdmissionV1::Enqueued);
+    ran.notified().await;
     assert!(
         !ran_synchronously.load(std::sync::atomic::Ordering::Acquire),
         "hook admission must return before daemon-owned provider or model work begins"
     );
-    ran.notified().await;
     unregister_hook_orchestration_runtime([3; 16], [5; 16], &runtime);
 }
 
@@ -547,33 +557,34 @@ async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {
         "the failed cycle must not acknowledge the durable admission"
     );
 
-    // The spool consumer replays the identical envelope until the producer
-    // work genuinely terminates. A replay that races the settling failure
-    // joins it and is dropped with it, so the consumer's next pass retries.
-    let replay_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while acknowledged.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-        assert!(
-            std::time::Instant::now() < replay_deadline,
-            "a replayed admission must complete a fresh cycle after a retryable failure"
-        );
-        let replay_acknowledged = Arc::clone(&acknowledged);
-        assert_eq!(
-            admit_registered_hook_orchestration(
-                envelope.clone(),
-                binding.clone(),
-                Some(hook_lifecycle()),
-                1,
-                false,
-                Some(Arc::new(move || {
-                    replay_acknowledged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                })),
-            ),
-            HookOrchestrationAdmissionV1::Enqueued
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert!(
-        attempts.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+    // One replay of the settled failure. Replaying again while that cycle is
+    // still running would only join it, and past the coalescing bound a join
+    // is backpressured by design.
+    let replay_acknowledged = Arc::clone(&acknowledged);
+    let replay_settled = Arc::new(tokio::sync::Notify::new());
+    let replay_terminal = Arc::clone(&replay_settled);
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            envelope.clone(),
+            binding.clone(),
+            Some(hook_lifecycle()),
+            1,
+            false,
+            Some(Arc::new(move || {
+                replay_acknowledged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                replay_terminal.notify_one();
+            })),
+        ),
+        HookOrchestrationAdmissionV1::Enqueued,
+        "the settled failure must free its slot for the replay"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), replay_settled.notified())
+        .await
+        .expect("a replayed admission must complete a fresh cycle after a retryable failure");
+    assert_eq!(acknowledged.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        2,
         "acknowledgement requires a fresh successful cycle, not the settled failure"
     );
     unregister_hook_orchestration_runtime([23; 16], [25; 16], &runtime);
@@ -662,8 +673,10 @@ async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     changed.notify_all();
+    // The successor holds capacity across this wait, so a terminal that waits
+    // on it never arrives. The bound only turns that into a failure.
     let terminal = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
+        std::time::Duration::from_secs(10),
         first_terminal.notified(),
     )
     .await;
@@ -732,8 +745,10 @@ async fn superseded_queued_work_emits_its_own_receipt_terminal() {
         runtime.admit(request([3; 16], None)),
         HookOrchestrationAdmissionV1::Enqueued
     );
+    // The first operation holds capacity across this wait, so a terminal that
+    // waits for capacity never arrives. The bound only turns that into a failure.
     let terminal = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
+        std::time::Duration::from_secs(10),
         queued_terminal.notified(),
     )
     .await;

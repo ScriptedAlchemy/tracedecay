@@ -1090,7 +1090,7 @@ impl<A> FixedDaemonGitIndexExecutor<A> {
 
 impl<A> GitIndexNativeExecutor for FixedDaemonGitIndexExecutor<A>
 where
-    A: GitIndexPreviewAssembler,
+    A: GitIndexPreviewAssembler + Sync,
 {
     #[tracing::instrument(name = "daemon.git.tx.native_preview", level = "trace", skip_all)]
     fn preview(
@@ -1220,7 +1220,7 @@ where
 
 impl<A> GitIndexRecoveryExecutor for FixedDaemonGitIndexExecutor<A>
 where
-    A: GitIndexPreviewAssembler,
+    A: GitIndexPreviewAssembler + Sync,
 {
     fn reconcile(
         &self,

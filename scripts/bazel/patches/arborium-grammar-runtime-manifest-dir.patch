@@ -1,0 +1,11 @@
+--- a/build.rs
++++ b/build.rs
+@@ -12,7 +12,7 @@
+     //       grammar.json
+     //       node-types.json
+     //       tree_sitter/* (generated headers)
+-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
++    let manifest_dir = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+ 
+     let src_dir = manifest_dir.join("grammar/src");
+     let grammar_dir = manifest_dir.join("grammar");

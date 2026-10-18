@@ -24,7 +24,7 @@ use tracedecay_rusqlite_runtime::workflow::{
 
 use crate::registered_workflow_store;
 
-use registered_workflow_store::RegisteredWorkflowStore;
+use registered_workflow_store::{RegisteredWorkflowStore, WorkflowJobStorage};
 
 use tracedecay_domain::test_fixtures::id;
 
@@ -119,8 +119,8 @@ fn runtime_frontier() -> WorkHandoffFrontierV1 {
     .unwrap()
 }
 
-fn authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
-    WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap()
+fn authority(store: &RegisteredWorkflowStore) -> WorkflowJobStorage {
+    WorkflowJobStorage::attach(store)
 }
 
 #[derive(Clone, Copy)]
@@ -295,7 +295,10 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
         });
 
     assert!(matches!(
-        WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()),
+        tracedecay_rusqlite_runtime::native_runtime::block_on(
+            WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql())
+        )
+        .expect("native runtime"),
         Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
     ));
     assert_eq!(
@@ -352,7 +355,10 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
             connection.execute_batch(mutation).unwrap();
         });
         assert!(matches!(
-            WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()),
+            tracedecay_rusqlite_runtime::native_runtime::block_on(
+                WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql())
+            )
+            .expect("native runtime"),
             Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
         ));
     }
@@ -636,8 +642,7 @@ fn definition_source_journal_and_handoff_survive_registered_store_restart() {
     );
 
     let store = store.restart("workflow-restart");
-    let authority =
-        WorkflowSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
+    let authority = WorkflowJobStorage::attach(&store);
     assert_eq!(
         WorkflowEffectAuthorityPortV1::execute_effect(
             &authority,
@@ -1255,7 +1260,7 @@ fn concurrent_exact_replays_all_return_the_committed_terminal() {
     assert_eq!(store.count("workflow_definition_source_journal"), 1);
 }
 
-fn register(authority: &WorkflowSqliteAuthority, definition: &WorkflowDefinition, input: char) {
+fn register(authority: &WorkflowJobStorage, definition: &WorkflowDefinition, input: char) {
     let identity = effect_identity(
         WorkflowEffectOperationV1::RegisterDefinition,
         "actor.workflow.source",
@@ -1285,7 +1290,7 @@ fn lifecycle_command(
 }
 
 fn lifecycle_effect(
-    authority: &WorkflowSqliteAuthority,
+    authority: &WorkflowJobStorage,
     operation: WorkflowEffectOperationV1,
     input: char,
     command: WorkflowDefinitionLifecycleCommand,

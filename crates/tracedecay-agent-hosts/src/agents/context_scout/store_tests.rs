@@ -100,6 +100,39 @@ pub(super) fn mutation_binding(
     }
 }
 
+async fn deliver_by_lease(
+    store: &ProjectContextScoutDurableStoreV1,
+    work: ContextScoutWorkV1,
+    envelope_id: [u8; 16],
+    lease: ContextScoutLeaseV1,
+    configuration_revision: [u8; 32],
+    receipt: &ContextScoutDeliveryReceiptV1,
+    key: &str,
+) -> ContextScoutDurableStoreOutcomeV1 {
+    let mutation = ContextScoutPublicMutationV1::Delivery {
+        work,
+        envelope_id,
+        lease,
+        configuration_revision,
+        receipt: receipt.clone(),
+    };
+    let binding = mutation_binding(&mutation, key);
+    match store.commit_public_mutation(binding, mutation).await {
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(settlement) => {
+            match settlement.result {
+                ContextScoutMutationResultV1::Delivery { outcome, .. } => outcome,
+                other => panic!("delivery settled as {other:?}"),
+            }
+        }
+        ContextScoutMutationSettlementOutcomeV1::Unavailable => {
+            ContextScoutDurableStoreOutcomeV1::Unavailable
+        }
+        ContextScoutMutationSettlementOutcomeV1::IdempotencyConflict => {
+            panic!("delivery key {key} is bound to another input")
+        }
+    }
+}
+
 #[tokio::test]
 async fn public_claim_retains_empty_and_changed_settlements_for_exact_replay() {
     let (_temporary, database) = database().await;
@@ -421,15 +454,16 @@ async fn delivery_by_lease_refuses_foreign_and_stale_claim_authority() {
     };
 
     assert_eq!(
-        store
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                lease(53, 20),
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &store,
+            pending.work,
+            pending.envelope.envelope_id,
+            lease(53, 20),
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-1",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Superseded
     );
     assert!(matches!(
@@ -444,27 +478,29 @@ async fn delivery_by_lease_refuses_foreign_and_stale_claim_authority() {
         ContextScoutDurableClaimOutcomeV1::Claimed(_)
     ));
     assert_eq!(
-        store
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                stale_lease,
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &store,
+            pending.work,
+            pending.envelope.envelope_id,
+            stale_lease,
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-2",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Superseded
     );
     assert_eq!(
-        store
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                current_lease,
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &store,
+            pending.work,
+            pending.envelope.envelope_id,
+            current_lease,
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-3",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Stored
     );
 }
@@ -495,15 +531,16 @@ async fn delivery_by_lease_persists_exact_receipt_and_idempotent_authority() {
         outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
     assert_eq!(
-        store
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                delivery_lease,
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &store,
+            pending.work,
+            pending.envelope.envelope_id,
+            delivery_lease,
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-4",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Stored
     );
     drop(store);
@@ -511,27 +548,29 @@ async fn delivery_by_lease_persists_exact_receipt_and_idempotent_authority() {
     let restarted =
         ProjectContextScoutDurableStoreV1::from_project_database(database, project_id).unwrap();
     assert_eq!(
-        restarted
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                delivery_lease,
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &restarted,
+            pending.work,
+            pending.envelope.envelope_id,
+            delivery_lease,
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-5",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Duplicate
     );
     assert_eq!(
-        restarted
-            .record_delivery_by_lease(
-                pending.work,
-                pending.envelope.envelope_id,
-                lease(63, 40),
-                pending.envelope.configuration_revision,
-                &receipt,
-            )
-            .await,
+        deliver_by_lease(
+            &restarted,
+            pending.work,
+            pending.envelope.envelope_id,
+            lease(63, 40),
+            pending.envelope.configuration_revision,
+            &receipt,
+            "delivery-by-lease-6",
+        )
+        .await,
         ContextScoutDurableStoreOutcomeV1::Superseded
     );
     let mut foreign_address = pending.work.address;

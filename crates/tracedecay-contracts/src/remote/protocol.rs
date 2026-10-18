@@ -4,6 +4,7 @@
 //! deliberately absent from these serializable payloads.
 
 use std::collections::BTreeSet;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -71,17 +72,25 @@ pub trait RemoteProtocolPortV1<Request> {
         &self,
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
-    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError>;
+    ) -> RemoteProtocolFutureV1<'_, Self::Output>;
 
     fn execute_controlled(
         &self,
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
         _control: RemoteProtocolExecutionControlV1,
-    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
         self.execute(request, credential)
     }
 }
+
+pub type RemoteProtocolFutureV1<'a, T> = Pin<
+    Box<
+        dyn Future<Output = Result<RemoteProtocolResponseV1<T>, ApplicationContractError>>
+            + Send
+            + 'a,
+    >,
+>;
 
 #[derive(Clone, Debug)]
 pub struct RemoteProtocolExecutionControlV1 {
@@ -112,7 +121,7 @@ impl<Port: ?Sized> RemoteProtocolServiceV1<Port> {
         Self { port }
     }
 
-    pub fn execute<Request>(
+    pub async fn execute<Request>(
         &self,
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
@@ -125,10 +134,10 @@ impl<Port: ?Sized> RemoteProtocolServiceV1<Port> {
         request
             .body
             .validate_remote_protocol_body(request.sent_at)?;
-        self.port.execute(request, credential)
+        self.port.execute(request, credential).await
     }
 
-    pub fn execute_controlled<Request>(
+    pub async fn execute_controlled<Request>(
         &self,
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
@@ -142,7 +151,9 @@ impl<Port: ?Sized> RemoteProtocolServiceV1<Port> {
         request
             .body
             .validate_remote_protocol_body(request.sent_at)?;
-        self.port.execute_controlled(request, credential, control)
+        self.port
+            .execute_controlled(request, credential, control)
+            .await
     }
 
     pub fn execute_enrollment(
@@ -619,10 +630,10 @@ mod tests {
             &self,
             request: RemoteProtocolRequestV1<EmptyTestBody>,
             _credential: OpaqueRemoteCredential,
-        ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
+        ) -> RemoteProtocolFutureV1<'_, Self::Output> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let request_id = request.request_id;
-            RemoteProtocolResponseV1::new(
+            Box::pin(std::future::ready(RemoteProtocolResponseV1::new(
                 request_id.clone(),
                 CurrentRemoteAuthorityStateV1::Unavailable {
                     reason:
@@ -635,12 +646,12 @@ mod tests {
                     RemoteProtocolFailureV1::AuthorityUnavailable,
                 )
                 .unwrap()),
-            )
+            )))
         }
     }
 
-    #[test]
-    fn generic_protocol_service_delegates_once_to_application_port() {
+    #[asupersync::test]
+    async fn generic_protocol_service_delegates_once_to_application_port() {
         let calls = Arc::new(AtomicUsize::new(0));
         let service = RemoteProtocolServiceV1::new(Arc::new(FakeProtocolPort {
             calls: Arc::clone(&calls),
@@ -666,6 +677,7 @@ mod tests {
                 )
                 .unwrap(),
             )
+            .await
             .unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);

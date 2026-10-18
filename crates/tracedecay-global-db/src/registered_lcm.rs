@@ -350,8 +350,9 @@ impl RegisteredGlobalDb {
         let mut response = compressed.await?.response;
         check_execution(control)?;
         before_commit()?;
-        transaction.commit().await?;
-        payload_rollback.disarm();
+        transaction
+            .commit_with_on_commit(move || payload_rollback.disarm())
+            .await?;
         if !response.summary_nodes.is_empty() {
             check_execution(control)?;
             SessionTemporalAccess::new(self)
@@ -490,9 +491,8 @@ impl RegisteredGlobalDb {
         before_commit()?;
         let committed: Pin<
             Box<dyn Future<Output = tracedecay_runtime_core::db::engine::Result<()>> + Send + '_>,
-        > = Box::pin(transaction.commit());
+        > = Box::pin(transaction.commit_with_on_commit(move || payload_rollback.disarm()));
         committed.await?;
-        payload_rollback.disarm();
         // Retained convergence publishes the durable relation effect journal
         // atomically with the summary, lifecycle frontier, and queue outcome.
         // Applying that potentially session-wide graph is recovered by the
