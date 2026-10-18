@@ -751,6 +751,15 @@ changes a file that holds memory.
   session-memory, schema stages and invariants, `remote/*`, graph publication),
   then deletion of the interactive APIs in runtime-core and global-db, and last in
   rusqlite-runtime.
+  - Slice 2 (2026-10-18, #4248). runtime-core's
+    `WriteTx` implements `QueryExecutor` and `Executor` over the job transaction,
+    so a helper written against `&impl Executor` runs inside a job unchanged.
+    `Database::transact` and `transact_bulk` check the write scope at begin and
+    advance `graph_transaction_generation` inside the job, as a committed
+    `DatabaseWriteTransaction` does, and hold the writer lane so they queue
+    behind interactive writers instead of retrying `Busy`. `set_metadata`, the
+    retrieval-anchor disposition and derivative writes, and
+    `execute_write_engine` and `execute_write_batch` run as jobs.
 - #4138 (2026-10-16). Shutdown store close waits up to 3 s for leases to drain
   before deciding a store's WAL cannot be truncated. Under load, owners joined
   before store close could still be unwinding the tasks that held their leases,
