@@ -21,7 +21,7 @@ use tracedecay_contracts::{
     AddWorkTaskRequestV1, CreateWorkProductRequestV1, OpaqueCursor, WorkGraphReadRequestV1,
     WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
     WorkProductAuthorizedRelationScopeV1, WorkProductExpectedAuthorityV1,
-    WorkProductMutationIdentityV1, WorkProductSelectionScopeV1,
+    WorkProductMutationIdentityV1, WorkProductSelectionScopeV1, WorkStorageFailureV1,
 };
 use tracedecay_domain::{
     CursorBindingMismatchV1, ProjectId, TaskId, UtcMicros, WorkGraphVersionV1,
@@ -192,7 +192,7 @@ fn a_verified_graph_insert_failure_rolls_back_the_journal_event() {
                 .expect("install verified graph failure trigger");
         });
 
-    create(
+    let failure = create(
         &store,
         "command.work-product.atomic-rollback",
         UtcMicros(100),
@@ -200,8 +200,103 @@ fn a_verified_graph_insert_failure_rolls_back_the_journal_event() {
     )
     .expect_err("the verified graph failure must reject the whole atomic append");
 
+    // A trigger abort is a storage failure, not an expected-revision or
+    // uniqueness conflict: it must not tell the caller its graph is stale.
+    assert_eq!(
+        failure,
+        WorkProductApplicationErrorV1::EventAuthorityUnavailable
+    );
     assert_eq!(store.count("work_product_events_v1"), 0);
     assert_eq!(store.count("work_product_graph_versions_v1"), 0);
+}
+
+#[test]
+fn a_uniqueness_violation_on_the_journal_insert_is_a_version_conflict() {
+    // Another writer claims the sequence between this append's tail read and
+    // its insert, which the primary key turns into a constraint violation.
+    let store =
+        RegisteredWorkStore::start_with_setup("work-product-insert-conflict", |connection| {
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER rival_claims_sequence
+                     BEFORE INSERT ON work_product_events_v1
+                     BEGIN
+                       INSERT INTO work_product_events_v1 (
+                         owner_brain_id, owner_profile_id, sequence, event_id, command_id,
+                         canonical_input_digest, expected_graph_version, result_graph_version,
+                         occurred_at, event_payload
+                       ) VALUES (
+                         NEW.owner_brain_id, NEW.owner_profile_id, NEW.sequence, 'event.rival',
+                         'command.rival', 'digest.rival', NULL, 9999, 0, '{}'
+                       );
+                     END;",
+                )
+                .expect("install rival writer trigger");
+        });
+
+    let conflict = create(
+        &store,
+        "command.work-product.insert-conflict",
+        UtcMicros(100),
+        vec![item("task.only", &[], 2)],
+    )
+    .expect_err("a lost race for the sequence must reject the append");
+
+    assert_eq!(conflict, WorkProductApplicationErrorV1::VersionConflict);
+    assert_eq!(store.count("work_product_events_v1"), 0);
+    assert_eq!(store.count("work_product_graph_versions_v1"), 0);
+}
+
+#[test]
+fn a_journal_row_that_does_not_decode_is_invalid_stored_data_not_an_absent_graph() {
+    let store = RegisteredWorkStore::start("work-product-undecodable-journal");
+    let first = create(
+        &store,
+        "command.work-product.undecodable-journal",
+        UtcMicros(100),
+        vec![item("task.only", &[], 2)],
+    )
+    .expect("create the work product");
+    assert!(read_current(&store).is_ok());
+
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE work_product_events_v1 SET event_payload = 'not json'",
+                [],
+            )
+            .expect("corrupt the stored event payload");
+    });
+
+    assert_eq!(
+        read_current(&store).expect_err("an undecodable journal is not a readable graph"),
+        WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid)
+    );
+    // The mutation path reads the same journal and must say the same thing,
+    // rather than describing the corrupt store as a stale graph.
+    let mut next = mutation(
+        "command.work-product.undecodable-journal.add",
+        UtcMicros(200),
+    );
+    next.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+        verified_version: first.verified_graph_version().clone(),
+    };
+    let append = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.other", &[], 2),
+                mutation: next,
+            },
+        )
+        .expect_err("an undecodable journal cannot be appended to");
+    assert_eq!(
+        append,
+        WorkProductApplicationErrorV1::Storage(WorkStorageFailureV1::StoredDataInvalid)
+    );
+    assert_eq!(store.count("work_product_events_v1"), 1);
 }
 
 #[test]
