@@ -153,6 +153,15 @@ fn is_global_error(line: &str) -> bool {
     line.starts_with("error TS")
 }
 
+// Select the header before validating its fields: a malformed location or code
+// must not let a diagnostic-shaped fragment in the message become a new header.
+fn diagnostic_header_end(line: &str) -> Option<usize> {
+    line.match_indices("):").find_map(|(close, _)| {
+        let (level, _) = line[close + 2..].trim_start().split_once(' ')?;
+        is_diagnostic_level(level).then_some(close)
+    })
+}
+
 /// Parse tsc stdout without silently losing a diagnostic-looking header.
 #[tracing::instrument(
     name = "compile_diagnostics.typescript.parse",
@@ -166,10 +175,7 @@ pub fn parse_tsc_output(stdout: &str) -> Result<Vec<Diagnostic>> {
             out.push(diag);
             continue;
         }
-        if is_global_error(line.trim_start())
-            || line.contains(": error TS")
-            || line.contains(": warning TS")
-        {
+        if is_global_error(line.trim_start()) || diagnostic_header_end(line).is_some() {
             return Err(TraceDecayError::Config {
                 message: format!("unrecognized TypeScript diagnostic: {line}"),
             });
@@ -188,44 +194,40 @@ pub fn parse_tsc_output(stdout: &str) -> Result<Vec<Diagnostic>> {
 /// Parse a single tsc output line into a `Diagnostic`. Returns `None` for
 /// non-diagnostic lines or malformed locations/codes.
 pub fn parse_tsc_line(line: &str) -> Option<Diagnostic> {
-    // Filenames and diagnostic messages can both contain parentheses.
-    // Recognize the location together with its following diagnostic header,
-    // rather than choosing the first or last parenthesis in the whole line.
-    line.match_indices("):").find_map(|(close, _)| {
-        let before = &line[..close];
-        let open = before.rfind('(')?;
-        let file = &before[..open];
-        if file.is_empty() {
-            return None;
-        }
-        let (line_no, column) = before[open + 1..].split_once(',')?;
-        let line_no = line_no.trim().parse::<u32>().ok()?;
-        let column = column.trim().parse::<u32>().ok()?;
-        if line_no == 0 || column == 0 {
-            return None;
-        }
+    let close = diagnostic_header_end(line)?;
+    let before = &line[..close];
+    let open = before.rfind('(')?;
+    let file = &before[..open];
+    if file.is_empty() {
+        return None;
+    }
+    let (line_no, column) = before[open + 1..].split_once(',')?;
+    let line_no = line_no.trim().parse::<u32>().ok()?;
+    let column = column.trim().parse::<u32>().ok()?;
+    if line_no == 0 || column == 0 {
+        return None;
+    }
 
-        let after = line[close + 2..].trim_start();
-        let (level, details) = after.split_once(' ')?;
-        if !is_diagnostic_level(level) {
-            return None;
-        }
-        let (code, message) = details.split_once(':')?;
-        let digits = code.strip_prefix("TS")?;
-        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
+    let after = line[close + 2..].trim_start();
+    let (level, details) = after.split_once(' ')?;
+    if !is_diagnostic_level(level) {
+        return None;
+    }
+    let (code, message) = details.split_once(':')?;
+    let digits = code.strip_prefix("TS")?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
 
-        Some(Diagnostic {
-            file: file.to_owned(),
-            line_start: line_no,
-            line_end: line_no,
-            column,
-            level: level.to_owned(),
-            code: code.to_owned(),
-            message: message.trim().to_owned(),
-            driver: "typescript",
-        })
+    Some(Diagnostic {
+        file: file.to_owned(),
+        line_start: line_no,
+        line_end: line_no,
+        column,
+        level: level.to_owned(),
+        code: code.to_owned(),
+        message: message.trim().to_owned(),
+        driver: "typescript",
     })
 }
 
@@ -336,6 +338,30 @@ src/b.ts(2,2): warning TS6133: Second.
             "src/a.ts(1,1): error TS2322: First.\nsrc/b.ts(2,nope): error TS1005: Second.\n";
         let error = parse_tsc_output(stdout).expect_err("incomplete report");
         assert!(error.to_string().contains("src/b.ts"));
+    }
+
+    #[test]
+    fn diagnostic_looking_message_cannot_replace_a_malformed_header() {
+        for line in [
+            "a.ts(1,nope): error TS2322: Related text (9,9): error TS9999: detail",
+            "a.ts(1,1): error TSnope: Related text (9,9): error TS9999: detail",
+        ] {
+            assert!(parse_tsc_line(line).is_none(), "{line}");
+            assert!(parse_tsc_output(line).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_looking_quoted_types_remain_continuation_text() {
+        let stdout = "a.ts(1,1): error TS2322: Type mismatch.\n  Type '\"label: error TS9999\"' is not assignable to type '\"other: warning TS9998\"'.";
+        let diagnostics = parse_tsc_output(stdout).expect("quoted literal type");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].file, "a.ts");
+        assert_eq!(diagnostics[0].code, "TS2322");
+        assert_eq!(
+            diagnostics[0].message,
+            "Type mismatch.   Type '\"label: error TS9999\"' is not assignable to type '\"other: warning TS9998\"'."
+        );
     }
 
     fn block<T>(future: impl Future<Output = T>) -> T {
