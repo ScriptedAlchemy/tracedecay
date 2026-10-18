@@ -1687,6 +1687,7 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
                 .is_some_and(|task| !task.is_finished()),
         )
     };
+    drop((cg, server));
     engine.shutdown_all().await;
 
     assert_eq!(timed_out, super::super::MaintenanceRekeyOutcome::Retiring);
