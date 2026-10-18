@@ -777,7 +777,7 @@ changes a file that holds memory.
   `global.db` rows) or a store the daemon does not mount (orphan collection's
   memory check), and neither holds a read slot on a live file. It goes with step
   8, where a project directory describes itself and memory has its own file.
-- Step 7, shared pool (2026-10-17, branch `refactor/storage-shared-executor`). Every
+- Step 7, shared pool (2026-10-17, #4242). Every
   attached file's writer and readers are tasks on one fixed pool of
   `tracedecay-store-N` threads, so the thread count no longer grows with the file
   count. N defaults to the host's available parallelism clamped to 6..16, not the
