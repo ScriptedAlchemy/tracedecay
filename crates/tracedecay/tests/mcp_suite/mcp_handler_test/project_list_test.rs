@@ -363,14 +363,7 @@ async fn project_list_reports_a_broken_registry_as_a_tool_error() {
     .expect("mcp server");
 
     let response = tools_call(&server, json!({"format": "json"})).await;
-    assert_eq!(
-        crate::support::tool_refusal(&response),
-        json!({
-            "kind": "execution_failed",
-            "code": "graph_tool.failed",
-            "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
-        })
-    );
+    crate::support::assert_missing_alias_table_refusal(&response);
 }
 
 fn registered(
