@@ -186,9 +186,11 @@ impl Options {
                 other => return Err(format!("unrecognized argument {other:?}")),
             }
         }
-        let corpus_root = corpus_root
-            .or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from))
-            .unwrap_or_else(default_corpus_root);
+        let corpus_root =
+            match corpus_root.or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from)) {
+                Some(root) => root,
+                None => default_corpus_root()?,
+            };
         let replicas = match replicas {
             Some(replicas) => replicas,
             None => match std::env::var(REPLICAS_ENV) {

@@ -409,6 +409,8 @@ pub use production_harness::capture_exact_git_snapshot_for_test;
 mod profile_configuration;
 mod profile_owner;
 mod profile_retained;
+#[cfg(unix)]
+mod profile_watch;
 mod projectless;
 mod remote_deletion;
 mod remote_drain;
@@ -502,7 +504,7 @@ mod wire_io;
 mod work_evidence_retrieval_tests;
 use wire_io::{read_line_handling_wire_oversized, write_daemon_response};
 
-pub use bootstrap::run_foreground;
+pub use bootstrap::{DaemonRunEnd, PROFILE_LOST_EXIT_CODE, run_foreground};
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

@@ -261,6 +261,24 @@ pub(crate) fn tool_refusal(response: &Value) -> Value {
     })
 }
 
+/// Asserts a refusal that names the missing `project_aliases` table. Which
+/// phase SQLite reports it in, prepare or advance, depends on whether the
+/// reader already cached that statement, so the phase is not part of the
+/// contract.
+pub(crate) fn assert_missing_alias_table_refusal(response: &Value) {
+    let refusal = tool_refusal(response);
+    assert_eq!(refusal["kind"], "execution_failed", "{refusal}");
+    assert_eq!(refusal["code"], "graph_tool.failed", "{refusal}");
+    let message = refusal["message"].as_str().expect("refusal message");
+    assert!(
+        ["prepare", "advance"].iter().any(|phase| message
+            == format!(
+                "database error: SQLite {phase} query failed: no such table: project_aliases (operation: resolve project identity alias)"
+            )),
+        "{message}"
+    );
+}
+
 /// Polls the daemon-owned code-index search authority until an exact
 /// generation is bound and its native code graph is serving.
 ///

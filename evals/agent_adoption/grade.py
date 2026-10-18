@@ -48,7 +48,7 @@ CONDITIONS = ("full", "no-hints", "no-skills", "bare", "cli-only")
 KNOWN_HOSTS = ("claude", "codex")
 
 # Distinctive fragments of the hook-injected tool hints. These MIRROR the
-# `message`/`context` strings in crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs CATEGORY_SPECS: if that
+# `message`/`context` strings in crates/tracedecay-policy/src/intent_catalog.rs INTENT_CATALOG: if that
 # table's wording changes, refresh these. They are chosen to be specific enough
 # that they only appear in an injected hint, never in a raw MCP tool
 # *description* or the CLAUDE.md steering block, so matching one in the
@@ -88,7 +88,7 @@ CH_CLI = "cli-only"                     # plugin guidance drove supported CLI fa
 CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_CLI, CH_NONE)
 
 # The HINT_SIGNATURES above are hand-mirrored fragments of the hook messages in
-# crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. That mirror is load-bearing: if the source wording
+# crates/tracedecay-policy/src/intent_catalog.rs. That mirror is load-bearing: if the source wording
 # drifts and a signature stops matching, the hint text still fires in live
 # transcripts but grade.py no longer recognizes it, so genuinely hint-driven
 # adoptions get silently misfiled as `steering-or-description` and the whole
@@ -96,7 +96,7 @@ CHANNELS = (CH_HINT, CH_SKILL, CH_STEERING, CH_UNPROMPTED, CH_CLI, CH_NONE)
 # turn the README's "refresh these if the table changes" footnote into an
 # enforced check; run.sh runs it before spending a single live token.
 HINT_SOURCE_REL = os.path.join(
-    "crates", "tracedecay-agent-hosts", "src", "hooks", "tool_hints.rs"
+    "crates", "tracedecay-policy", "src", "intent_catalog.rs"
 )
 
 # The optional repeated-query hint is its own MCP result text block, starting
@@ -1291,7 +1291,7 @@ def main() -> int:
     ap.add_argument(
         "--check-hints",
         action="store_true",
-        help="Only verify HINT_SIGNATURES still match crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs; "
+        help="Only verify HINT_SIGNATURES still match crates/tracedecay-policy/src/intent_catalog.rs; "
         "exit non-zero on drift. Skips (exit 0) if the source tree is absent.",
     )
     args = ap.parse_args()
@@ -1311,7 +1311,7 @@ def main() -> int:
         if drift:
             print("HINT-SIGNATURE DRIFT DETECTED:", file=sys.stderr)
             for sig in drift:
-                print(f"  - no longer in tool_hints.rs: {sig!r}", file=sys.stderr)
+                print(f"  - no longer in intent_catalog.rs: {sig!r}", file=sys.stderr)
             print(
                 "Channel attribution would misclassify hint-driven adoptions. "
                 f"Refresh HINT_SIGNATURES in grade.py against {src}.",
