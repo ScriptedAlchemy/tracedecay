@@ -2616,7 +2616,7 @@ async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polli
                 resident_bytes: bytes,
                 unreclaimable_bytes: bytes,
                 swapped_bytes: 0,
-                cgroup_committed_bytes: None,
+                cgroup_headroom_bytes: None,
             })
         }),
     ));
