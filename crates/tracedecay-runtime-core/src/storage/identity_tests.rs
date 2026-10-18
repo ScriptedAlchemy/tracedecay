@@ -173,3 +173,171 @@ mod enrolled_project_roots_tests {
         assert_eq!(roots.len(), 0);
     }
 }
+
+#[cfg(test)]
+mod identity_anchor_tests {
+    use super::*;
+    use tracedecay_domain::git::GitOidV1;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("utf-8 git output")
+    }
+
+    fn commit(dir: &Path, file: &str) {
+        fs::write(dir.join(file), file).expect("write fixture file");
+        git(dir, &["add", file]);
+        git(dir, &["commit", "-q", "-m", file]);
+    }
+
+    /// A repository whose `main` merges two unrelated histories.
+    fn two_root_repository(temp: &Path) -> PathBuf {
+        let root = temp.join("two-roots");
+        fs::create_dir_all(root.join("nested")).expect("create repository");
+        git(&root, &["init", "-q", "--initial-branch=main"]);
+        commit(&root, "first.txt");
+        git(&root, &["checkout", "-q", "--orphan", "other"]);
+        git(&root, &["rm", "-q", "-r", "--cached", "."]);
+        commit(&root, "second.txt");
+        git(&root, &["checkout", "-q", "-f", "main"]);
+        git(
+            &root,
+            &[
+                "merge",
+                "-q",
+                "--allow-unrelated-histories",
+                "-m",
+                "merge",
+                "other",
+            ],
+        );
+        root
+    }
+
+    fn root_commits(root: &Path) -> Vec<GitOidV1> {
+        let mut roots = git(root, &["rev-list", "--max-parents=0", "HEAD"])
+            .lines()
+            .map(|line| GitOidV1::new(line.to_owned()).expect("root oid"))
+            .collect::<Vec<_>>();
+        roots.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        roots
+    }
+
+    #[test]
+    fn every_root_commit_of_a_merged_history_is_an_anchor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = two_root_repository(temp.path());
+        let roots = root_commits(&root);
+        assert_eq!(roots.len(), 2, "fixture must carry two unrelated roots");
+
+        assert_eq!(
+            repository_identity_anchors(&root),
+            roots
+                .iter()
+                .cloned()
+                .map(IdentityAnchor::RootCommit)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            IdentityAnchor::RootCommit(roots[0].clone()).alias_key(),
+            format!("git-root-commit:{}", roots[0].as_str())
+        );
+    }
+
+    #[test]
+    fn a_subdirectory_project_is_anchored_by_root_and_relative_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = two_root_repository(temp.path());
+        let anchors = repository_identity_anchors(&root.join("nested"));
+
+        assert_eq!(
+            anchors
+                .iter()
+                .map(IdentityAnchor::alias_key)
+                .collect::<Vec<_>>(),
+            root_commits(&root)
+                .iter()
+                .map(|root| format!("git-subproject:{}:nested", root.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_shallow_clone_is_anchored_by_its_normalized_remote() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let origin = two_root_repository(temp.path());
+        let url = format!("file://{}/", origin.display());
+        git(
+            temp.path(),
+            &["clone", "-q", "--depth", "1", &url, "shallow"],
+        );
+        let shallow = temp.path().join("shallow");
+        fs::create_dir(shallow.join("nested")).expect("create subproject");
+
+        assert_eq!(
+            repository_identity_anchors(&shallow),
+            vec![IdentityAnchor::Remote(
+                crate::git::normalize_git_remote_url(&url).expect("normalized remote")
+            )]
+        );
+        assert_eq!(
+            repository_identity_anchors(&shallow.join("nested")),
+            Vec::new(),
+            "one remote cannot tell subprojects of a repository apart"
+        );
+
+        git(temp.path(), &["clone", "-q", &url, "full"]);
+        let full = temp.path().join("full");
+        let mut expected = root_commits(&full)
+            .into_iter()
+            .map(IdentityAnchor::RootCommit)
+            .collect::<Vec<_>>();
+        expected.push(IdentityAnchor::Remote(
+            crate::git::normalize_git_remote_url(&url).expect("normalized remote"),
+        ));
+        assert_eq!(
+            repository_identity_anchors(&full),
+            expected,
+            "a full clone records its remote for later shallow clones"
+        );
+    }
+
+    #[test]
+    fn an_unborn_repository_has_no_anchors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        git(temp.path(), &["init", "-q"]);
+        assert_eq!(repository_identity_anchors(temp.path()), Vec::new());
+    }
+
+    #[test]
+    fn claiming_a_marker_never_overwrites_another_project() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = two_root_repository(temp.path());
+        assert!(write_repository_identity_marker(&root, "proj_foreign").unwrap());
+
+        assert!(!claim_repository_identity_marker(&root, "proj_local").unwrap());
+        assert_eq!(
+            read_repository_identity_marker(&root)
+                .unwrap()
+                .expect("marker")
+                .project_id,
+            "proj_foreign"
+        );
+        assert!(claim_repository_identity_marker(&root, "proj_foreign").unwrap());
+    }
+}

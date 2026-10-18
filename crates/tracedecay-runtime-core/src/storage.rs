@@ -486,7 +486,8 @@ mod profile_identity;
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use identity::pin_fixture_repository_identity;
 pub use identity::{
-    has_repository_identity_marker, read_repository_identity_marker, repository_identity_path,
+    IdentityAnchor, claim_repository_identity_marker, has_repository_identity_marker,
+    read_repository_identity_marker, repository_identity_anchors, repository_identity_path,
     write_repository_identity_marker,
 };
 pub use layout::{

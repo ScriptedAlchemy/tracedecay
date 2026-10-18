@@ -276,6 +276,58 @@ impl ProjectIdentityAliasKind {
     }
 }
 
+async fn alias_project_id(
+    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    alias: &str,
+) -> tracedecay_domain::errors::Result<Option<String>> {
+    const OPERATION: &str = "upsert code project";
+    let mut rows = transaction
+        .query(
+            "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
+            params![alias],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    else {
+        return Ok(None);
+    };
+    row.get::<String>(0)
+        .map(Some)
+        .map_err(|error| global_db_operation_error(OPERATION, error))
+}
+
+/// The registered `(canonical_root, git_common_dir)` of `project_id`.
+async fn registered_root(
+    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
+    project_id: &str,
+) -> tracedecay_domain::errors::Result<Option<(String, Option<String>)>> {
+    const OPERATION: &str = "upsert code project";
+    let mut rows = transaction
+        .query(
+            "SELECT canonical_root, git_common_dir FROM code_projects WHERE project_id = ?1",
+            params![project_id],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        row.get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        row.get::<Option<String>>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+    )))
+}
+
 /// Canonical identity key for a project path, including paths that no longer
 /// exist. Plain `canonicalize` fails for a checkout that has moved away, which
 /// would leave the raw (symlink-aliased) old path as the lookup key and miss
@@ -783,6 +835,11 @@ impl RegisteredGlobalDb {
                     super::repo_identity_aliases(canonical_git_common_dir.as_deref())
                         .into_iter()
                         .next();
+                let anchor_aliases =
+                    tracedecay_runtime_core::storage::repository_identity_anchors(project_root)
+                        .iter()
+                        .map(tracedecay_runtime_core::storage::IdentityAnchor::alias_key)
+                        .collect::<Vec<_>>();
                 let transaction = self
                     .begin_write_transaction()
                     .await
@@ -796,23 +853,7 @@ impl RegisteredGlobalDb {
                 .into_iter()
                 .flatten()
                 {
-                    let mut rows = transaction
-                        .query(
-                            "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
-                            params![alias],
-                        )
-                        .await
-                        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-                    if let Some(row) = rows
-                        .next()
-                        .await
-                        .map_err(|error| global_db_operation_error(OPERATION, error))?
-                    {
-                        existing_authorities.insert(
-                            row.get::<String>(0)
-                                .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                        );
-                    }
+                    existing_authorities.extend(alias_project_id(&transaction, alias).await?);
                 }
                 if let Some(git_common_dir_text) = git_common_dir_text.as_deref() {
                     let mut rows = transaction
@@ -831,6 +872,15 @@ impl RegisteredGlobalDb {
                             row.get::<String>(0)
                                 .map_err(|error| global_db_operation_error(OPERATION, error))?,
                         );
+                    }
+                }
+                // Anchors adopt only a clone no path names yet. Consulting them
+                // otherwise would put two clones enrolled separately before
+                // anchors existed into a reset-required conflict, and merge
+                // unrelated repositories whose first commits are identical.
+                if existing_authorities.is_empty() && git_remote_url.is_some() {
+                    for alias in &anchor_aliases {
+                        existing_authorities.extend(alias_project_id(&transaction, alias).await?);
                     }
                 }
                 if existing_authorities.len() > 1 {
@@ -855,7 +905,19 @@ impl RegisteredGlobalDb {
                     .next()
                     .unwrap_or_else(|| project_id.to_string());
 
-                if authority_project_id == project_id {
+                let rewrite_registered_root = authority_project_id == project_id
+                    && match registered_root(&transaction, project_id).await? {
+                        None => true,
+                        // The first enrolled checkout stays the registered root
+                        // while it exists; a linked worktree of it may repair it.
+                        Some((registered_root, registered_common_dir)) => {
+                            registered_root == canonical_root
+                                || !Path::new(&registered_root).exists()
+                                || (registered_common_dir.is_some()
+                                    && registered_common_dir == git_common_dir_text)
+                        }
+                    };
+                if rewrite_registered_root {
                     transaction
                         .execute(
                             "INSERT INTO code_projects
@@ -886,6 +948,21 @@ impl RegisteredGlobalDb {
                         )
                         .await
                         .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                } else if authority_project_id == project_id {
+                    transaction
+                        .execute(
+                            "UPDATE code_projects
+                             SET git_remote_url = ?2, default_branch = ?3, last_seen_at = ?4
+                             WHERE project_id = ?1",
+                            params![
+                                authority_project_id.as_str(),
+                                git_remote_url,
+                                default_branch,
+                                now
+                            ],
+                        )
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?;
                 } else {
                     transaction
                         .execute(
@@ -907,6 +984,20 @@ impl RegisteredGlobalDb {
                      VALUES (?1, ?2, ?3)
                      ON CONFLICT(alias_path) DO UPDATE SET
                         project_id = excluded.project_id,
+                        last_seen_at = excluded.last_seen_at",
+                            params![alias, authority_project_id.as_str(), now],
+                        )
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                }
+                // An anchor keeps the project that first recorded it, so a
+                // history later grafted into another repository cannot move it.
+                for alias in anchor_aliases {
+                    transaction
+                        .execute(
+                            "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(alias_path) DO UPDATE SET
                         last_seen_at = excluded.last_seen_at",
                             params![alias, authority_project_id.as_str(), now],
                         )
@@ -1728,8 +1819,11 @@ impl RegisteredGlobalDb {
         git_common_dir: Option<&Path>,
     ) -> tracedecay_domain::errors::Result<Vec<String>> {
         let mut project_ids = BTreeSet::new();
+        // Every profile reads the same `.git/` marker; only the profile that
+        // registered a store for its id may treat it as an identity.
         if let Some(marker) =
             tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)?
+            && self.has_store_instance(&marker.project_id).await?
         {
             project_ids.insert(marker.project_id);
         }
@@ -1746,7 +1840,43 @@ impl RegisteredGlobalDb {
         {
             project_ids.insert(project_id);
         }
+        // Only a clone names a remote; an identical history without one is a
+        // separate repository that happens to share its first commits.
+        if project_ids.is_empty()
+            && tracedecay_runtime_core::git::git_remote_url(project_root).is_some()
+        {
+            for anchor in
+                tracedecay_runtime_core::storage::repository_identity_anchors(project_root)
+            {
+                if let Some(project_id) = self.project_id_by_alias_key(&anchor.alias_key()).await? {
+                    project_ids.insert(project_id);
+                }
+            }
+        }
         Ok(project_ids.into_iter().collect())
+    }
+
+    async fn has_store_instance(
+        &self,
+        project_id: &str,
+    ) -> tracedecay_domain::errors::Result<bool> {
+        const OPERATION: &str = "resolve project store instance";
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT 1 FROM store_instances WHERE project_id = ?1 LIMIT 1",
+                params![project_id],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        Ok(rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .is_some())
     }
 
     pub(super) async fn project_id_by_path_alias(
@@ -1754,37 +1884,37 @@ impl RegisteredGlobalDb {
         path: &Path,
         kind: ProjectIdentityAliasKind,
     ) -> tracedecay_domain::errors::Result<Option<String>> {
-        #[tracing::instrument(name = "global_db.registry.query.alias", level = "trace", skip_all)]
-        async fn project_id_by_alias_key(
-            db: &RegisteredGlobalDb,
-            alias: &str,
-        ) -> tracedecay_domain::errors::Result<Option<String>> {
-            const OPERATION: &str = "resolve project identity alias";
-            let snapshot = db
-                .read_snapshot()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let mut rows = snapshot
-                .query(
-                    "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
-                    params![alias],
-                )
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            else {
-                return Ok(None);
-            };
-            row.get(0)
-                .map(Some)
-                .map_err(|error| global_db_operation_error(OPERATION, error))
-        }
-
         let alias = format!("{}{}", kind.prefix(), project_path_alias_key(path));
-        project_id_by_alias_key(self, &alias).await
+        self.project_id_by_alias_key(&alias).await
+    }
+
+    #[tracing::instrument(name = "global_db.registry.query.alias", level = "trace", skip_all)]
+    async fn project_id_by_alias_key(
+        &self,
+        alias: &str,
+    ) -> tracedecay_domain::errors::Result<Option<String>> {
+        const OPERATION: &str = "resolve project identity alias";
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
+                params![alias],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        else {
+            return Ok(None);
+        };
+        row.get(0)
+            .map(Some)
+            .map_err(|error| global_db_operation_error(OPERATION, error))
     }
 
     /// Deletes registry authority rows, returning the committed row count.

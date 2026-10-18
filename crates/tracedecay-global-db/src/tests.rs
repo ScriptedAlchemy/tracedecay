@@ -1586,6 +1586,29 @@ async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_iden
         .unwrap();
     tracedecay_runtime_core::storage::write_repository_identity_marker(&project, "proj_marker")
         .unwrap();
+    assert_eq!(
+        harness
+            .registered
+            .project_ids_by_identity(&project, None)
+            .await
+            .unwrap(),
+        Vec::<String>::new(),
+        "a marker naming a project this profile holds no store for is not an identity"
+    );
+    harness
+        .registered
+        .upsert_store_instance(super::StoreInstanceUpsert {
+            store_id: "store:proj_marker:profile_sharded".to_string(),
+            project_id: "proj_marker".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_marker".to_string(),
+            manifest_relpath: None,
+            last_verified_at: None,
+            last_write_at: None,
+        })
+        .await
+        .unwrap();
 
     assert_eq!(
         harness

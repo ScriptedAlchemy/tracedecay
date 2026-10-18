@@ -152,8 +152,10 @@ impl LocalStoreRuntimeResolverV1 {
     /// Adds exactly one typed project authority.
     ///
     /// A project can carry many aliases in its one
-    /// [`LocalProjectEnrollmentAuthorityV1`], but two separately configured
-    /// authorities for the same typed project are refused rather than merged.
+    /// [`LocalProjectEnrollmentAuthorityV1`]. A later registration adds its
+    /// roots only when each new root's repository marker names the project
+    /// (another clone of the repository); any other second authority for the
+    /// same typed project is refused rather than merged.
     #[cfg(test)]
     pub(crate) fn with_project_authority(
         self,
@@ -169,20 +171,32 @@ impl LocalStoreRuntimeResolverV1 {
     ) -> Result<(), LocalStoreRuntimeResolverConfigurationErrorV1> {
         let project_id = authority.project_id.clone();
         let mut project_authorities = self.project_authorities_write();
-        if project_authorities
-            .get(&project_id)
-            .is_some_and(|existing| existing == &authority)
-        {
+        let Some(existing) = project_authorities.get_mut(&project_id) else {
+            project_authorities.insert(project_id, authority);
             return Ok(());
-        }
-        if project_authorities.contains_key(&project_id) {
+        };
+        let added = authority
+            .enrollment_roots
+            .into_iter()
+            .filter(|root| !existing.enrollment_roots.contains(root))
+            .collect::<Vec<_>>();
+        // Another clone of the repository joins the authority by naming the
+        // project in its own marker; any other root is a second authority.
+        let joins = |root: &PathBuf| {
+            matches!(
+                storage::read_repository_identity_marker(root),
+                Ok(Some(marker)) if marker.project_id == project_id.as_str()
+            )
+        };
+        if !added.iter().all(joins) {
             return Err(
                 LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateProjectAuthority {
                     project_id,
                 },
             );
         }
-        project_authorities.insert(project_id, authority);
+        existing.enrollment_roots.extend(added);
+        existing.enrollment_roots.sort();
         Ok(())
     }
 
@@ -2074,5 +2088,58 @@ mod tests {
         .with_project_authority(via_real)
         .expect("alias spelling must not be DuplicateProjectAuthority");
         let _ = resolver;
+    }
+
+    #[test]
+    fn a_clone_whose_marker_names_the_project_joins_its_authority() {
+        let temp = tempfile::TempDir::new().expect("temporary root");
+        let project_id = id::<ProjectId>("project.second-clone");
+        let [first, clone, unmarked] = ["first", "clone", "unmarked"].map(|name| {
+            let root = temp.path().join(name);
+            fs::create_dir_all(&root).expect("enrollment root");
+            root
+        });
+        for root in [&first, &clone] {
+            storage::pin_fixture_repository_identity(root, project_id.as_str())
+                .expect("repository marker");
+        }
+        let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+            id::<BrainId>("brain.second-clone"),
+            id::<UserProfileId>("profile.second-clone"),
+            temp.path().join("profile"),
+        ))
+        .with_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+            project_id.clone(),
+            [first.clone()],
+        ))
+        .expect("first checkout")
+        .with_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+            project_id.clone(),
+            [clone.clone()],
+        ))
+        .expect("a marked clone joins the project's authority");
+
+        assert_eq!(
+            resolver
+                .project_authorities_read()
+                .get(&project_id)
+                .map(|authority| authority.enrollment_roots().to_vec()),
+            Some(vec![
+                clone.canonicalize().unwrap(),
+                first.canonicalize().unwrap()
+            ])
+        );
+        assert_eq!(
+            resolver.register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                [unmarked],
+            )),
+            Err(
+                LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateProjectAuthority {
+                    project_id
+                }
+            ),
+            "a root without the project's marker is a second authority"
+        );
     }
 }

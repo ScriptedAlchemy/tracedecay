@@ -78,7 +78,7 @@ pub(super) async fn open_project_for_handshake(
     // the registry registration below is its durable home. TraceDecay never
     // creates files inside a project's working tree.
     if first_touch {
-        tracedecay_runtime_core::storage::write_repository_identity_marker(
+        tracedecay_runtime_core::storage::claim_repository_identity_marker(
             project_path,
             project_id,
         )?;

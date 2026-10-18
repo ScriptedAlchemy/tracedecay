@@ -291,7 +291,7 @@ impl TraceDecay {
         // nothing here, its identity is deterministic from the canonical
         // path and durably owned by the profile registry. TraceDecay never
         // creates files inside a project's working tree.
-        tracedecay_runtime_core::storage::write_repository_identity_marker(
+        tracedecay_runtime_core::storage::claim_repository_identity_marker(
             project_root,
             project_id.as_str(),
         )?;

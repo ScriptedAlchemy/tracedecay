@@ -729,6 +729,25 @@ pub fn git_remote_url(project_root: &Path) -> Option<String> {
     git_capture(project_root, &["config", "--get", "remote.origin.url"])
 }
 
+/// Spells one remote the same however it was cloned: scp-style SSH becomes
+/// `https://`, and a trailing `/` or `.git` and letter case are dropped.
+pub fn normalize_git_remote_url(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if remote.is_empty() {
+        return None;
+    }
+    let mut normalized = remote.trim_end_matches('/').to_string();
+    if let Some(rest) = normalized.strip_prefix("git@")
+        && let Some((host, path)) = rest.split_once(':')
+    {
+        normalized = format!("https://{host}/{path}");
+    }
+    if let Some(stripped) = normalized.strip_suffix(".git") {
+        normalized = stripped.to_string();
+    }
+    Some(normalized.to_ascii_lowercase())
+}
+
 /// Outcome of the bounded `git -C` capture used by repository identity lookup.
 #[derive(Debug)]
 pub enum GitCaptureAtResult {

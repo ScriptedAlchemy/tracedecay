@@ -1,12 +1,90 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::git::GitOidV1;
 
 use super::{
     PrivateStoreIo, REPOSITORY_IDENTITY_FILENAME, REPOSITORY_IDENTITY_SCHEMA_VERSION,
     RepositoryIdentityMarker, validate_project_id,
 };
+
+/// History that names a repository wherever its checkouts live, so a second
+/// clone of an enrolled repository resolves to the same project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IdentityAnchor {
+    /// A parentless commit reachable from HEAD.
+    RootCommit(GitOidV1),
+    /// A project rooted below its repository's worktree root: one of the
+    /// repository's root commits plus the project's path inside the checkout.
+    Subproject { root: GitOidV1, relative: PathBuf },
+    /// The normalized `origin` URL, used when the roots cannot be walked.
+    Remote(String),
+}
+
+impl IdentityAnchor {
+    /// The `project_aliases` key this anchor is recorded under.
+    pub fn alias_key(&self) -> String {
+        match self {
+            Self::RootCommit(root) => format!("git-root-commit:{}", root.as_str()),
+            Self::Subproject { root, relative } => format!(
+                "git-subproject:{}:{}",
+                root.as_str(),
+                relative.to_string_lossy().replace('\\', "/")
+            ),
+            Self::Remote(url) => format!("git-remote-url:{url}"),
+        }
+    }
+}
+
+const ROOT_COMMIT_WALK_LIMIT: usize = 1_000_000;
+const ROOT_COMMIT_WALK_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The anchors naming the repository `project_root` belongs to; empty outside
+/// a repository, in a bare repository, or before the first commit.
+pub fn repository_identity_anchors(project_root: &Path) -> Vec<IdentityAnchor> {
+    let Ok(authority) = crate::git_repository::GitRepositoryAuthority::discover(project_root)
+    else {
+        return Vec::new();
+    };
+    let Some(worktree_root) = authority.worktree_root() else {
+        return Vec::new();
+    };
+    let relative = fs::canonicalize(project_root)
+        .ok()
+        .and_then(|root| root.strip_prefix(worktree_root).ok().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let remote = || {
+        crate::git::git_remote_url(project_root)
+            .as_deref()
+            .and_then(crate::git::normalize_git_remote_url)
+            .map(IdentityAnchor::Remote)
+    };
+    // ponytail: walks on every registry miss; memoize per (git dir, HEAD) if a
+    // history without a commit-graph makes unenrolled lookups slow.
+    match authority.root_commits(ROOT_COMMIT_WALK_LIMIT, ROOT_COMMIT_WALK_DEADLINE) {
+        Some(roots) if roots.is_empty() => Vec::new(),
+        // The remote is recorded beside the roots so a later shallow clone,
+        // which can only name its remote, finds this project.
+        Some(roots) if relative.as_os_str().is_empty() => roots
+            .into_iter()
+            .map(IdentityAnchor::RootCommit)
+            .chain(remote())
+            .collect(),
+        Some(roots) => roots
+            .into_iter()
+            .map(|root| IdentityAnchor::Subproject {
+                root,
+                relative: relative.clone(),
+            })
+            .collect(),
+        // A remote names the whole repository, so it cannot tell two
+        // subprojects of one repository apart.
+        None if !relative.as_os_str().is_empty() => Vec::new(),
+        None => remote().into_iter().collect(),
+    }
+}
 
 /// The repository-wide identity marker shared by every checkout of a
 /// repository, including detached linked worktrees.
@@ -190,6 +268,18 @@ pub fn pin_fixture_repository_identity(project_root: &Path, project_id: &str) ->
         });
     }
     Ok(())
+}
+
+/// [`write_repository_identity_marker`] unless a readable marker already names
+/// another project. Every profile reads the same `.git/` marker, so one naming
+/// another id is another profile's enrollment and is left as it is.
+pub fn claim_repository_identity_marker(project_root: &Path, project_id: &str) -> Result<bool> {
+    if let Ok(Some(marker)) = read_repository_identity_marker(project_root)
+        && marker.project_id != project_id
+    {
+        return Ok(false);
+    }
+    write_repository_identity_marker(project_root, project_id)
 }
 
 pub fn write_repository_identity_marker(project_root: &Path, project_id: &str) -> Result<bool> {
