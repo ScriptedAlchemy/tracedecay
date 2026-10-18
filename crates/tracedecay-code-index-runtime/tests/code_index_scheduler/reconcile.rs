@@ -13104,18 +13104,7 @@ async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
                 format!("pub fn churn_{slot}() -> u64 {{ {revision} }}\n"),
             );
             revision += 1;
-            // An overflow cancels the pass in flight, so one posted on a wall
-            // clock cadence starves every pass that takes longer than the
-            // cadence. Post it only once the worker waits for a wake: the tree
-            // has still changed under every pass, and no pass is cancelled.
-            if churn_registry
-                .subscribe_owner_activity(&churn_root)
-                .await
-                .is_some_and(|activity| {
-                    activity.worker_phase() == CodeIndexWorkerPhaseV1::Parked
-                        && !activity.wake_pending()
-                })
-            {
+            if revision.is_multiple_of(10) {
                 churn_registry.notify_hook_overflow(&churn_root).await;
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
