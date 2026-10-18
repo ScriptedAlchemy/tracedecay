@@ -61,13 +61,12 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
-    ExactLaneRetriever,
 };
 use tracedecay_query::retrieval::lexical::{
-    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
-    CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
+    CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
+    CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
+    LexicalLane, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::{
     RetrievalExecutionControl, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
@@ -516,14 +515,17 @@ fn request_prototype(
     })
 }
 
-struct RunClassArguments<'a, E, L> {
+struct RunClassArguments<'a> {
     class: &'a str,
     query: &'a str,
     options: &'a Options,
     prototype: &'a RequestPrototypeV1,
     authority: &'a CentralExactAdmissionAuthorityV1,
-    exact_lane: &'a E,
-    lexical_lane: &'a L,
+    exact_lane: &'a ExactLane<
+        CentralExactAdmissionAuthorityV1,
+        CodeExactLexicalArtifactReaderV1<CentralExactAdmissionAuthorityV1>,
+    >,
+    lexical_lane: &'a LexicalLane<CodeLexicalArtifactReaderV1>,
     generation: &'a CodeGenerationId,
 }
 
@@ -534,11 +536,7 @@ struct IterationMicros {
     total: u64,
 }
 
-fn run_class<E, L>(arguments: RunClassArguments<'_, E, L>) -> Result<serde_json::Value, String>
-where
-    E: ExactLaneRetriever,
-    L: LexicalLaneRetriever,
-{
+fn run_class(arguments: RunClassArguments<'_>) -> Result<serde_json::Value, String> {
     let RunClassArguments {
         class,
         query,
