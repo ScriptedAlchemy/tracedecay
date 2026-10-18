@@ -1492,4 +1492,48 @@ mod tests {
         assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
         drop((handle, fresh, code, profile));
     }
+
+    #[cfg(target_os = "linux")]
+    #[asupersync::test]
+    async fn an_evicted_lost_runtime_leaves_no_pin_on_its_key() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (registry, profile, code, authority) =
+            mount_code_runtime(temporary.path().join("runtime.db")).await;
+        let key = StoreRuntimeKey::from_binding(code.binding());
+        registry
+            .lock_state()
+            .profile_pin_tokens
+            .entry(key.clone())
+            .or_default()
+            .insert(u64::MAX);
+        let path = authority.canonical_database_path().to_path_buf();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(file));
+        }
+        let deadline = std::time::Instant::now()
+            + tracedecay_rusqlite_runtime::FILE_PROBE_INTERVAL
+            + Duration::from_secs(2);
+        while code.physical_snapshot().healthy {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the store must report itself lost"
+            );
+            let _ = crate::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await;
+        }
+
+        assert!(matches!(
+            registry.lookup(code.binding()),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        assert!(
+            !registry.lock_state().profile_pin_tokens.contains_key(&key),
+            "pins held on the evicted runtime must not count against a reopened key"
+        );
+        drop((code, profile));
+    }
 }

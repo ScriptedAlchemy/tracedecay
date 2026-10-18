@@ -1477,6 +1477,7 @@ impl RegistryState {
             .owner
             .runtime()
             .transition(RuntimeMaintenanceStateV1::Faulted);
+        self.profile_pin_tokens.remove(key);
         if self
             .profile_authorities
             .get(key.shard_id())
