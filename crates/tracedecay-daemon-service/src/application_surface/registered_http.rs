@@ -15,7 +15,6 @@ use tracedecay_daemon_protocol::{
 
 pub(crate) trait RegisteredHttpOperation: Copy {
     fn operation_id(self) -> String;
-    fn is_read_only(self) -> bool;
     fn problem_family(self) -> &'static str;
     fn display_family(self) -> &'static str;
     fn application_problem_is_bound(
@@ -120,10 +119,6 @@ impl RegisteredHttpOperation for WorkOperation {
         WorkOperation::operation_id_str(self).to_owned()
     }
 
-    fn is_read_only(self) -> bool {
-        WorkOperation::is_read_only(self)
-    }
-
     fn problem_family(self) -> &'static str {
         "work"
     }
@@ -149,10 +144,6 @@ impl RegisteredHttpOperation for WorkflowOperation {
         WorkflowOperation::operation_id_str(self).to_owned()
     }
 
-    fn is_read_only(self) -> bool {
-        false
-    }
-
     fn problem_family(self) -> &'static str {
         "workflow"
     }
@@ -176,14 +167,6 @@ impl RegisteredHttpOperation for WorkflowOperation {
 impl RegisteredHttpOperation for HandoffOperation {
     fn operation_id(self) -> String {
         HandoffOperation::operation_id_str(self).to_owned()
-    }
-
-    fn is_read_only(self) -> bool {
-        // Not a blanket `false` any more: enumeration reads the grant store
-        // without issuing or consuming anything, and treating it as a mutation
-        // here would deny a safe read the retry and replay handling a read is
-        // entitled to.
-        HandoffOperation::is_read_only(self)
     }
 
     fn problem_family(self) -> &'static str {
@@ -361,7 +344,7 @@ where
         }
     };
     let binding_id = binding_id.clone();
-    let policy = if operation.is_read_only() {
+    let policy = if binding.effect().is_read_only() {
         InvocationCancellationPolicy::ReadOnly
     } else {
         InvocationCancellationPolicy::AuthoritativeEffect

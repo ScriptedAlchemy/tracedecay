@@ -75,10 +75,9 @@ use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCase
 
 use crate::callable_code_authorization::{mounted_grant_at, mounted_grant_expires_at};
 use crate::project_runtime::{
-    FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
-    ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
-    RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
-    StoreObservabilityRegistryV1,
+    FeedbackCyclePublicationError, ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError,
+    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1,
+    StoreObservabilityMountV1, StoreObservabilityRegistryV1,
 };
 use tracedecay_agent_hosts::agents::context_scout::address_registry::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
