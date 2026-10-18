@@ -21,7 +21,12 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::EffectClass;
 
 use super::super::registered_http::RegisteredHttpOperation;
-use tracedecay_api::WorkOperation;
+use tracedecay_api::{
+    HttpApplicationControls, WorkOperation, WorkflowHttpRequest, WorkflowOperation,
+};
+use tracedecay_daemon_protocol::{
+    DaemonInvocationProblem, DaemonInvocationResponse, InvocationCancellationPolicy,
+};
 
 use tracedecay_domain::test_fixtures::digest;
 
@@ -149,12 +154,14 @@ fn retained_effect_outcome(
 
 struct StaticDaemonResponseExecutor {
     response: Mutex<Option<tracedecay_daemon_protocol::DaemonInvocationResponse>>,
+    policy: Mutex<Option<tracedecay_daemon_protocol::InvocationCancellationPolicy>>,
 }
 
 impl StaticDaemonResponseExecutor {
     fn new(response: tracedecay_daemon_protocol::DaemonInvocationResponse) -> Self {
         Self {
             response: Mutex::new(Some(response)),
+            policy: Mutex::new(None),
         }
     }
 }
@@ -185,7 +192,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for StaticDaemonRespon
         _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: Deadline,
         _cancellation: CancellationSignal,
-        _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         Result<
@@ -193,6 +200,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for StaticDaemonRespon
             tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
+        *self.policy.lock().expect("captured invocation policy") = Some(policy);
         let response = self
             .response
             .lock()
@@ -222,6 +230,55 @@ async fn response_json(response: axum::response::Response) -> Value {
             .expect("response body"),
     )
     .expect("problem JSON")
+}
+
+#[tokio::test]
+async fn workflow_dispatch_preserves_read_interruption_and_effect_settlement_policies() {
+    for (operation, body, policy) in [
+        (
+            WorkflowOperation::ListDefinitions,
+            json!({}),
+            InvocationCancellationPolicy::ReadOnly,
+        ),
+        (
+            WorkflowOperation::ActivateDefinition,
+            json!({
+                "definition_id": "workflow.policy.fixture",
+                "definition_version": 1,
+                "expected_revision": 1,
+            }),
+            InvocationCancellationPolicy::AuthoritativeEffect,
+        ),
+    ] {
+        let request_id = RequestId::new("request.workflow.policy").expect("request id");
+        let executor = StaticDaemonResponseExecutor::new(DaemonInvocationResponse::problem(
+            request_id.as_str(),
+            DaemonInvocationProblem::Unavailable,
+        ));
+        let response = super::super::workflow::invoke_workflow_operation(
+            Some(&executor),
+            WorkflowHttpRequest {
+                operation,
+                request_id,
+                controls: HttpApplicationControls {
+                    deadline: Deadline::new(UtcMicros(9_999_999)).expect("deadline"),
+                    cancellation: CancellationSignal::active("cancellation.workflow.policy")
+                        .expect("cancellation"),
+                },
+                body,
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            *executor.policy.lock().expect("captured invocation policy"),
+            Some(policy),
+            "{operation:?} must delegate its catalog policy to the executor",
+        );
+        let body = response_json(response).await;
+        assert_eq!(body["value"]["problem"]["kind"], "unavailable");
+    }
 }
 
 /// Dispatch one retained HTTP operation through the application path against
