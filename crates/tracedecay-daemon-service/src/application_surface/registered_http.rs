@@ -289,7 +289,7 @@ where
     level = "trace",
     skip_all
 )]
-pub(super) async fn invoke_registered<T, O>(
+pub(super) async fn invoke_registered<O>(
     executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     operation: O,
     request_id: RequestId,
@@ -297,13 +297,15 @@ pub(super) async fn invoke_registered<T, O>(
     invocation: tracedecay_daemon_protocol::DaemonInvocationRequest,
     select_outcome: impl FnOnce(
         tracedecay_daemon_protocol::DaemonInvocationOutcome,
-    ) -> Option<(
-        tracedecay_contracts::ResolvedScope,
-        tracedecay_contracts::ApplicationOutcome<T>,
-    )>,
+    ) -> Result<
+        Option<(
+            tracedecay_contracts::ResolvedScope,
+            tracedecay_contracts::ApplicationOutcome<serde_json::Value>,
+        )>,
+        serde_json::Error,
+    >,
 ) -> Result<HttpJsonEnvelope<serde_json::Value>, HttpAdapterError>
 where
-    T: Serialize,
     O: RegisteredHttpOperation,
 {
     let problem_code = |suffix: &str| format!("{}.{}", operation.problem_family(), suffix);
@@ -420,7 +422,7 @@ where
                     })
                 }
             },
-            outcome => match select_outcome(outcome) {
+            outcome => match select_outcome(outcome)? {
                 Some((scope, outcome)) => {
                     return Ok(CanonicalInvocationResult::new(
                         binding_id,
@@ -428,7 +430,7 @@ where
                             contract: result_contract,
                             request_id,
                             scope,
-                            outcome: outcome.try_map_payload(serde_json::to_value)?,
+                            outcome,
                             touched_files: Vec::new(),
                             code_graph: None,
                             analytics: None,
@@ -474,7 +476,15 @@ where
         request_id,
         controls,
         invocation,
-        select_outcome,
+        |outcome| {
+            select_outcome(outcome)
+                .map(|(scope, outcome)| {
+                    outcome
+                        .try_map_payload(serde_json::to_value)
+                        .map(|outcome| (scope, outcome))
+                })
+                .transpose()
+        },
     )
     .await
     .into_response()

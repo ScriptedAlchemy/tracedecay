@@ -26,12 +26,25 @@ use crate::daemon::retained_test_support::ignore_feedback_observations;
 /// Refuses the request after recording its closed route. Both transports
 /// must preserve the identical typed Work unavailable envelope.
 #[derive(Default)]
-struct RecordingWorkExecutor {
+pub(super) struct RecordingApplicationExecutor {
     operations: Mutex<Vec<tracedecay_daemon_protocol::DaemonInvocationOperation>>,
     settlement: Option<DaemonInvocationOutcome>,
 }
 
-impl ApplicationInvocationExecutor for RecordingWorkExecutor {
+impl RecordingApplicationExecutor {
+    pub(super) fn with_settlement(settlement: DaemonInvocationOutcome) -> Self {
+        Self {
+            settlement: Some(settlement),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn invocation_count(&self) -> usize {
+        self.operations.lock().expect("recorded operations").len()
+    }
+}
+
+impl ApplicationInvocationExecutor for RecordingApplicationExecutor {
     fn invoke(
         &self,
         _invocation: ApplicationInvocation,
@@ -41,7 +54,7 @@ impl ApplicationInvocationExecutor for RecordingWorkExecutor {
     }
 }
 
-impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingWorkExecutor {
+impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingApplicationExecutor {
     fn invoke_controlled(
         &self,
         request: tracedecay_daemon_protocol::DaemonInvocationRequest,
@@ -130,7 +143,7 @@ async fn success_denial_and_partial_effect_reach_http_and_mcp_unchanged() {
         },
     ];
     for (index, settlement) in settlements.into_iter().enumerate() {
-        let executor = RecordingWorkExecutor {
+        let executor = RecordingApplicationExecutor {
             settlement: Some(settlement),
             ..Default::default()
         };
@@ -206,7 +219,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn read_mutation_and_evidence_preserve_the_typed_http_work_envelope() {
-    let executor = RecordingWorkExecutor::default();
+    let executor = RecordingApplicationExecutor::default();
     let requests = [
         (
             "tracedecay_work_views",
