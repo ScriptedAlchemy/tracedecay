@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphCensusV1, CodeGraphImpactBatchV1, CodeGraphInteractiveReader,
@@ -17,7 +18,6 @@ use tracedecay_contracts::{
     RequestId,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, RelationEdgeKindV1, SanitizedCodeFileV1,
     SymbolOccurrenceId,
@@ -26,13 +26,10 @@ use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::queries::{FileDependentsV1, GraphQueryManager};
-use super::source_authority::{
-    AdmittedSourceAuthority, graph_source_scope_mismatch, graph_source_unbound,
-};
+use super::source_authority::AdmittedSourceAuthority;
 use super::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
-    CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
-    map_projection_error,
+    CodeGraphReadError, CodeGraphReadRequest, application_graph_cancellation,
 };
 use crate::SourceReadContext;
 use crate::context::source_read;
@@ -210,7 +207,9 @@ impl VerifiedGraphQuery {
 
     fn bound_source(&self) -> Result<&AdmittedSourceAuthority> {
         self.refuse_if_bound_closed()?;
-        self.source.as_ref().ok_or_else(graph_source_unbound)
+        self.source
+            .as_ref()
+            .ok_or_else(|| CodeGraphReadError::Denied.into())
     }
 
     fn refuse_if_bound_closed(&self) -> Result<()> {
@@ -314,7 +313,7 @@ impl VerifiedGraphQuery {
         // The resolved file is always `canonicalize`d, `\\?\`-prefixed on
         // Windows, while the admitted root may carry the plain identity.
         if !plain_host_path(&absolute).starts_with(plain_host_path(source.project_root())) {
-            return Err(graph_source_scope_mismatch());
+            return Err(CodeGraphReadError::Denied.into());
         }
         Ok((absolute, display))
     }
@@ -327,7 +326,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .has_unresolved_callers(targets, None, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn symbol_summary(
@@ -337,7 +336,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .symbol_summary(occurrence, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn symbols_page(
@@ -348,21 +347,21 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .symbols_page(after, max_symbols, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn files(&self, max_files: usize) -> Result<Vec<SanitizedCodeFileV1>> {
         self.refuse_if_bound_closed()?;
         self.reader
             .files(max_files, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn file_by_logical_path(&self, path: &str) -> Result<Option<SanitizedCodeFileV1>> {
         self.refuse_if_bound_closed()?;
         self.reader
             .file_by_logical_path(path, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     /// Generation-wide counts with the `largest_files` most symbol-dense
@@ -371,7 +370,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .census(largest_files, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn find_symbols(
@@ -382,7 +381,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .find_symbols(predicate, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     /// Returns one stable page restricted to the requested logical files.
@@ -424,7 +423,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .symbols_in_logical_file(logical_path, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn resolve_simple_name(
@@ -436,14 +435,14 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .resolve_simple_name(name, kind, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn suggest_simple_names(&self, name: &str, limit: usize) -> Result<Vec<String>> {
         self.refuse_if_bound_closed()?;
         self.reader
             .suggest_simple_names(name, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn external_type_import_candidates(
@@ -460,7 +459,7 @@ impl VerifiedGraphQuery {
                 limit,
                 Arc::clone(&self.cancellation),
             )
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn resolve_qualified_name(
@@ -472,7 +471,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .resolve_qualified_name(qualified_name, kind, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     #[tracing::instrument(name = "usecases.graph.verified.callers", level = "trace", skip_all)]
@@ -485,7 +484,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callers(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     #[tracing::instrument(
@@ -502,7 +501,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callers_truncated(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     #[tracing::instrument(name = "usecases.graph.verified.callees", level = "trace", skip_all)]
@@ -515,7 +514,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callees(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     #[tracing::instrument(
@@ -532,7 +531,7 @@ impl VerifiedGraphQuery {
         self.refuse_if_bound_closed()?;
         self.reader
             .callees_truncated(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     #[tracing::instrument(
@@ -556,7 +555,7 @@ impl VerifiedGraphQuery {
                 limit,
                 Arc::clone(&self.cancellation),
             )
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     pub fn edges_among(
@@ -573,7 +572,7 @@ impl VerifiedGraphQuery {
                 max_relations,
                 Arc::clone(&self.cancellation),
             )
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     #[tracing::instrument(name = "usecases.graph.verified.impact", level = "trace", skip_all)]
@@ -595,7 +594,7 @@ impl VerifiedGraphQuery {
                 max_relations_per_hop,
                 Arc::clone(&self.cancellation),
             )
-            .map_err(graph_projection_error)
+            .map_err(GraphQueryError::from)
     }
 
     /// Finds the requested files that contain functions targeted by canonical
@@ -696,8 +695,7 @@ pub async fn open_verified_graph_query(
             observed_at,
         )),
     )
-    .await?
-    .map_err(map_code_graph_read_runtime_error)?;
+    .await??;
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
     let source = source
         .map(|source| AdmittedSourceAuthority::capture(&context, source.clone()))
@@ -714,13 +712,14 @@ pub async fn open_verified_graph_query(
                 .with_live_cancellation(request.cancellation),
         ),
     )
-    .await?
-    .map_err(map_code_graph_read_runtime_error)?;
+    .await??;
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
     let observed_at = tracedecay_contracts::now_micros();
-    let reader = verified
-        .reader_with_cancellation(&context, observed_at, Arc::clone(&graph_cancellation))
-        .map_err(map_code_graph_read_runtime_error)?;
+    let reader = verified.reader_with_cancellation(
+        &context,
+        observed_at,
+        Arc::clone(&graph_cancellation),
+    )?;
     refuse_if_query_closed(&context, &request.deadline, request.cancellation)?;
     Ok(VerifiedGraphQuery::from_admitted_parts(
         reader,
@@ -739,12 +738,8 @@ async fn await_graph_port_wait<T>(
 ) -> Result<T> {
     match run_deadline_signal_interruptible(deadline, cancellation, future).await {
         Ok(result) => Ok(result),
-        Err(RequestInterruption::Cancelled) => Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::Cancelled,
-        )),
-        Err(RequestInterruption::DeadlineExceeded) => Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::TimedOut,
-        )),
+        Err(RequestInterruption::Cancelled) => Err(CodeGraphReadError::Cancelled.into()),
+        Err(RequestInterruption::DeadlineExceeded) => Err(CodeGraphReadError::TimedOut.into()),
     }
 }
 
@@ -754,40 +749,36 @@ fn refuse_if_query_closed(
     cancellation: &CancellationSignal,
 ) -> Result<()> {
     if cancellation.is_cancelled() {
-        return Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::Cancelled,
-        ));
+        return Err(CodeGraphReadError::Cancelled.into());
     }
     let observed_at = tracedecay_contracts::now_micros();
     if deadline.is_elapsed_at(observed_at) {
-        return Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::TimedOut,
-        ));
+        return Err(CodeGraphReadError::TimedOut.into());
     }
     match context.admission_at(observed_at) {
         tracedecay_contracts::RequestAdmission::Admitted => Ok(()),
-        tracedecay_contracts::RequestAdmission::Cancelled => Err(
-            map_code_graph_read_runtime_error(super::CodeGraphReadError::Cancelled),
-        ),
-        tracedecay_contracts::RequestAdmission::TimedOut => Err(map_code_graph_read_runtime_error(
-            super::CodeGraphReadError::TimedOut,
-        )),
-        tracedecay_contracts::RequestAdmission::GrantExpired => Err(
-            map_code_graph_read_runtime_error(super::CodeGraphReadError::Denied),
-        ),
+        tracedecay_contracts::RequestAdmission::Cancelled => {
+            Err(CodeGraphReadError::Cancelled.into())
+        }
+        tracedecay_contracts::RequestAdmission::TimedOut => {
+            Err(CodeGraphReadError::TimedOut.into())
+        }
+        tracedecay_contracts::RequestAdmission::GrantExpired => {
+            Err(CodeGraphReadError::Denied.into())
+        }
     }
 }
 
-fn graph_projection_error(
-    error: tracedecay_code_index::graph_projection::CodeGraphProjectionError,
-) -> TraceDecayError {
-    map_code_graph_read_runtime_error(map_projection_error(error))
+fn graph_budget_exhausted(detail: &str) -> GraphQueryError {
+    CodeGraphReadError::BudgetExhausted {
+        detail: detail.to_owned(),
+    }
+    .into()
 }
 
-fn graph_budget_exhausted(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
-}
-
-fn graph_corrupt(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("code-graph-corrupt", false, detail)
+fn graph_corrupt(detail: &str) -> GraphQueryError {
+    CodeGraphReadError::Corrupt {
+        detail: detail.to_owned(),
+    }
+    .into()
 }
