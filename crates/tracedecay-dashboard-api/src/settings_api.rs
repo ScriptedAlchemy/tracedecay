@@ -871,8 +871,6 @@ fn project_apply_error(
 
 #[cfg(test)]
 mod tests {
-    mod wire;
-
     use super::*;
     use serde_json::json;
     use tracedecay_configuration::config::registry::ConfigurationRegistry;

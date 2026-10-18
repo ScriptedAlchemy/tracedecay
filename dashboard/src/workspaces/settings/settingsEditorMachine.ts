@@ -41,6 +41,7 @@ import {
   type UserSettingsChangeSet,
   type UserSettingsValues,
 } from './settingsModel.ts';
+import type { ReconciliationState } from '../../contracts/generated.ts';
 import type { SettingsMutationRequest, SettingsMutationResult } from './settingsMutation.ts';
 
 /** The two drafts the editor holds, always for the same authority snapshot. */
@@ -78,6 +79,7 @@ interface SettingsAppliedRecord {
   readonly revisionId: string;
   readonly resyncRecommended: boolean;
   readonly restartRecommended: boolean;
+  readonly effectReconciliation: ReconciliationState | null;
 }
 
 /** Field-level refusals, kept with the authority that issued them. */
@@ -418,6 +420,7 @@ function settleSubmit(
           revisionId: result.revisionId,
           resyncRecommended: result.resyncRecommended,
           restartRecommended: result.restartRecommended,
+          effectReconciliation: result.effectReconciliation,
         },
       });
     case 'validation':

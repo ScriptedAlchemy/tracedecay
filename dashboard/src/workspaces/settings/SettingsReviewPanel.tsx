@@ -336,6 +336,8 @@ function WritableBody({
           </span>
           {applied.resyncRecommended ? <span>Resync recommended</span> : null}
           {applied.restartRecommended ? <span>Restart recommended</span> : null}
+          {applied.effectReconciliation === 'pending' ? <span>Runtime reconciliation pending</span> : null}
+          {applied.effectReconciliation === 'failed' ? <span>Runtime reconciliation failed</span> : null}
         </p>
       ) : null}
 

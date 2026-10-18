@@ -260,6 +260,7 @@ describe('SettingsPage effective configuration review', () => {
     await user.click(within(panel).getByRole('button', { name: 'Apply project settings' }));
 
     expect(await screen.findByText('Project settings saved')).toBeTruthy();
+    expect(screen.getByText('Runtime reconciliation pending')).toBeTruthy();
     expect(screen.getByText('Resync recommended')).toBeTruthy();
     expect(reviewReadout()).toBe('applied');
     // The effective value is the read-back, and the proposal is gone.
@@ -397,7 +398,7 @@ describe('SettingsPage effective configuration review', () => {
 
   it('requires a refresh after an uncertain effect without offering to repeat the write', async () => {
     const response = structuredClone(settingsWire.changed.body);
-    response.application_outcome.value.reconciliation = 'pending';
+    response.application_outcome.value.execution.termination = 'effect_unknown';
     let dispatched = false;
     const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'PATCH') {

@@ -3,6 +3,7 @@ import {
   DashboardConfigurationRefusalV1Schema,
   ProjectSettingsPatchResponseV1Schema,
   type EffectReceipt,
+  type ReconciliationState,
   type SettingsPayloadV1,
 } from '../../contracts/generated.ts';
 import { applicationProblemStatusMatches } from '../../contracts/application.ts';
@@ -31,6 +32,7 @@ export type SettingsMutationResult =
       readonly restartRecommended: boolean;
       /** Canonical durable application receipt for project writes. */
       readonly effectReceipt: EffectReceipt | null;
+      readonly effectReconciliation: ReconciliationState | null;
     }
   | {
       readonly outcome: 'conflict';
@@ -153,7 +155,7 @@ export async function applySettingsMutation(
     return settingsRefusal(patched.body, patched.response.status, patchAuthority);
   }
   const projectPatch = request.scope === 'project'
-    ? projectSettingsPatchResponse(patched.body, patchAuthority)
+    ? projectSettingsPatchResponse(patched.body, patchAuthority, request.expectedRevisionId)
     : null;
   if (projectPatch && !projectPatch.parsed) return projectPatch.violation;
   const patchedPayload = contractedPayload(
@@ -176,17 +178,20 @@ export async function applySettingsMutation(
     resyncRecommended: patchedPayload.payload.resync_recommended === true,
     restartRecommended: patchedPayload.payload.restart_recommended === true,
     effectReceipt: projectPatch?.parsed ? projectPatch.effectReceipt : null,
+    effectReconciliation: projectPatch?.parsed ? projectPatch.effectReconciliation : null,
   };
 }
 
 function projectSettingsPatchResponse(
   body: unknown,
   authority: string,
+  expectedRevisionId: string,
 ):
   | {
       readonly parsed: true;
       readonly current: unknown;
       readonly effectReceipt: EffectReceipt | null;
+      readonly effectReconciliation: ReconciliationState | null;
     }
   | { readonly parsed: false; readonly violation: Extract<SettingsMutationResult, { outcome: 'protocol_error' | 'unsettled' }> } {
   const response = ProjectSettingsPatchResponseV1Schema.safeParse(body);
@@ -200,12 +205,14 @@ function projectSettingsPatchResponse(
     };
   }
   const outcome = response.data.application_outcome;
+  // Runtime reconciliation is separate from the durable configuration commit.
+  // A pending runtime update does not undo a saved, returned revision.
   if (outcome !== null && (
     outcome.outcome !== 'effect'
     || outcome.value.execution.termination !== 'completed'
-    || outcome.value.reconciliation !== 'reconciled'
     || outcome.value.receipt.outcome !== 'completed'
     || outcome.value.receipt.committed_state === null
+    || response.data.current.payload.project.configuration_revision_id === expectedRevisionId
   )) {
     return {
       parsed: false,
@@ -216,6 +223,7 @@ function projectSettingsPatchResponse(
     parsed: true,
     current: response.data.current,
     effectReceipt: outcome?.outcome === 'effect' ? outcome.value.receipt : null,
+    effectReconciliation: outcome?.outcome === 'effect' ? outcome.value.reconciliation : null,
   };
 }
 

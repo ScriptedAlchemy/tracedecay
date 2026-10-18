@@ -18,17 +18,17 @@
         "legal_actions": [],
         "message": "The request was cancelled before admission",
         "owning_layer": "application",
-        "request_id": "request.configuration.settings-fixture",
+        "request_id": "request.configuration.settings-cancelled",
         "retry": "never",
         "retry_after_millis": null,
         "retry_scope": null,
         "retryable": false,
         "revision": 1,
         "terminality": "pre_admission",
-        "trace_id": "request.configuration.settings-fixture",
+        "trace_id": "request.configuration.settings-cancelled",
         "unavailable_classification": null
       },
-      "request_id": "request.configuration.settings-fixture"
+      "request_id": "request.configuration.settings-cancelled"
     },
     "status": 409
   },
@@ -38,21 +38,21 @@
         "outcome": "effect",
         "value": {
           "authority": {
-            "authorized_scope_digest": "sha256:cb520e3731e8dbab143f4fc32b885fc977d467f4648a6429bf0ed9bf0294873e",
-            "disclosure": "metadata",
-            "grant_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "grant_id": "grant.settings",
+            "authorized_scope_digest": "sha256:d6fb6d0938d4aef42e4eff3c0f113d607ce1baa34893752eae1361de955150ac",
+            "disclosure": "sensitive",
+            "grant_digest": "sha256:8c3dcc220cccaec81a373e117f12fd49517706ffc3a72c677b782ad0edcf423d",
+            "grant_id": "grant.daemon.configuration.ed4af84f307849aaff517d4b47c8e72002febe7cec0fcac38b788596cc343815",
             "grant_revision": 1,
             "policy": {
-              "decision_id": "policy.settings",
-              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-              "evaluator_revision": "policy.settings.v1",
+              "decision_id": "policy.daemon.configuration.v1",
+              "digest": "sha256:2dde51a3729d9b5fb9cb94b4eb70b6238971cf65bdf5a2ff5ba7d30cca42a36d",
+              "evaluator_revision": "tracedecay.daemon.configuration-policy.v1",
               "revision": 1
             },
-            "revalidated_at": 10
+            "revalidated_at": 1792363717104188
           },
-          "effect_class": "administrative",
-          "effect_id": "effect.configuration.settings",
+          "effect_class": "configuration_write",
+          "effect_id": "effect.configuration.ed4af84f307849aaff517d4b47c8e72002febe7cec0fcac38b788596cc343815",
           "execution": {
             "budget": {
               "bytes_consumed": 0,
@@ -61,39 +61,52 @@
             },
             "cancellation": null,
             "effective_deadline": {
-              "expires_at": 1000
+              "expires_at": 1792363732101451
             },
-            "ended_at": 20,
-            "started_at": 10,
+            "ended_at": 1792363717104188,
+            "started_at": 1792363717104188,
             "termination": "completed"
           },
-          "expected_state": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-          "idempotency_key": "settings-idempotency-fixture",
-          "payload": null,
+          "expected_state": "sha256:bae10ae7b2f476357fecbfc39d06eb7a43a89eb4b25d078422c77880d2199ef5",
+          "idempotency_key": "configuration.idempotency.dashboard-project-commit",
+          "payload": {
+            "base_revision_id": "configuration.initial.canonical.v1",
+            "created_at": 1792363717104188,
+            "effective_deadline_at": 1792363732101451,
+            "operation_digest": "sha256:95e5a654d365e7fafec21bd84bf68a159d13468d16e6cb38c26ac8493593727f",
+            "receipt_id": "configuration.receipt.v1.eaf7df3361e7130c1b2344d5537c8fdd09d4fb1288fdd4481bf6a0b0bfd9bbc8",
+            "result_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
+            "settlement_authority": {
+              "policy_digest": "sha256:2dde51a3729d9b5fb9cb94b4eb70b6238971cf65bdf5a2ff5ba7d30cca42a36d",
+              "policy_epoch": 1,
+              "revalidated_at": 1792363717104188
+            },
+            "snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f"
+          },
           "receipt": {
-            "actor": "actor.settings",
-            "catalog_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            "committed_state": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-            "configuration_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-            "effect_class": "administrative",
-            "expected_state": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "actor": "actor.tracedecay-daemon.project-open",
+            "catalog_digest": "sha256:57a70599bf2413cffb73f936d4b664b08f8b17533c2dcb0a2fd2bb078e528916",
+            "committed_state": "sha256:e3bd41f67533fc6a4941295fc75c48af569dfcf158b0d1cb209b9fe05fbac74e",
+            "configuration_digest": "sha256:e3bd41f67533fc6a4941295fc75c48af569dfcf158b0d1cb209b9fe05fbac74e",
+            "effect_class": "configuration_write",
+            "expected_state": "sha256:bae10ae7b2f476357fecbfc39d06eb7a43a89eb4b25d078422c77880d2199ef5",
             "external_proof": null,
-            "idempotency_key": "settings-idempotency-fixture",
-            "input_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "operation": "use-case.configuration.batch",
+            "idempotency_key": "configuration.idempotency.dashboard-project-commit",
+            "input_digest": "sha256:95e5a654d365e7fafec21bd84bf68a159d13468d16e6cb38c26ac8493593727f",
+            "operation": "use-case.application.configuration.batch",
             "outcome": "completed",
-            "policy_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "privacy_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            "request_id": "request.configuration.settings-fixture",
+            "policy_digest": "sha256:2dde51a3729d9b5fb9cb94b4eb70b6238971cf65bdf5a2ff5ba7d30cca42a36d",
+            "privacy_digest": "sha256:a7f16bc386eeafbe59c14451bd32da5458ced67a14d7ee7e2c641743da818eb6",
+            "request_id": "request.configuration.ed4af84f307849aaff517d4b47c8e72002febe7cec0fcac38b788596cc343815",
             "scope": {
-              "project_id": "project.settings.scout",
-              "reference": null,
-              "repository_id": "repository.settings",
-              "scope_digest": "sha256:cb520e3731e8dbab143f4fc32b885fc977d467f4648a6429bf0ed9bf0294873e",
-              "worktree_id": "worktree.settings"
+              "project_id": "proj_69173dcc8b282d79",
+              "reference": "refs/heads/master",
+              "repository_id": "repository.daemon.e684e4fa551644cdbc59164b7a49c80cee102ea4b2d784c374df6f1cc473e629",
+              "scope_digest": "sha256:d6fb6d0938d4aef42e4eff3c0f113d607ce1baa34893752eae1361de955150ac",
+              "worktree_id": "worktree.daemon.69173dcc8b282d79a6608867f4799d9d8a97885470a7019d268a97b38a01d0a3"
             }
           },
-          "reconciliation": "reconciled"
+          "reconciliation": "pending"
         }
       },
       "current": {
@@ -114,7 +127,7 @@
         },
         "domain_state": "ready",
         "freshness": {
-          "observed_at_micros": 100,
+          "observed_at_micros": 1792363717173083,
           "state": "fresh",
           "watermark": null
         },
@@ -122,6 +135,10 @@
           {
             "kind": "request_apply",
             "operation": "configuration_batch"
+          },
+          {
+            "kind": "request_apply",
+            "operation": "profile_code_index_worker_selection"
           },
           {
             "kind": "refresh",
@@ -135,56 +152,46 @@
             },
             "backend": "codex_app_server",
             "config_endpoint": "/api/plugins/holographic/curation/config",
-            "configuration_revision_id": "rev-43",
+            "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
             "enabled": true,
             "host_mode": "standalone"
           },
           "environment": {
             "global_accounting_enabled": false,
-            "global_accounting_mode": "disabled",
+            "global_accounting_mode": "disabled_by_env",
             "pricing_offline": true,
-            "variables": []
+            "variables": [
+              {
+                "active": true,
+                "description": "A truthy value disables global savings/accounting recording.",
+                "name": "TRACEDECAY_DISABLE_GLOBAL_DB",
+                "value": "1"
+              },
+              {
+                "active": true,
+                "description": "Pins the global accounting database to an explicit path.",
+                "name": "TRACEDECAY_GLOBAL_DB",
+                "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db"
+              },
+              {
+                "active": true,
+                "description": "Pins the user-level TraceDecay data directory (default ~/.tracedecay).",
+                "name": "TRACEDECAY_DATA_DIR",
+                "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay"
+              }
+            ]
           },
           "project": {
             "config": {
               "context_scout": false,
               "exclude": [
-                ".git/**",
-                ".tracedecay/**",
-                "**/*.min.*",
-                ".cache/**",
-                "**/.cache/**",
-                ".gradle/**",
-                "**/.gradle/**",
-                ".next/**",
-                "**/.next/**",
-                ".turbo/**",
-                "**/.turbo/**",
-                ".venv/**",
-                "**/.venv/**",
-                ".worktrees/**",
-                "**/.worktrees/**",
-                "__pycache__/**",
-                "**/__pycache__/**",
-                "build/**",
-                "**/build/**",
-                "coverage/**",
-                "**/coverage/**",
-                "dist/**",
-                "**/dist/**",
-                "node_modules/**",
-                "**/node_modules/**",
-                "out/**",
-                "**/out/**",
                 "target/**",
-                "**/target/**",
-                "vendor/**",
-                "**/vendor/**",
-                "venv/**",
-                "**/venv/**"
+                "dist/**"
               ],
               "extract_docstrings": true,
-              "include": [],
+              "include": [
+                ".github/**"
+              ],
               "max_file_size": 2097152,
               "sync": {
                 "auto_track_pr_branches": false,
@@ -195,54 +202,63 @@
               },
               "track_call_sites": true
             },
-            "configuration_revision_id": "rev-43",
-            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.fd56d9635ef3558e8743096f4bcc8dc5f6e38a457b3b225086af5bf4b01b75ab",
+            "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f",
             "pr_autotrack": {
               "tracked": []
             }
           },
           "resync_recommended": true,
           "storage": {
-            "dashboard_root": "/project",
-            "graph_db": "/project/.tracedecay/graph.db",
-            "lcm_db": "/project/.tracedecay/lcm.db",
-            "lcm_scope": "project",
-            "memory_db": "/project/.tracedecay/memory.db",
-            "project_id": "project.settings.scout",
-            "project_root": "/project",
-            "savings_db": "/project/.tracedecay/savings.db",
-            "storage_mode": "project_local",
-            "store_root": "/project/.tracedecay"
+            "dashboard_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/dashboard",
+            "graph_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
+            "lcm_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/sessions.db",
+            "lcm_scope": "profile_sharded",
+            "memory_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
+            "project_id": "proj_69173dcc8b282d79",
+            "project_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/project",
+            "savings_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db",
+            "storage_mode": "profile_sharded",
+            "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
           },
           "user": {
-            "code_index_worker_configuration_revision_id": "workers-rev-3",
-            "code_index_worker_configuration_snapshot_id": "workers-snapshot-3",
-            "code_index_worker_status": null,
+            "code_index_worker_configuration_revision_id": "configuration.profile.initial.v1",
+            "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+            "code_index_worker_status": {
+              "available_logical_cpus": 96,
+              "configured": {
+                "mode": "automatic"
+              },
+              "effective_workers": 48,
+              "environment_override_workers": null,
+              "limiting_reason": "automatic_half_cores",
+              "memory_safe_workers": 384
+            },
             "code_index_workers": {
               "mode": "automatic"
             },
-            "configuration_revision_id": "user-rev-7",
-            "configuration_snapshot_id": "user-snapshot-7",
-            "extraction_timeout_secs": 30,
+            "configuration_revision_id": "configuration.profile.initial.v1",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+            "extraction_timeout_secs": 60,
             "installed_agents": [],
             "upload_enabled": false,
-            "watcher_debounce": "15s"
+            "watcher_debounce": "2s"
           },
           "version": {
             "cached_latest_version": null,
-            "channel": "stable",
-            "version": "0.1.0"
+            "channel": "beta",
+            "version": "1.0.0-beta.88+451721797b8ae53bc539072fc19994df9cb66d34.dirty"
           }
         },
         "schema_revision": 1,
         "scope": {
-          "project_id": "project.settings.scout",
-          "storage_mode": "project_local",
-          "store_root": "/project/.tracedecay"
+          "project_id": "proj_69173dcc8b282d79",
+          "storage_mode": "profile_sharded",
+          "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
         },
         "source_watermark": null,
         "time": {
-          "observation_time_micros": 100,
+          "observation_time_micros": 1792363717173087,
           "valid_time_micros": null
         },
         "version": {
@@ -256,7 +272,7 @@
   "idempotency_conflict": {
     "body": {
       "contract": {
-        "schema_id": "schema.configuration.batch.result",
+        "schema_id": "schema.application.configuration.configuration_batch.result",
         "schema_revision": 1
       },
       "problem": {
@@ -268,26 +284,26 @@
         "details": [],
         "diagnostic": {
           "code": "configuration.conflict",
-          "message": "The idempotency key was already used for a different settings change."
+          "message": "The configuration request conflicts with current state"
         },
         "execution_failure_classification": null,
         "kind": "conflict",
         "legal_actions": [
           "refresh"
         ],
-        "message": "The idempotency key was already used for a different settings change.",
+        "message": "The configuration request conflicts with current state",
         "owning_layer": "application",
-        "request_id": "request.configuration.settings-fixture",
+        "request_id": "request.dashboard.settings.7558e99727f379cfb4e9b326d15cd304.4",
         "retry": "after_revalidate",
         "retry_after_millis": null,
         "retry_scope": "fresh_request",
         "retryable": true,
         "revision": 1,
         "terminality": "pre_admission",
-        "trace_id": "request.configuration.settings-fixture",
+        "trace_id": "request.dashboard.settings.7558e99727f379cfb4e9b326d15cd304.4",
         "unavailable_classification": null
       },
-      "request_id": "request.configuration.settings-fixture"
+      "request_id": "request.dashboard.settings.7558e99727f379cfb4e9b326d15cd304.4"
     },
     "status": 409
   },
@@ -310,7 +326,7 @@
       },
       "domain_state": "ready",
       "freshness": {
-        "observed_at_micros": 100,
+        "observed_at_micros": 1792363717093059,
         "state": "fresh",
         "watermark": null
       },
@@ -318,6 +334,10 @@
         {
           "kind": "request_apply",
           "operation": "configuration_batch"
+        },
+        {
+          "kind": "request_apply",
+          "operation": "profile_code_index_worker_selection"
         },
         {
           "kind": "refresh",
@@ -331,15 +351,34 @@
           },
           "backend": "codex_app_server",
           "config_endpoint": "/api/plugins/holographic/curation/config",
-          "configuration_revision_id": "rev-42",
+          "configuration_revision_id": "configuration.initial.canonical.v1",
           "enabled": true,
           "host_mode": "standalone"
         },
         "environment": {
           "global_accounting_enabled": false,
-          "global_accounting_mode": "disabled",
+          "global_accounting_mode": "disabled_by_env",
           "pricing_offline": true,
-          "variables": []
+          "variables": [
+            {
+              "active": true,
+              "description": "A truthy value disables global savings/accounting recording.",
+              "name": "TRACEDECAY_DISABLE_GLOBAL_DB",
+              "value": "1"
+            },
+            {
+              "active": true,
+              "description": "Pins the global accounting database to an explicit path.",
+              "name": "TRACEDECAY_GLOBAL_DB",
+              "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db"
+            },
+            {
+              "active": true,
+              "description": "Pins the user-level TraceDecay data directory (default ~/.tracedecay).",
+              "name": "TRACEDECAY_DATA_DIR",
+              "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay"
+            }
+          ]
         },
         "project": {
           "config": {
@@ -391,54 +430,62 @@
             },
             "track_call_sites": true
           },
-          "configuration_revision_id": "rev-42",
-          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.fd56d9635ef3558e8743096f4bcc8dc5f6e38a457b3b225086af5bf4b01b75ab",
+          "configuration_revision_id": "configuration.initial.canonical.v1",
+          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.e027d2b7709ea9e063d5bbce4809ee1d4e72187298a22bd16df6720b2e329741",
           "pr_autotrack": {
             "tracked": []
           }
         },
-        "resync_recommended": false,
         "storage": {
-          "dashboard_root": "/project",
-          "graph_db": "/project/.tracedecay/graph.db",
-          "lcm_db": "/project/.tracedecay/lcm.db",
-          "lcm_scope": "project",
-          "memory_db": "/project/.tracedecay/memory.db",
-          "project_id": "project.settings.scout",
-          "project_root": "/project",
-          "savings_db": "/project/.tracedecay/savings.db",
-          "storage_mode": "project_local",
-          "store_root": "/project/.tracedecay"
+          "dashboard_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/dashboard",
+          "graph_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
+          "lcm_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/sessions.db",
+          "lcm_scope": "profile_sharded",
+          "memory_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
+          "project_id": "proj_69173dcc8b282d79",
+          "project_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/project",
+          "savings_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db",
+          "storage_mode": "profile_sharded",
+          "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
         },
         "user": {
-          "code_index_worker_configuration_revision_id": "workers-rev-3",
-          "code_index_worker_configuration_snapshot_id": "workers-snapshot-3",
-          "code_index_worker_status": null,
+          "code_index_worker_configuration_revision_id": "configuration.profile.initial.v1",
+          "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+          "code_index_worker_status": {
+            "available_logical_cpus": 96,
+            "configured": {
+              "mode": "automatic"
+            },
+            "effective_workers": 48,
+            "environment_override_workers": null,
+            "limiting_reason": "automatic_half_cores",
+            "memory_safe_workers": 384
+          },
           "code_index_workers": {
             "mode": "automatic"
           },
-          "configuration_revision_id": "user-rev-7",
-          "configuration_snapshot_id": "user-snapshot-7",
-          "extraction_timeout_secs": 30,
+          "configuration_revision_id": "configuration.profile.initial.v1",
+          "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+          "extraction_timeout_secs": 60,
           "installed_agents": [],
           "upload_enabled": false,
-          "watcher_debounce": "15s"
+          "watcher_debounce": "2s"
         },
         "version": {
           "cached_latest_version": null,
-          "channel": "stable",
-          "version": "0.1.0"
+          "channel": "beta",
+          "version": "1.0.0-beta.88+451721797b8ae53bc539072fc19994df9cb66d34.dirty"
         }
       },
       "schema_revision": 1,
       "scope": {
-        "project_id": "project.settings.scout",
-        "storage_mode": "project_local",
-        "store_root": "/project/.tracedecay"
+        "project_id": "proj_69173dcc8b282d79",
+        "storage_mode": "profile_sharded",
+        "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
       },
       "source_watermark": null,
       "time": {
-        "observation_time_micros": 100,
+        "observation_time_micros": 1792363717093062,
         "valid_time_micros": null
       },
       "version": {
@@ -450,10 +497,10 @@
   },
   "revision_conflict": {
     "body": {
-      "actual_revision_id": "rev-43",
+      "actual_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
       "code": "configuration_revision_conflict",
       "detail": "settings changed after this edit began; refresh and retry",
-      "expected_revision_id": "rev-42"
+      "expected_revision_id": "configuration.initial.canonical.v1"
     },
     "status": 409
   },
@@ -485,7 +532,7 @@
         },
         "domain_state": "ready",
         "freshness": {
-          "observed_at_micros": 100,
+          "observed_at_micros": 1792363717205602,
           "state": "fresh",
           "watermark": null
         },
@@ -493,6 +540,10 @@
           {
             "kind": "request_apply",
             "operation": "configuration_batch"
+          },
+          {
+            "kind": "request_apply",
+            "operation": "profile_code_index_worker_selection"
           },
           {
             "kind": "refresh",
@@ -506,57 +557,47 @@
             },
             "backend": "codex_app_server",
             "config_endpoint": "/api/plugins/holographic/curation/config",
-            "configuration_revision_id": "rev-42",
+            "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
             "enabled": true,
             "host_mode": "standalone"
           },
           "environment": {
             "global_accounting_enabled": false,
-            "global_accounting_mode": "disabled",
+            "global_accounting_mode": "disabled_by_env",
             "pricing_offline": true,
-            "variables": []
+            "variables": [
+              {
+                "active": true,
+                "description": "A truthy value disables global savings/accounting recording.",
+                "name": "TRACEDECAY_DISABLE_GLOBAL_DB",
+                "value": "1"
+              },
+              {
+                "active": true,
+                "description": "Pins the global accounting database to an explicit path.",
+                "name": "TRACEDECAY_GLOBAL_DB",
+                "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db"
+              },
+              {
+                "active": true,
+                "description": "Pins the user-level TraceDecay data directory (default ~/.tracedecay).",
+                "name": "TRACEDECAY_DATA_DIR",
+                "value": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay"
+              }
+            ]
           },
           "project": {
             "config": {
               "context_scout": false,
               "exclude": [
-                ".git/**",
-                ".tracedecay/**",
-                "**/*.min.*",
-                ".cache/**",
-                "**/.cache/**",
-                ".gradle/**",
-                "**/.gradle/**",
-                ".next/**",
-                "**/.next/**",
-                ".turbo/**",
-                "**/.turbo/**",
-                ".venv/**",
-                "**/.venv/**",
-                ".worktrees/**",
-                "**/.worktrees/**",
-                "__pycache__/**",
-                "**/__pycache__/**",
-                "build/**",
-                "**/build/**",
-                "coverage/**",
-                "**/coverage/**",
-                "dist/**",
-                "**/dist/**",
-                "node_modules/**",
-                "**/node_modules/**",
-                "out/**",
-                "**/out/**",
                 "target/**",
-                "**/target/**",
-                "vendor/**",
-                "**/vendor/**",
-                "venv/**",
-                "**/venv/**"
+                "dist/**"
               ],
               "extract_docstrings": true,
-              "include": [],
-              "max_file_size": 1048576,
+              "include": [
+                ".github/**"
+              ],
+              "max_file_size": 2097152,
               "sync": {
                 "auto_track_pr_branches": false,
                 "auto_track_pr_poll_secs": 300
@@ -566,54 +607,63 @@
               },
               "track_call_sites": true
             },
-            "configuration_revision_id": "rev-42",
-            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.fd56d9635ef3558e8743096f4bcc8dc5f6e38a457b3b225086af5bf4b01b75ab",
+            "configuration_revision_id": "configuration.revision.v1.f1dda57fc1603bacc602ad4cdbb08de9bfb8aa867eaabaef844d45f8c779d5b4",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.061944e9d3ea29c90e551a2ce8af6d42a385839a986c5fd045ed0add7dee042f",
             "pr_autotrack": {
               "tracked": []
             }
           },
           "resync_recommended": false,
           "storage": {
-            "dashboard_root": "/project",
-            "graph_db": "/project/.tracedecay/graph.db",
-            "lcm_db": "/project/.tracedecay/lcm.db",
-            "lcm_scope": "project",
-            "memory_db": "/project/.tracedecay/memory.db",
-            "project_id": "project.settings.scout",
-            "project_root": "/project",
-            "savings_db": "/project/.tracedecay/savings.db",
-            "storage_mode": "project_local",
-            "store_root": "/project/.tracedecay"
+            "dashboard_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/dashboard",
+            "graph_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
+            "lcm_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/sessions.db",
+            "lcm_scope": "profile_sharded",
+            "memory_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79/tracedecay.db",
+            "project_id": "proj_69173dcc8b282d79",
+            "project_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/project",
+            "savings_db": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/global.db",
+            "storage_mode": "profile_sharded",
+            "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
           },
           "user": {
-            "code_index_worker_configuration_revision_id": "workers-rev-3",
-            "code_index_worker_configuration_snapshot_id": "workers-snapshot-3",
-            "code_index_worker_status": null,
+            "code_index_worker_configuration_revision_id": "configuration.profile.initial.v1",
+            "code_index_worker_configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+            "code_index_worker_status": {
+              "available_logical_cpus": 96,
+              "configured": {
+                "mode": "automatic"
+              },
+              "effective_workers": 48,
+              "environment_override_workers": null,
+              "limiting_reason": "automatic_half_cores",
+              "memory_safe_workers": 384
+            },
             "code_index_workers": {
               "mode": "automatic"
             },
-            "configuration_revision_id": "user-rev-7",
-            "configuration_snapshot_id": "user-snapshot-7",
-            "extraction_timeout_secs": 30,
+            "configuration_revision_id": "configuration.profile.initial.v1",
+            "configuration_snapshot_id": "tracedecay.configuration.snapshot.v1.3862ddb1c67746133efde2466f16da128b79ae5879a195e7075d1d0c9fe7525c",
+            "extraction_timeout_secs": 60,
             "installed_agents": [],
             "upload_enabled": false,
-            "watcher_debounce": "15s"
+            "watcher_debounce": "2s"
           },
           "version": {
             "cached_latest_version": null,
-            "channel": "stable",
-            "version": "0.1.0"
+            "channel": "beta",
+            "version": "1.0.0-beta.88+451721797b8ae53bc539072fc19994df9cb66d34.dirty"
           }
         },
         "schema_revision": 1,
         "scope": {
-          "project_id": "project.settings.scout",
-          "storage_mode": "project_local",
-          "store_root": "/project/.tracedecay"
+          "project_id": "proj_69173dcc8b282d79",
+          "storage_mode": "profile_sharded",
+          "store_root": "/run/nl/w/4ba25a53-d0f6-4590-8e56-7dffb5d83e12/tmp/.tmpxOcJR3/home/.tracedecay/projects/proj_69173dcc8b282d79"
         },
         "source_watermark": null,
         "time": {
-          "observation_time_micros": 100,
+          "observation_time_micros": 1792363717205605,
           "valid_time_micros": null
         },
         "version": {
