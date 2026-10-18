@@ -3,14 +3,13 @@ import { describe, expect, it } from 'vitest';
 import {
   codeViewBlocker,
   codeViewNeedsFocus,
-  codeViewsOffered,
   readCodeLocation,
   writeCodeLocation,
 } from './codeView.ts';
 
 describe('Code view locations', () => {
-  it('restores every shell view while preserving symbol identity', () => {
-    for (const view of ['atlas', 'trace', 'shared-code', 'compare'] as const) {
+  it('restores every mounted view while preserving symbol identity', () => {
+    for (const view of ['cortex', 'trace', 'shared-code', 'compare'] as const) {
       expect(readCodeLocation(new URLSearchParams(`view=${view}&symbol=symbol-42`))).toEqual({
         view,
         focusId: 'symbol-42',
@@ -23,13 +22,30 @@ describe('Code view locations', () => {
     });
   });
 
-  it('defaults unknown views to Cortex without losing a valid symbol focus', () => {
-    expect(
-      readCodeLocation(new URLSearchParams('view=core&symbol=symbol-42')),
-    ).toEqual({
-      view: 'cortex',
-      focusId: 'symbol-42',
-    });
+  it.each(['core', 'atlas', 'unknown'])(
+    'opens the unsupported %s view in Cortex without losing symbol focus',
+    (view) => {
+      expect(
+        readCodeLocation(new URLSearchParams(`view=${view}&symbol=symbol-42`)),
+      ).toEqual({
+        view: 'cortex',
+        focusId: 'symbol-42',
+      });
+    },
+  );
+
+  it('preserves project and revision selectors when rewriting a retired view', () => {
+    const current = new URLSearchParams(
+      'view=atlas&symbol=symbol-42&project=project-7&base_revision=abc&scope=local',
+    );
+    const next = writeCodeLocation(current, readCodeLocation(current));
+
+    expect(next.has('view')).toBe(false);
+    expect(next.get('symbol')).toBe('symbol-42');
+    expect(next.get('project')).toBe('project-7');
+    expect(next.get('base_revision')).toBe('abc');
+    expect(next.get('scope')).toBe('local');
+    expect(current.get('view')).toBe('atlas');
   });
 
   it('writes the default view without redundant query parameters', () => {
@@ -42,24 +58,6 @@ describe('Code view locations', () => {
         },
       ).toString(),
     ).toBe('');
-  });
-});
-
-describe('Code view switcher', () => {
-  it('hides a pending view until a deep link asks for it', () => {
-    expect(codeViewsOffered('cortex')).toEqual([
-      'cortex',
-      'trace',
-      'shared-code',
-      'compare',
-    ]);
-    expect(codeViewsOffered('atlas')).toEqual([
-      'cortex',
-      'trace',
-      'shared-code',
-      'compare',
-      'atlas',
-    ]);
   });
 });
 
@@ -80,12 +78,6 @@ describe('Code view availability', () => {
       title: 'The selected symbol is unavailable',
       detail: 'The current graph generation did not resolve the URL identity.',
     });
-  });
-
-  it('states the unmounted projection Atlas still needs', () => {
-    expect(codeViewBlocker('atlas', 'absent')?.detail).toMatch(
-      /structural treemap/i,
-    );
   });
 
   it('gates Shared Code on the same selected symbol as Trace', () => {
