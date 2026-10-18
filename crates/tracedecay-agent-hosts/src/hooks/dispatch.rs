@@ -430,12 +430,11 @@ fn native_context_scout_lifecycle(
     fields: &NativeIdentityFields,
     event_id: [u8; 16],
 ) -> Option<NativeContextScoutLifecycleV1> {
-    matches!(
-        host,
-        NativeHostIdentityV1::KimiCode | NativeHostIdentityV1::OpenCode
-    )
-    .then(|| NativeContextScoutLifecycleV1::new(fields.session_id()?, fields.call_id()?, event_id))
-    .flatten()
+    NativeContextScoutLifecycleV1::host_mounts_lifecycle(host)
+        .then(|| {
+            NativeContextScoutLifecycleV1::new(fields.session_id()?, fields.call_id()?, event_id)
+        })
+        .flatten()
 }
 
 const HOOK_ADMISSION_ACK_BUDGET_MICROS: u64 = 25_000;

@@ -505,6 +505,14 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         ))
     }
 
+    fn file_lost(&self) -> bool {
+        RepositoryRuntimePhysicalAttachment::file_lost(self)
+    }
+
+    fn lost_file_closed(&self) -> bool {
+        RepositoryRuntimePhysicalAttachment::lost_file_closed(self)
+    }
+
     fn drain(&self) -> Result<(), String> {
         RepositoryRuntimePhysicalAttachment::drain(self)
     }

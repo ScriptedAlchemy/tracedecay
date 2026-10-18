@@ -62,5 +62,6 @@ pub use telemetry::{
 };
 pub use writer::{
     CheckpointControlError, CheckpointHandle, CheckpointRequest, CheckpointTicket,
-    ExistingWriterLocator, PersistentWriter, WriterActorError, WriterStartError, WriterState,
+    ExistingWriterLocator, FILE_PROBE_INTERVAL, PersistentWriter, WriterActorError,
+    WriterStartError, WriterState,
 };

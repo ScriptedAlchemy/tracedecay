@@ -69,8 +69,9 @@ fn index_bench_runs_the_committed_corpus_end_to_end() {
     let bench = std::env::var_os("CARGO_BIN_EXE_tracedecay-index-bench")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_tracedecay-index-bench").into());
     let output = Command::new(bench)
-        .arg("--corpus")
-        .arg(&corpus)
+        .current_dir(scratch.path())
+        .env_remove("BUILD_WORKSPACE_DIRECTORY")
+        .env_remove("TRACEDECAY_INDEX_BENCH_CORPUS")
         .env("TMPDIR", scratch.path())
         .output()
         .unwrap();

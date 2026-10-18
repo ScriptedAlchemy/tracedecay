@@ -124,12 +124,11 @@ pub use profile_host_admission_replay::{
     ProfileHostAdmissionReplayPass, ProfileHostAdmissionReplayRegistry,
 };
 pub use project_runtime::{
-    FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
-    ProjectRuntimePublicationAttemptV1, ProjectRuntimePublicationStateV1,
-    ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1, ProjectRuntimeRequestLeaseV1,
-    ProjectRuntimeRootQuiescenceV1, RegisteredDeliveryReadAuthorityV1,
-    RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1, StoreObservabilityMountV1,
-    StoreObservabilityRegistryV1,
+    FeedbackCyclePublicationError, ProjectRuntimePublicationAttemptV1,
+    ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
+    ProjectRuntimeRequestLeaseV1, ProjectRuntimeRootQuiescenceV1,
+    RegisteredDeliveryReadAuthorityV1, RegisteredObservabilityProducerV1,
+    StoreObservabilityMountErrorV1, StoreObservabilityMountV1, StoreObservabilityRegistryV1,
 };
 pub use query_mcp_admission::{
     QUERY_MCP_READ_CAPABILITY_V1, QueryMcpAdmissionUnavailableV1, QueryMcpReadAdmissionProviderV1,

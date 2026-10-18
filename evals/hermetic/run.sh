@@ -243,18 +243,15 @@ install_plugin() {
 
 run_agent_turn() {
   local agent="$1" model="$2" prompt="$3" cwd="$4" env_dir="$5" id="$6"
-  local out
+  local status=0
   case "${agent}" in
     claude)
-      # `</dev/null`: the agent must never inherit the caller's stdin, the
-      # corpus while-read loop feeds from it, and an agent that slurps stdin
-      # (codex exec does) would silently eat every remaining scenario line.
-      out="$(cd "${cwd}" && claude -p "${prompt}" \
+      # Do not inherit the corpus reader's stdin. Preserve the real exit code.
+      (cd "${cwd}" && claude -p "${prompt}" \
           --model "${model:-sonnet}" \
           --output-format json \
-          --dangerously-skip-permissions </dev/null 2>"${env_dir}/results/${id}.stderr")" || \
-        log "scenario ${id}: claude -p exited non-zero (see ${id}.stderr)"
-      printf '%s' "${out}" >"${env_dir}/results/${id}.claude.json"
+          --dangerously-skip-permissions) </dev/null \
+          >"${env_dir}/results/${id}.claude.json" 2>"${env_dir}/results/${id}.stderr" || status=$?
       ;;
     codex)
       local -a cmd=(codex exec --json --cd "${cwd}" --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT:-medium}\"")
@@ -262,21 +259,34 @@ run_agent_turn() {
         cmd+=(--model "${model}")
       fi
       cmd+=("${prompt}")
-      if ! (cd "${cwd}" && "${cmd[@]}" </dev/null >"${env_dir}/results/${id}.codex.jsonl" 2>"${env_dir}/results/${id}.stderr"); then
-        log "scenario ${id}: codex exec exited non-zero (see ${id}.stderr)"
-      fi
+      (cd "${cwd}" && "${cmd[@]}") </dev/null \
+        >"${env_dir}/results/${id}.codex.jsonl" 2>"${env_dir}/results/${id}.stderr" || status=$?
       ;;
     *)
       die "unsupported agent: ${agent}"
       ;;
   esac
+  if [[ "${status}" -ne 0 ]]; then
+    log "scenario ${id}: ${agent} exited ${status} (see ${id}.stderr)"
+  fi
+  return "${status}"
 }
 
 score_agent_turn() {
   local agent="$1" line="$2" cwd="$3" env_dir="$4" id="$5" verify_status="${6:-}" rep="${7:-1}"
+  local setup_status="${8:-}" agent_status="${9:-}" scenario_index="${10:-}"
   local -a extra=(--rep "${rep}")
+  if [[ -n "${scenario_index}" ]]; then
+    extra+=(--scenario-index "${scenario_index}")
+  fi
   if [[ -n "${verify_status}" ]]; then
     extra+=(--verify-status "${verify_status}")
+  fi
+  if [[ -n "${setup_status}" ]]; then
+    extra+=(--setup-status "${setup_status}")
+  fi
+  if [[ -n "${agent_status}" ]]; then
+    extra+=(--agent-status "${agent_status}")
   fi
   case "${agent}" in
     claude)
@@ -436,49 +446,64 @@ run_corpus() {
       log "rep ${rep}/${reps}: resetting staged fixtures"
       stage_fixtures "${env_dir}" "${HERMETIC_TRACEDECAY_BIN}"
     fi
+    local scenario_index=0
     while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
     total=$((total + 1))
+    scenario_index=$((scenario_index + 1))
 
-    local id project prompt setup_cmd verify_cmd
+    local id project prompt setup_cmd verify_cmd prompt_valid
     id="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))')"
     project="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("project_dir",""))')"
     prompt="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("prompt",""))')"
     setup_cmd="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("setup_cmd",""))')"
     verify_cmd="$(printf '%s' "${line}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("verify_cmd",""))')"
 
-    [[ -n "${prompt}" ]] || { log "scenario ${id}: empty prompt, skipping"; continue; }
+    prompt_valid="$(printf '%s' "${line}" | python3 -c 'import json,sys; p=json.load(sys.stdin).get("prompt"); print(int(isinstance(p,str) and bool(p.strip())))')"
+    if [[ "${prompt_valid}" != "1" ]]; then
+      log "scenario ${id}: invalid prompt; recording an error without execution"
+    fi
     local run_cwd
-    run_cwd="$(resolve_project_dir "${env_dir}" "${project}")"
-    [[ -d "${run_cwd}" ]] || run_cwd="${default_project}"
-
-    local run_id="${id}"
-    [[ "${reps}" -gt 1 ]] && run_id="${id}.r${rep}"
-
-    if [[ -n "${setup_cmd}" ]]; then
-      log "scenario ${id}: setup (${setup_cmd})"
-      (cd "${run_cwd}" && bash -c "${setup_cmd}") \
-        || log "scenario ${id}: WARNING setup_cmd failed"
+    if [[ -z "${project}" ]]; then
+      run_cwd="${default_project}"
+    else
+      run_cwd="$(resolve_project_dir "${env_dir}" "${project}")"
+    fi
+    if [[ ! -d "${run_cwd}" ]]; then
+      log "scenario ${id}: project directory does not exist: ${run_cwd}; skipping execution"
     fi
 
-    log "scenario ${id} rep ${rep}: running (agent=${label}, cwd=${run_cwd})"
-    run_agent_turn "${agent}" "${model}" "${prompt}" "${run_cwd}" "${env_dir}" "${run_id}"
+    # The ordinal avoids a duplicate scenario ID overwriting the earlier run.
+    local run_id="${total}.r${rep}"
+    local setup_status="" agent_status="" verify_status=""
+    if [[ "${prompt_valid}" == "1" && -d "${run_cwd}" && -n "${setup_cmd}" ]]; then
+      log "scenario ${id}: setup (${setup_cmd})"
+      setup_status=0
+      (cd "${run_cwd}" && bash -c "${setup_cmd}") </dev/null \
+        >"${env_dir}/results/${run_id}.setup.log" 2>&1 || setup_status=$?
+      if [[ "${setup_status}" -ne 0 ]]; then
+        log "scenario ${id}: setup exited ${setup_status}; skipping agent"
+      fi
+    fi
 
-    # Post-session effect check, with the staged dev binary first on PATH.
-    local verify_status=""
-    if [[ -n "${verify_cmd}" ]]; then
-      if (cd "${run_cwd}" && PATH="${env_dir}/bin:${PATH}" bash -c "${verify_cmd}" \
-            >"${env_dir}/results/${run_id}.verify.log" 2>&1); then
+    if [[ "${prompt_valid}" == "1" && -d "${run_cwd}" && "${setup_status:-0}" -eq 0 ]]; then
+      log "scenario ${id} rep ${rep}: running (agent=${label}, cwd=${run_cwd})"
+      agent_status=0
+      run_agent_turn "${agent}" "${model}" "${prompt}" "${run_cwd}" "${env_dir}" "${run_id}" || agent_status=$?
+    fi
+
+    if [[ "${agent_status}" == "0" && -n "${verify_cmd}" ]]; then
+      if (cd "${run_cwd}" && PATH="${env_dir}/bin:${PATH}" bash -c "${verify_cmd}") </dev/null \
+            >"${env_dir}/results/${run_id}.verify.log" 2>&1; then
         verify_status=0
       else
-        verify_status=1
+        verify_status=$?
       fi
       log "scenario ${id}: verify_cmd exit ${verify_status}"
     fi
 
-    # Score: inspect the isolated transcript/output and count tools/commands.
     local scored
-    scored="$(score_agent_turn "${agent}" "${line}" "${run_cwd}" "${env_dir}" "${run_id}" "${verify_status}" "${rep}")"
+    scored="$(score_agent_turn "${agent}" "${line}" "${run_cwd}" "${env_dir}" "${run_id}" "${verify_status}" "${rep}" "${setup_status}" "${agent_status}" "${scenario_index}")"
     printf '%s\n' "${scored}" >>"${results}"
 
     if printf '%s' "${scored}" | python3 -c 'import sys,json;sys.exit(0 if json.load(sys.stdin).get("pass") else 1)'; then
@@ -498,8 +523,8 @@ run_corpus() {
     printf -- '- Agent: `%s`\n' "${label}"
     printf -- '- Dev binary: `%s`\n' "${HERMETIC_TRACEDECAY_BIN}"
     printf -- '- Passed: **%s / %s**\n\n' "${passed}" "${total}"
-    printf '| id | rep | pass | tracedecay tools | CLI commands | attempts | verify | native tools | session |\n'
-    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    printf '| id | rep | pass | error | tracedecay tools | CLI commands | attempts | verify | native tools | session |\n'
+    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
     python3 - "${results}" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
@@ -510,10 +535,11 @@ with open(sys.argv[1]) as fh:
         r = json.loads(ln)
         vp = r.get("verify_pass")
         verify = "-" if vp is None else ("yes" if vp else "no")
-        print("| {id} | {rep} | {ok} | {td} | {cli} | {attempts} | {verify} | {nat} | {sid} |".format(
+        print("| {id} | {rep} | {ok} | {error} | {td} | {cli} | {attempts} | {verify} | {nat} | {sid} |".format(
             id=r.get("id",""),
             rep=r.get("rep", 1),
             ok="yes" if r.get("pass") else "no",
+            error=(r.get("error") or {}).get("code", ""),
             td=r.get("tracedecay_tool_uses",0),
             cli=r.get("cli_command_uses",0),
             attempts=r.get("tool_cmd_attempts", ""),
@@ -529,6 +555,7 @@ PY
   log "SCORE: ${passed}/${total} passed"
   # Echo summary to stdout for the caller.
   cat "${summary}"
+  [[ "${total}" -gt 0 && "${passed}" -eq "${total}" ]]
 }
 
 # --------------------------------------------------------------------------

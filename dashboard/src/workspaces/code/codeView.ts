@@ -1,12 +1,11 @@
 /**
- * The Code workspace's lenses and their URL identity.
+ * The Code workspace's mounted lenses and their URL identity.
  *
- * Cortex is the default and the broad semantic topology; Trace and Shared Code
- * read one selected symbol occurrence; Compare carries its own revision
- * selection; Atlas is the exact-files peer whose structural projection is not
- * mounted yet. The order is the one the reader is shown.
+ * Cortex is the broad semantic topology; Trace and Shared Code read one
+ * selected symbol occurrence; Compare carries its own revision selection.
+ * The order is the one the reader is shown.
  */
-const CODE_VIEWS = ['cortex', 'trace', 'shared-code', 'compare', 'atlas'] as const;
+export const CODE_VIEWS = ['cortex', 'trace', 'shared-code', 'compare'] as const;
 
 export type CodeView = (typeof CODE_VIEWS)[number];
 type CodeFocusState = 'absent' | 'loading' | 'available' | 'unavailable';
@@ -15,46 +14,20 @@ export const CODE_VIEW_DEFINITIONS = {
   cortex: {
     label: 'Cortex',
     note: 'the indexed graph as one semantic topology · hover inspects · click pins',
-    status: 'mounted',
   },
   trace: {
     label: 'Trace',
     note: 'callers and inputs through the selected symbol to callees and effects',
-    status: 'mounted',
   },
   'shared-code': {
     label: 'Shared Code',
     note: 'verified exact and rename-normalized copies of the selected body',
-    status: 'mounted',
   },
   compare: {
     label: 'Compare',
     note: 'two exact revisions in one identity-stable union layout',
-    status: 'mounted',
   },
-  atlas: {
-    label: 'Atlas',
-    note: 'fixed repository geometry across structural lenses',
-    status: 'pending',
-  },
-} as const satisfies Record<
-  CodeView,
-  { label: string; note: string; status: 'mounted' | 'pending' }
->;
-
-/**
- * Views the switcher offers.
- *
- * A pending view is not a control until someone asks for it. Atlas stays
- * unavailable on a deep link, that answer is honest, but it does not sit
- * disabled on every Code visit. Keeping the slot visible would only complete
- * the enum; the operator cannot use it.
- */
-export function codeViewsOffered(active: CodeView): readonly CodeView[] {
-  return CODE_VIEWS.filter(
-    (view) => CODE_VIEW_DEFINITIONS[view].status === 'mounted' || view === active,
-  );
-}
+} as const satisfies Record<CodeView, { label: string; note: string }>;
 
 interface CodeLocation {
   readonly view: CodeView;
@@ -70,12 +43,11 @@ interface CodeViewBlocker {
 const VIEW_PARAM = 'view';
 const FOCUS_PARAM = 'symbol';
 
-/** Unknown views open Cortex. */
+/** Unknown or retired views open Cortex without losing the symbol identity. */
 export function readCodeLocation(params: URLSearchParams): CodeLocation {
   const focusId = params.get(FOCUS_PARAM);
   const requested = params.get(VIEW_PARAM);
   switch (requested) {
-    case 'atlas':
     case 'trace':
     case 'shared-code':
     case 'compare':
@@ -106,12 +78,6 @@ export function codeViewBlocker(
   focus: CodeFocusState,
 ): CodeViewBlocker | null {
   switch (view) {
-    case 'atlas':
-      return {
-        kind: 'unavailable',
-        title: 'Atlas is unavailable',
-        detail: 'The fixed structural treemap projection is not mounted.',
-      };
     case 'cortex':
     case 'compare':
       return null;

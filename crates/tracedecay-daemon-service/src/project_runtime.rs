@@ -42,76 +42,6 @@ mod recovery_tests;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TestFirst(u8);
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TestSecond(u8);
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TestOmitted(u8);
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TestLifecycleEvent {
-    Construct { slot: u8, mark: u8 },
-    Stage(u8),
-    Publish,
-    Drop { slot: u8, mark: u8 },
-}
-
-#[cfg(test)]
-#[derive(Debug, Default)]
-struct TestLifecycleSpy {
-    events: std::sync::Mutex<Vec<TestLifecycleEvent>>,
-    live: std::sync::atomic::AtomicUsize,
-}
-
-#[cfg(test)]
-impl TestLifecycleSpy {
-    fn record(&self, event: TestLifecycleEvent) {
-        self.events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(event);
-    }
-
-    fn events(&self) -> Vec<TestLifecycleEvent> {
-        self.events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-struct RecordingComponent<const SLOT: u8> {
-    mark: u8,
-    spy: Arc<TestLifecycleSpy>,
-}
-
-#[cfg(test)]
-impl<const SLOT: u8> RecordingComponent<SLOT> {
-    fn new(mark: u8, spy: Arc<TestLifecycleSpy>) -> Self {
-        spy.live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        spy.record(TestLifecycleEvent::Construct { slot: SLOT, mark });
-        Self { mark, spy }
-    }
-}
-
-#[cfg(test)]
-impl<const SLOT: u8> Drop for RecordingComponent<SLOT> {
-    fn drop(&mut self) {
-        self.spy.record(TestLifecycleEvent::Drop {
-            slot: SLOT,
-            mark: self.mark,
-        });
-        self.spy
-            .live
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
 /// A registered background-recovery cancellation standing in for the owners
 /// `RegisteredWorkRuntime` mounts.
 ///
@@ -200,14 +130,6 @@ pub struct ProjectRuntime {
     #[cfg(test)]
     test_first: Option<TestFirst>,
     #[cfg(test)]
-    test_second: Option<TestSecond>,
-    #[cfg(test)]
-    test_omitted: Option<TestOmitted>,
-    #[cfg(test)]
-    recording_first: Option<RecordingComponent<1>>,
-    #[cfg(test)]
-    recording_second: Option<RecordingComponent<2>>,
-    #[cfg(test)]
     recovery_cancel_probe: Option<RecoveryCancelProbe>,
 }
 
@@ -243,14 +165,6 @@ const _: fn(&ProjectRuntime) = |value| {
         #[cfg(test)]
         test_first,
         #[cfg(test)]
-        test_second,
-        #[cfg(test)]
-        test_omitted,
-        #[cfg(test)]
-        recording_first,
-        #[cfg(test)]
-        recording_second,
-        #[cfg(test)]
         recovery_cancel_probe,
     } = value;
     assert_send_sync(publication);
@@ -276,14 +190,6 @@ const _: fn(&ProjectRuntime) = |value| {
     assert_send_sync(registration_builds);
     #[cfg(test)]
     assert_send_sync(test_first);
-    #[cfg(test)]
-    assert_send_sync(test_second);
-    #[cfg(test)]
-    assert_send_sync(test_omitted);
-    #[cfg(test)]
-    assert_send_sync(recording_first);
-    #[cfg(test)]
-    assert_send_sync(recording_second);
     #[cfg(test)]
     assert_send_sync(recovery_cancel_probe);
 };
@@ -333,12 +239,7 @@ impl ProjectRuntime {
             || {
                 #[cfg(test)]
                 {
-                    self.test_first.is_some()
-                        || self.test_second.is_some()
-                        || self.test_omitted.is_some()
-                        || self.recording_first.is_some()
-                        || self.recording_second.is_some()
-                        || self.recovery_cancel_probe.is_some()
+                    self.test_first.is_some() || self.recovery_cancel_probe.is_some()
                 }
                 #[cfg(not(test))]
                 {
@@ -414,186 +315,32 @@ project_runtime_components!(
 #[cfg(test)]
 project_runtime_components!(
     TestFirst => test_first,
-    TestSecond => test_second,
-    TestOmitted => test_omitted,
-    RecordingComponent<1> => recording_first,
-    RecordingComponent<2> => recording_second,
     RecoveryCancelProbe => recovery_cancel_probe,
 );
 
-#[derive(Clone, Copy)]
-struct ReservedProjectRuntimeSlot {
-    type_id: TypeId,
-    occupied: fn(&ProjectRuntime) -> bool,
-}
-
-#[derive(Clone, Default)]
-struct ProjectRuntimeReservation {
-    slots: Vec<ReservedProjectRuntimeSlot>,
-}
-
-impl ProjectRuntimeReservation {
-    fn reserve<C>(&mut self)
-    where
-        C: ProjectRuntimeComponent,
-    {
-        let type_id = TypeId::of::<C>();
-        if self.slots.iter().any(|slot| slot.type_id == type_id) {
-            return;
-        }
-        self.slots.push(ReservedProjectRuntimeSlot {
-            type_id,
-            occupied: |runtime| C::peek(runtime).is_some(),
-        });
-    }
-
-    fn contains<C>(&self) -> bool
-    where
-        C: ProjectRuntimeComponent,
-    {
-        let type_id = TypeId::of::<C>();
-        self.slots.iter().any(|slot| slot.type_id == type_id)
-    }
-
-    fn conflicts_with(&self, runtime: &ProjectRuntime) -> bool {
-        self.slots
-            .iter()
-            .any(|slot| (slot.occupied)(runtime) || runtime.reservations.contains(&slot.type_id))
-    }
-
-    fn conflicts_with_components(&self, runtime: &ProjectRuntime) -> bool {
-        self.slots.iter().any(|slot| (slot.occupied)(runtime))
-    }
-
-    fn is_complete(&self, runtime: &ProjectRuntime) -> bool {
-        self.slots.iter().all(|slot| (slot.occupied)(runtime))
-    }
-
-    fn has_same_slots(&self, other: &Self) -> bool {
-        self.slots.len() == other.slots.len()
-            && self.slots.iter().all(|slot| {
-                other
-                    .slots
-                    .iter()
-                    .any(|other| other.type_id == slot.type_id)
-            })
-    }
-
-    fn type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
-        self.slots.iter().map(|slot| slot.type_id)
-    }
-}
-
-/// Components prepared for one all-or-nothing project-runtime publication.
+/// The three owners feedback admission publishes together.
 ///
-/// Typed slots are reserved under the registry lock, construction runs after
-/// releasing it, and every staged component becomes reachable under one final
-/// lock acquisition. A conflict leaves every incumbent and staged component
-/// untouched.
-pub(crate) struct ProjectRuntimePublication {
-    staged: ProjectRuntime,
-    reservation: ProjectRuntimeReservation,
-    #[cfg(test)]
-    lifecycle_spy: Option<Arc<TestLifecycleSpy>>,
+/// Construction happens outside the registry lock; a complete bundle is the
+/// only value a feedback reservation can commit.
+pub(crate) struct FeedbackRegistrationBundle {
+    pub callable_code: RegisteredCallableCodeRuntime,
+    pub feedback: RegisteredFeedbackRuntime,
+    pub feedback_cycle_input: Arc<SwitchableFeedbackCycleRuntimeV1>,
 }
 
-impl ProjectRuntimePublication {
-    fn new(reservation: ProjectRuntimeReservation) -> Self {
-        Self {
-            staged: ProjectRuntime::default(),
-            reservation,
-            #[cfg(test)]
-            lifecycle_spy: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn record_lifecycle_with(&mut self, spy: Arc<TestLifecycleSpy>) {
-        self.lifecycle_spy = Some(spy);
-    }
-
-    /// Stages one component. A bundle cannot name the same typed slot twice.
-    pub(crate) fn stage<C>(&mut self, component: C) -> Result<(), ProjectRuntimeAlreadyRegistered>
-    where
-        C: ProjectRuntimeComponent,
-    {
-        if !self.reservation.contains::<C>() {
-            return Err(ProjectRuntimeAlreadyRegistered);
-        }
-        let slot = C::slot(&mut self.staged);
-        if slot.is_some() {
-            return Err(ProjectRuntimeAlreadyRegistered);
-        }
-        *slot = Some(component);
-        Ok(())
-    }
-
-    fn conflicts_with(&self, incumbent: &ProjectRuntime) -> bool {
-        self.reservation.conflicts_with_components(incumbent)
-    }
-
-    fn commit_into(
-        mut self,
-        incumbent: &mut ProjectRuntime,
-    ) -> Result<(), ProjectRuntimeAlreadyRegistered> {
-        #[cfg(test)]
-        if let Some(spy) = &self.lifecycle_spy {
-            spy.record(TestLifecycleEvent::Publish);
-        }
-        if !self.reservation.is_complete(&self.staged) || self.conflicts_with(incumbent) {
-            return Err(ProjectRuntimeAlreadyRegistered);
-        }
-        macro_rules! move_all_components {
-            ($source:ident, $target:ident) => {{
-                macro_rules! move_component {
-                    ($field:ident) => {
-                        if $source.$field.is_some() {
-                            $target.$field = $source.$field.take();
-                        }
-                    };
-                }
-                move_component!(callable_code);
-                move_component!(feedback);
-                move_component!(advisory_cycle);
-                move_component!(advisory);
-                move_component!(delivery_read);
-                move_component!(feedback_cycle);
-                move_component!(feedback_cycle_input);
-                move_component!(primitive);
-                move_component!(configuration);
-                move_component!(work);
-                move_component!(retained);
-                move_component!(lsp_owner);
-                #[cfg(any(test, feature = "test-helpers"))]
-                move_component!(test_marker);
-                #[cfg(test)]
-                {
-                    move_component!(test_first);
-                    move_component!(test_second);
-                    move_component!(recording_first);
-                    move_component!(recording_second);
-                }
-            }};
-        }
-        let mut prepared = ProjectRuntime::default();
-        let staged = &mut self.staged;
-        move_all_components!(staged, prepared);
-        assert!(
-            !staged.has_components(),
-            "every staged runtime component must be published"
-        );
-        let prepared = &mut prepared;
-        move_all_components!(prepared, incumbent);
-        Ok(())
-    }
+fn feedback_registration_slots() -> [TypeId; 3] {
+    [
+        TypeId::of::<RegisteredCallableCodeRuntime>(),
+        TypeId::of::<RegisteredFeedbackRuntime>(),
+        TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>(),
+    ]
 }
 
-/// A component was already published for this project.
-///
-/// Registration refuses rather than replaces: a second registration of a live
-/// component would detach the first without shutting it down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProjectRuntimeAlreadyRegistered;
+fn has_feedback_components(runtime: &ProjectRuntime) -> bool {
+    runtime.callable_code.is_some()
+        || runtime.feedback.is_some()
+        || runtime.feedback_cycle_input.is_some()
+}
 
 #[derive(Clone)]
 pub(crate) struct RegisteredAdvisoryRuntimeV1 {
@@ -693,12 +440,6 @@ impl From<ProjectRuntimeRegistryError> for FeedbackCyclePublicationError {
     }
 }
 
-impl From<ProjectRuntimeAlreadyRegistered> for ProjectRuntimeRegistryError {
-    fn from(_: ProjectRuntimeAlreadyRegistered) -> Self {
-        Self::AlreadyRegistered
-    }
-}
-
 #[derive(Default)]
 struct ProjectRuntimeRootFencesV1 {
     retired: BTreeSet<PathBuf>,
@@ -791,10 +532,9 @@ impl ProjectRuntimeBuildReservationV1 {
     }
 }
 
-struct ProjectRuntimeReservationLease {
+struct FeedbackRegistrationLease {
     registry: ProjectRuntimeRegistryV1,
     project_root: PathBuf,
-    reservation: ProjectRuntimeReservation,
     active: bool,
 }
 
@@ -866,15 +606,10 @@ impl Drop for ProjectRuntimeRequestLeaseInnerV1 {
     }
 }
 
-impl ProjectRuntimeReservationLease {
-    async fn release(mut self) {
-        self.release_inner().await;
-        self.active = false;
-    }
-
+impl FeedbackRegistrationLease {
     fn commit(
         mut self,
-        publication: ProjectRuntimePublication,
+        bundle: FeedbackRegistrationBundle,
     ) -> Result<(), ProjectRuntimeRegistryError> {
         #[cfg(any(test, feature = "test-helpers"))]
         if let Some(commit_starting) = self
@@ -893,17 +628,17 @@ impl ProjectRuntimeReservationLease {
             || root_fences.contains(&self.project_root)
         {
             Err(ProjectRuntimeRegistryError::Closed)
-        } else if self.reservation.has_same_slots(&publication.reservation) {
-            publication.commit_into(runtime).map_err(Into::into)
-        } else {
+        } else if has_feedback_components(runtime) {
             Err(ProjectRuntimeRegistryError::AlreadyRegistered)
+        } else {
+            runtime.callable_code = Some(bundle.callable_code);
+            runtime.feedback = Some(bundle.feedback);
+            runtime.feedback_cycle_input = Some(bundle.feedback_cycle_input);
+            Ok(())
         };
-        runtime.reservations.retain(|type_id| {
-            !self
-                .reservation
-                .type_ids()
-                .any(|reserved| reserved == *type_id)
-        });
+        runtime
+            .reservations
+            .retain(|type_id| !feedback_registration_slots().contains(type_id));
         let remove_project =
             runtime.reservations.is_empty() && !runtime.retain_after_reservation_release();
         if remove_project {
@@ -916,22 +651,11 @@ impl ProjectRuntimeReservationLease {
         result
     }
 
-    async fn release_inner(&self) {
-        let mut runtimes = self.registry.lock_runtimes();
-        Self::release_reservation(&mut runtimes, &self.project_root, &self.reservation);
-        drop(runtimes);
-        self.registry.signal_reservation_changed();
-    }
-
-    fn release_reservation(
-        runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>,
-        project_root: &Path,
-        reservation: &ProjectRuntimeReservation,
-    ) {
+    fn release_reservation(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>, project_root: &Path) {
         if let Some(runtime) = runtimes.get_mut(project_root) {
             runtime
                 .reservations
-                .retain(|type_id| !reservation.type_ids().any(|reserved| reserved == *type_id));
+                .retain(|type_id| !feedback_registration_slots().contains(type_id));
             let remove_project =
                 runtime.reservations.is_empty() && !runtime.retain_after_reservation_release();
             if remove_project {
@@ -941,17 +665,13 @@ impl ProjectRuntimeReservationLease {
     }
 }
 
-impl Drop for ProjectRuntimeReservationLease {
+impl Drop for FeedbackRegistrationLease {
     fn drop(&mut self) {
         if !self.active {
             return;
         }
         let mut runtimes = self.registry.lock_runtimes();
-        ProjectRuntimeReservationLease::release_reservation(
-            &mut runtimes,
-            &self.project_root,
-            &self.reservation,
-        );
+        FeedbackRegistrationLease::release_reservation(&mut runtimes, &self.project_root);
         drop(runtimes);
         self.registry.signal_reservation_changed();
     }
@@ -1088,27 +808,30 @@ impl ProjectRuntimeRegistryV1 {
             .send_modify(|version| *version = version.wrapping_add(1));
     }
 
-    fn reserve(
+    fn reserve_feedback(
         &self,
         project_root: PathBuf,
-        reservation: ProjectRuntimeReservation,
-    ) -> Result<ProjectRuntimeReservationLease, ProjectRuntimeRegistryError> {
+    ) -> Result<FeedbackRegistrationLease, ProjectRuntimeRegistryError> {
         let root_fences = self.lock_root_fences();
         let mut runtimes = self.lock_runtimes();
         if self.closed.load(Ordering::Acquire) || root_fences.contains(&project_root) {
             return Err(ProjectRuntimeRegistryError::Closed);
         }
         let runtime = runtimes.entry(project_root.clone()).or_default();
-        if reservation.conflicts_with(runtime) {
+        let slots = feedback_registration_slots();
+        if has_feedback_components(runtime)
+            || slots
+                .iter()
+                .any(|type_id| runtime.reservations.contains(type_id))
+        {
             return Err(ProjectRuntimeRegistryError::AlreadyRegistered);
         }
-        runtime.reservations.extend(reservation.type_ids());
+        runtime.reservations.extend(slots);
         drop(runtimes);
         drop(root_fences);
-        Ok(ProjectRuntimeReservationLease {
+        Ok(FeedbackRegistrationLease {
             registry: self.clone(),
             project_root,
-            reservation,
             active: true,
         })
     }
@@ -1190,55 +913,26 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
-    async fn publish_atomically_after_preflight<T, E, F, Fut>(
-        &self,
-        project_root: PathBuf,
-        reservation: ProjectRuntimeReservation,
-        build: F,
-    ) -> Result<T, E>
-    where
-        E: From<ProjectRuntimeAlreadyRegistered> + From<ProjectRuntimeRegistryError>,
-        F: FnOnce(ProjectRuntimePublication) -> Fut,
-        Fut: Future<Output = Result<(ProjectRuntimePublication, T), E>>,
-    {
-        let lease = self
-            .reserve(project_root, reservation.clone())
-            .map_err(E::from)?;
-        let publication = ProjectRuntimePublication::new(reservation);
-        match build(publication).await {
-            Ok((publication, output)) => {
-                lease.commit(publication).map_err(E::from)?;
-                Ok(output)
-            }
-            Err(error) => {
-                lease.release().await;
-                Err(error)
-            }
-        }
-    }
-
     /// Publishes feedback admission as one registry transaction.
     ///
     /// The feedback slots are reserved before `build` starts because opening a
     /// feedback runtime persists its producer boot. Construction runs without
     /// the registry lock, while the reservation prevents a racing writer from
-    /// occupying any staged slot before the atomic commit.
+    /// occupying a feedback slot before the atomic commit.
     pub(crate) async fn publish_feedback_atomically<T, E, F, Fut>(
         &self,
         project_root: PathBuf,
         build: F,
     ) -> Result<T, E>
     where
-        E: From<ProjectRuntimeAlreadyRegistered> + From<ProjectRuntimeRegistryError>,
-        F: FnOnce(ProjectRuntimePublication) -> Fut,
-        Fut: Future<Output = Result<(ProjectRuntimePublication, T), E>>,
+        E: From<ProjectRuntimeRegistryError>,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(FeedbackRegistrationBundle, T), E>>,
     {
-        let mut reservation = ProjectRuntimeReservation::default();
-        reservation.reserve::<RegisteredCallableCodeRuntime>();
-        reservation.reserve::<RegisteredFeedbackRuntime>();
-        reservation.reserve::<Arc<SwitchableFeedbackCycleRuntimeV1>>();
-        self.publish_atomically_after_preflight(project_root, reservation, build)
-            .await
+        let lease = self.reserve_feedback(project_root).map_err(E::from)?;
+        let (bundle, output) = build().await?;
+        lease.commit(bundle).map_err(E::from)?;
+        Ok(output)
     }
 
     pub(crate) async fn publish_feedback_cycle_atomically(
