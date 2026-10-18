@@ -38,10 +38,16 @@ motion, bounded graph rendering, and a non-graph form for selected evidence.
 Loopback is reachable by every account on the machine, so each dashboard
 listener mints a random access token and prints a launch URL of the form
 `http://127.0.0.1:PORT/?token=…`. Opening it redirects to the tokenless path
-and sets an `HttpOnly`, `SameSite=Strict` session cookie. Scripts send the
-token as the Basic-auth password for user `tracedecay`. A request without the
-token gets `401 dashboard_request_unauthenticated`; a request whose `Host` or
-`Origin` does not name the bound listener gets `403`.
+with the token in the URL fragment, which browsers never send over the wire or
+in a `Referer`. The page keeps the token in origin-scoped `sessionStorage` and
+sends it as the Basic-auth password for user `tracedecay` on every API request
+and on the fetch-based event stream. Scripts send the same header. The
+dashboard never sets a cookie: browsers share cookies across every port of a
+host, so a cookie would reach any other service on loopback. The embedded page
+shell (`/`, `/static/**`, client routes) carries no secret and is served
+without the token. A request to `/api/**` without the token gets
+`401 dashboard_request_unauthenticated`; a request whose `Host` or `Origin`
+does not name the bound listener gets `403`.
 
 ## Code graph plugin API
 

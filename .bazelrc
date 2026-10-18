@@ -17,7 +17,9 @@ common --repo_env=CARGO_UNSTABLE_GIT=shallow-deps
 common --repo_env=RUSTC_BOOTSTRAP=1
 # MODULE.bazel registers only nightly/2026-10-18. Without this, rules_rust
 # resolves the stable channel and the build fails closed.
-build --@rules_rust//rust/toolchain/channel=nightly
+# Hosts can extend this repository profile with their private fleet settings.
+build --config=tracedecay
+build:tracedecay --@rules_rust//rust/toolchain/channel=nightly
 build --incompatible_enable_cc_toolchain_resolution
 build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 build --workspace_status_command=scripts/bazel/workspace_status.sh
@@ -53,8 +55,8 @@ build:windows --action_env=PATH
 build:windows --enable_runfiles
 
 test --test_output=errors
-# Rust's test harness starts a worker per available CPU. Account for that
-# pool so Bazel does not schedule several full-host suites at once.
+# Suites spawn child services as well as the bounded Rust test harness.
+# Reserve the local host budget so independent suites do not oversubscribe it.
 test --default_test_resources=cpu=HOST_CPUS
 
 # Blocking Clippy policy over every Rust target, matching
@@ -103,8 +105,8 @@ build "--@rules_rust//rust/settings:per_crate_rustc_flag=external/rules_rust++cr
 # workspace-status command and compiler environment take precedence.
 build --enable_platform_specific_config
 
-# Private execution pools opt in through .bazelrc.local. Endpoints and host
-# capacity belong there; the repository owns execution compatibility.
+# Host profiles select compatible execution pools; .bazelrc.local can override
+# individual checkouts. Private endpoints and capacity stay outside the repo.
 build:rbe-linux --host_platform=//scripts/bazel/platforms:linux_x86_64
 build:rbe-linux --platforms=//scripts/bazel/platforms:linux_x86_64
 build:rbe-linux --extra_toolchains=@zig_sdk//toolchain:linux_amd64_gnu.2.31

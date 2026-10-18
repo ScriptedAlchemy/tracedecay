@@ -37,9 +37,27 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "pricing_test"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states pricing_test",
+          "pattern": "\\bpricing_test\\b"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "tells the user not to run pricing_test",
+          "pattern": "(?<!\\bnot )(?<!n't )\\b(?:do not|don't|dont|never|no need to|need not|skip|avoid|ignore)\\s+(?:(?:run|rerun|re-run|execute|use|bother|re-?test)\\w*\\s+)?(?:with\\s+)?(?:the\\s+|any\\s+)?pricing_test\\b"
+        },
+        {
+          "id": "calls pricing_test irrelevant",
+          "pattern": "\\bpricing_test\\b[^.\\n]{0,30}\\b(?:is|are)\\s+(?:irrelevant|unrelated|unnecessary|not (?:needed|relevant|required|useful))"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 6,
   "notes": "which-tests-to-run; pricing_test.rs is the only test and it covers compute_total."
 }

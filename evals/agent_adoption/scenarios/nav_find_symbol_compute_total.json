@@ -37,10 +37,21 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "compute_total",
-    "pricing"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states compute_total",
+          "pattern": "\\bcompute_total\\b"
+        },
+        {
+          "id": "states pricing",
+          "pattern": "\\bpricing\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
   "notes": "find-symbol-by-name; expects tracedecay_search as the natural opener."
 }

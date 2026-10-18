@@ -440,6 +440,32 @@ pub enum TerminalState {
     Partial,
 }
 
+impl TerminalState {
+    /// Every terminal state, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Completed,
+        Self::Cancelled,
+        Self::TimedOut,
+        Self::Failed,
+        Self::Unavailable,
+        Self::EffectUnknown,
+        Self::Partial,
+    ];
+
+    /// The wire name shared by operation receipts and terminal stream events.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Failed => "failed",
+            Self::Unavailable => "unavailable",
+            Self::EffectUnknown => "effect_unknown",
+            Self::Partial => "partial",
+        }
+    }
+}
+
 /// The exhaustive terminal-state set a manifest promises to preserve.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TerminalStateContract {
@@ -911,4 +937,31 @@ pub(crate) fn canonicalize_set<T: Ord>(
         return Err(CatalogValidationError::DuplicateValue { field });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod terminal_state_tests {
+    use super::TerminalState;
+
+    #[test]
+    fn all_lists_every_variant_once_under_its_serialized_name() {
+        for (index, state) in TerminalState::ALL.into_iter().enumerate() {
+            // Exhaustive without a wildcard: a new variant fails to compile here
+            // until it is placed in `ALL`.
+            let position = match state {
+                TerminalState::Completed => 0,
+                TerminalState::Cancelled => 1,
+                TerminalState::TimedOut => 2,
+                TerminalState::Failed => 3,
+                TerminalState::Unavailable => 4,
+                TerminalState::EffectUnknown => 5,
+                TerminalState::Partial => 6,
+            };
+            assert_eq!(position, index);
+            assert_eq!(
+                serde_json::to_value(state).unwrap(),
+                serde_json::Value::String(state.as_str().to_owned())
+            );
+        }
+    }
 }

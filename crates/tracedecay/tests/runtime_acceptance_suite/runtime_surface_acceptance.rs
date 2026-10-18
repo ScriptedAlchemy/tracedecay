@@ -1,4 +1,4 @@
-use crate::common;
+use crate::common::{self, fixture::copy_fixture_tree};
 
 use super::application_production_reachability::admitted_mcp_invocation;
 
@@ -188,14 +188,16 @@ async fn runtime_fixture() -> RuntimeFixture {
 
 async fn lsp_runtime_fixture() -> RuntimeFixture {
     let (environment, project) = common::IsolatedHome::new();
-    copy_dir(
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
-    );
-    copy_dir(
+    )
+    .expect("copy writable fixture");
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/managed_run_overlay"),
         &project,
-    );
+    )
+    .expect("copy writable fixture");
     git(&project, &["init", "--quiet"]);
     git(&project, &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -283,10 +285,11 @@ fn await_analyzer_backed_lsp_owner(daemon_events: &Path) {
 #[cfg(all(unix, feature = "test-transport"))]
 async fn git_runtime_fixture() -> RuntimeFixture {
     let (environment, project) = common::IsolatedHome::new();
-    copy_dir(
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
-    );
+    )
+    .expect("copy writable fixture");
     git(&project, &["init", "--quiet"]);
     git(&project, &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -527,14 +530,16 @@ async fn poll_lsp_context(
 }
 
 fn initialize_project(home: &Path, project: &Path) {
-    copy_dir(
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         project,
-    );
-    copy_dir(
+    )
+    .expect("copy writable fixture");
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/managed_run_overlay"),
         project,
-    );
+    )
+    .expect("copy writable fixture");
     // The V2 code index is Git-authority-based end to end: candidate paths come
     // from the gix worktree classification, generations are minted from Git tree
     // captures, and `worktree_stat_signature_for` opens the repository to prove
@@ -551,19 +556,6 @@ fn initialize_project(home: &Path, project: &Path) {
     git(project, &["add", "."]);
     git(project, &["commit", "--quiet", "-m", "base"]);
     common::initialize_tracedecay_cli_project(home, project);
-}
-
-fn copy_dir(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).expect("fixture destination");
-    for entry in std::fs::read_dir(source).expect("fixture directory") {
-        let entry = entry.expect("fixture entry");
-        let target = destination.join(entry.file_name());
-        if entry.file_type().expect("fixture entry type").is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).expect("copy checked-in fixture");
-        }
-    }
 }
 
 fn storage_status_request() -> ApplicationSurfaceRequest {

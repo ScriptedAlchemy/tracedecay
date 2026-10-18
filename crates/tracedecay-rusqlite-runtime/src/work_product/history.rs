@@ -35,7 +35,7 @@ use tracedecay_contracts::{
     WorkProductPortContextV1, WorkProductSelectionScopeV1,
 };
 
-use super::{covered_prefix, load_journal};
+use super::{FromStoreFault, covered_prefix, load_journal};
 use crate::work::WorkSqliteStorage;
 
 type HistoryError = WorkProductApplicationErrorV1;
@@ -49,8 +49,7 @@ impl WorkHistoryReadPortV1 for WorkSqliteStorage {
         request: &WorkHistoryRequestV1,
     ) -> Result<WorkHistoryV1, HistoryError> {
         let scope = context.authorized_scope();
-        let journal =
-            load_journal(self.handle(), scope).ok_or(HistoryError::EventAuthorityUnavailable)?;
+        let journal = load_journal(self.handle(), scope).map_err(HistoryError::from_fault)?;
         // Events outside the selection fall outside it; they do not poison the
         // ones inside. The page is served over the covered prefix and carries
         // the disclosure that says what was left out, so a caller can never

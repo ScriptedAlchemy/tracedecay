@@ -896,6 +896,9 @@ fn map_event_error(error: WorkProductEventPortErrorV1) -> WorkProductApplication
         WorkProductEventPortErrorV1::Unavailable => {
             WorkProductApplicationErrorV1::EventAuthorityUnavailable
         }
+        WorkProductEventPortErrorV1::Storage(failure) => {
+            WorkProductApplicationErrorV1::Storage(failure)
+        }
         WorkProductEventPortErrorV1::Cancelled => WorkProductApplicationErrorV1::Cancelled,
         WorkProductEventPortErrorV1::TimedOut => WorkProductApplicationErrorV1::TimedOut,
     }

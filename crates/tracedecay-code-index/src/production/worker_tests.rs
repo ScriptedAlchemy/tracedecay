@@ -4,50 +4,12 @@ use sha2::Digest as _;
 
 use tracedecay_domain::{
     ChunkerRevision, ExtractorRevision, LanguageId, PrivacyDomainId, ProjectionKeyV1,
-    ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, SanitizationReceiptId,
-    SanitizerRevision,
+    ProjectionKindV1, SanitizationReceiptId, SanitizerRevision,
 };
-
-use crate::projection::{
-    ProjectionReceiptBuilderV1, ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-};
-use crate::receipts::ChunkProjectionDecisionV1;
 
 use super::*;
 
 pub(super) type WorkerPublicationStore = MemorySealedPublicationStoreV1;
-
-pub(super) struct WorkerProjectionSink;
-
-impl CodeChunkProjectionSink for WorkerProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let decisions = request
-            .changes
-            .added_or_changed
-            .iter()
-            .chain(&request.changes.deleted)
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: match (&change.prior_digest, &change.current_digest) {
-                    (_, None) => ProjectionOperationV1::Deleted,
-                    (None, Some(_)) => ProjectionOperationV1::Added,
-                    (Some(_), Some(_)) => ProjectionOperationV1::Updated,
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .collect::<Vec<_>>();
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
-}
 
 pub(super) fn worker_id<T>(value: &str) -> T
 where
@@ -134,12 +96,9 @@ impl From<crate::parallelism::CodeIndexParallelismErrorV1> for WorkerTestError {
 
 #[test]
 fn fresh_generation_resolves_seal_references_once() {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .expect("production owner");
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .expect("production owner");
     super::helpers::take_seal_reference_resolutions();
 
     owner
@@ -162,12 +121,9 @@ fn fresh_generation_resolves_seal_references_once() {
 /// generation serving across `tracedecay update`.
 #[test]
 fn sealed_generation_is_reusable_by_a_later_build_with_the_same_stored_shape() {
-    let mut sealing_build = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .expect("sealing owner");
+    let mut sealing_build =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .expect("sealing owner");
     let published = sealing_build
         .build_and_publish(
             worker_request_with_source(
@@ -227,8 +183,7 @@ fn sealed_generation_is_reusable_by_a_later_build_with_the_same_stored_shape() {
 fn unchanged_successor_carries_every_parent_segment() {
     let store = WorkerPublicationStore::default();
     let mut owner =
-        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-            .expect("production owner");
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
     let source = b"pub fn unchanged() -> u32 { 1 }\n";
     let first = owner
         .build_and_publish(
@@ -262,9 +217,8 @@ fn unchanged_successor_carries_every_parent_segment() {
 #[test]
 fn extractor_revision_change_reextracts_before_validating_retained_import_rows() {
     let store = WorkerPublicationStore::default();
-    let mut seed =
-        CodeIndexProductionOwnerV1::new(worker_config(), store.clone(), WorkerProjectionSink)
-            .expect("seed production owner");
+    let mut seed = CodeIndexProductionOwnerV1::new(worker_config(), store.clone())
+        .expect("seed production owner");
     let first = seed
         .build_and_publish(
             worker_request("file.worker.v4", 1_100_000),
@@ -322,8 +276,7 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
     }
 
     let mut upgraded =
-        CodeIndexProductionOwnerV1::new(worker_config(), store, WorkerProjectionSink)
-            .expect("upgraded production owner");
+        CodeIndexProductionOwnerV1::new(worker_config(), store).expect("upgraded production owner");
     let rebuilt = upgraded
         .build_and_publish(
             worker_request("file.worker.v4", 1_200_000),
@@ -351,13 +304,10 @@ fn extractor_revision_change_reextracts_before_validating_retained_import_rows()
 fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
     let source = b"mod inner { pub fn value() {} }\npub use inner::*;\n";
     let pool = SharedPhysicalCodeArtifactPoolV1::default();
-    let mut seed = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .expect("seed production owner")
-    .with_physical_artifact_pool(pool.clone());
+    let mut seed =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .expect("seed production owner")
+            .with_physical_artifact_pool(pool.clone());
     let generation = seed
         .build_and_publish(
             worker_request_with_source("file.worker.pool", 1_100_000, source),
@@ -392,13 +342,10 @@ fn physical_artifact_reuse_rejects_a_stale_extractor_revision() {
     .expect("physical reuse key");
     pool.insert(reuse_key, &stale);
 
-    let mut upgraded = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .expect("upgraded production owner")
-    .with_physical_artifact_pool(pool);
+    let mut upgraded =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .expect("upgraded production owner")
+            .with_physical_artifact_pool(pool);
     let rebuilt = upgraded
         .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
         .expect("stale pooled artifact is re-extracted");
@@ -618,12 +565,9 @@ fn parallel_collection_reports_the_lowest_index_failure_across_panics() {
 
 #[test]
 fn concurrent_attribution_reads_share_success_without_blocking_cached_reads() {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .unwrap();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .unwrap();
     let published = owner.build_and_publish(
         worker_request_with_source(
             "file.worker.attribution", 1_100_000,
@@ -675,12 +619,9 @@ fn concurrent_attribution_reads_share_success_without_blocking_cached_reads() {
 
 #[test]
 fn failed_attribution_build_can_retry_and_resident_accounting_never_waits_for_it() {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .unwrap();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .unwrap();
     let published = owner
         .build_and_publish(
             worker_request_with_source(
@@ -730,12 +671,9 @@ fn attribution_preparation_checks_cancellation_and_can_retry() {
             false
         }
     }
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        worker_config(),
-        WorkerPublicationStore::default(),
-        WorkerProjectionSink,
-    )
-    .unwrap();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), WorkerPublicationStore::default())
+            .unwrap();
     let published = owner.build_and_publish(worker_request_with_source(
         "file.worker.attribution-cancel", 1_100_000,
         b"fn target() {}\n#[test] fn first() { target(); }\n#[test] fn second() { first(); }\n",

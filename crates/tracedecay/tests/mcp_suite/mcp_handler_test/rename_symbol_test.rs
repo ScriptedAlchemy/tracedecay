@@ -677,8 +677,9 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
         "{p}"
     );
 
-    // Collides with an identifier already present in a touched file.
-    let collision_message = "`tally` already occurs in src/pricing.rs; collision, shadowing, or changed resolution is possible";
+    // Rust has no scope analysis yet, so an existing spelling is one labelled
+    // limitation instead of three independently asserted semantic hazards.
+    let collision_message = "src/pricing.rs:16: `tally` already occurs and scope analysis is not implemented for this language, so collision, shadowing, and changed resolution cannot be ruled out";
     let collision = rename_args(&node, "tally");
     let p = call_json(&cg, "tracedecay_rename_symbol", collision).await;
     assert_eq!(p["success"], false, "collision must be denied: {p}");
@@ -686,23 +687,11 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
     assert_eq!(p["new_name"], "tally");
     assert_eq!(
         visible_hazards(&p),
-        json!([
-            {
-                "kind": "namespace_collision",
-                "blocking": true,
-                "message": collision_message
-            },
-            {
-                "kind": "shadowing",
-                "blocking": true,
-                "message": collision_message
-            },
-            {
-                "kind": "changed_resolution",
-                "blocking": true,
-                "message": collision_message
-            }
-        ]),
+        json!([{
+            "kind": "unsupported_syntax",
+            "blocking": true,
+            "message": collision_message
+        }]),
         "{p}"
     );
 
@@ -876,4 +865,52 @@ impl Drop for RestoreWrite {
     fn drop(&mut self) {
         fs::set_permissions(&self.path, self.permissions.clone()).unwrap();
     }
+}
+
+async fn typescript_rename_payload(source: &str, new_name: &str) -> Value {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    fs::create_dir_all(project_root.join("src")).unwrap();
+    fs::write(project_root.join("src/index.ts"), source).unwrap();
+    let cg = init_test_project(project_root.as_path()).await;
+    let node = preview_node(&cg, "oldName").await;
+    call_json(
+        &cg,
+        "tracedecay_rename_symbol",
+        rename_args(&node, new_name),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_rename_symbol_ignores_same_spelling_in_an_unrelated_scope() {
+    let payload = typescript_rename_payload(
+        "export function oldName() {}\nexport function unrelated() {\n  const newName = 1;\n  return newName;\n}\n",
+        "newName",
+    )
+    .await;
+    assert_eq!(payload["success"], true, "{payload}");
+    assert_eq!(visible_hazards(&payload), json!([]), "{payload}");
+}
+
+#[tokio::test]
+async fn test_rename_symbol_blocks_scope_proven_capture_with_its_own_category() {
+    let payload = typescript_rename_payload(
+        "export function oldName() { return 1; }\nexport function caller() {\n  const newName = 2;\n  return oldName() + newName;\n}\n",
+        "newName",
+    )
+    .await;
+    assert_eq!(payload["success"], false, "{payload}");
+    let hazards = visible_hazards(&payload);
+    let hazards = hazards.as_array().unwrap();
+    assert_eq!(hazards.len(), 1, "{payload}");
+    assert_eq!(hazards[0]["kind"], "shadowing", "{payload}");
+    assert_eq!(hazards[0]["blocking"], true, "{payload}");
+    assert!(
+        hazards[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("src/index.ts:4:"),
+        "{payload}"
+    );
 }

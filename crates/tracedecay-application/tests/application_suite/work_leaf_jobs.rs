@@ -25,7 +25,9 @@ use tracedecay_rusqlite_runtime::native_runtime::{
     NativeTask, NativeTaskOutcome, native_thread_writer_waits,
 };
 
-use crate::work_run_control_jobs::{authority, context, leased_attempt_of, task};
+use crate::work_run_control_jobs::{
+    authority, context, context_for_actor, leased_attempt_of, task,
+};
 
 const PROJECT: &str = "project.run-control-jobs";
 
@@ -392,6 +394,74 @@ async fn placement_admit_and_release_awaited_on_a_native_worker_observe_off_the_
         Some(WorkPlacementStateV1::Released),
         "the release committed"
     );
+}
+
+#[tokio::test]
+async fn placement_admission_refuses_a_root_another_actor_holds_before_any_effect() {
+    let profile = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let runtime = project_runtime(profile.path(), project.path()).await;
+    let database = runtime.project_database().expect("project database");
+    let work = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
+    let observer = RecordingObserver::default();
+    let peer = || context_for_actor("pause_run", "actor.leaf-jobs.peer");
+
+    let holder = work
+        .admit_placement(
+            context(),
+            admit_command("run.leaf-jobs.exclusive"),
+            observer.observer(),
+        )
+        .await
+        .expect("the first actor admits the root");
+    let refused = work
+        .admit_placement(
+            peer(),
+            admit_command("run.leaf-jobs.exclusive"),
+            observer.observer(),
+        )
+        .await
+        .expect_err("a second actor cannot admit the held root");
+    let refusal = format!("{refused:?}");
+    assert!(refusal.contains("active_holder"), "{refusal}");
+    assert!(
+        !refusal.contains("actor.run-control-jobs"),
+        "the refusal must not disclose the holder: {refusal}"
+    );
+    let storage = database.work_storage().expect("Work storage");
+    let peer_authority = tracedecay_domain::WorkAuthority::new(
+        authority().project_id().clone(),
+        authority().repository_id().clone(),
+        authority().worktree_id().clone(),
+        id("actor.leaf-jobs.peer"),
+        authority().policy_digest().clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        storage
+            .load_placement(
+                &peer_authority,
+                &WorkPlacementIdentityV1::new(task(), id::<RunId>("run.leaf-jobs.exclusive")),
+            )
+            .expect("the peer's placement reads"),
+        None,
+        "the refused actor holds no placement"
+    );
+
+    work.release_placement(
+        context(),
+        release_command("run.leaf-jobs.exclusive", holder.authority_version()),
+        observer.observer(),
+    )
+    .await
+    .expect("the holder releases");
+    work.admit_placement(
+        peer(),
+        admit_command("run.leaf-jobs.exclusive"),
+        observer.observer(),
+    )
+    .await
+    .expect("the root is free after release");
 }
 
 #[tokio::test]

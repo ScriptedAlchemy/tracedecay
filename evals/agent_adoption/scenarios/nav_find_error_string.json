@@ -36,9 +36,17 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "insufficient stock"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states insufficient stock",
+          "pattern": "\\binsufficient\\ stock\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 4,
-  "notes": "find-string; ground truth is the literal format! string in reserve_stock."
+  "notes": "find-string; the answer must quote the literal format! string in reserve_stock."
 }
