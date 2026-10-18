@@ -31,7 +31,7 @@ const STORY_SCOPE = {
   repository_id: 'repository.tracedecay',
   worktree_id: 'worktree.primary',
   reference: null,
-  scope_digest: 'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
+  scope_digest: 'sha256:c389a5d7c281c1f305fffa361a7e8bc78da0769253afc3c7724bdfaa70c72671',
 };
 
 const PLAN26_OBSERVATORY_METRICS = [
