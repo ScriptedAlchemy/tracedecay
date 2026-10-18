@@ -465,6 +465,10 @@ pub(super) struct StoreAdministration {
     profile_session_refresh_services: ProfileSessionRefreshServices,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
     store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
+    /// Held by a maintenance tick while its telemetry pass or a store unit
+    /// leases stores, and by a capacity retirement's store release, which
+    /// refuses a leased store.
+    maintenance_store_clients: Arc<tokio::sync::Mutex<()>>,
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
@@ -610,6 +614,7 @@ impl Default for StoreAdministration {
             ),
             store_telemetry_sampling:
                 tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::default(),
+            maintenance_store_clients: Arc::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(unix)]
@@ -801,6 +806,10 @@ impl StoreAdministration {
         &self,
     ) -> tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry {
         self.store_telemetry_sampling.clone()
+    }
+
+    pub(super) fn maintenance_store_clients(&self) -> &tokio::sync::Mutex<()> {
+        &self.maintenance_store_clients
     }
 
     pub(super) fn project_routes(&self) -> crate::mcp::project_route::SharedHookProjectRouteCache {
