@@ -373,7 +373,7 @@ impl Client {
             if !Operation::TERMINAL_STATES
                 .iter()
                 .copied()
-                .any(|state| terminal_state_name(state) == termination)
+                .any(|state| state.as_str() == termination)
             {
                 return Err(protocol(
                     response.status(),
@@ -718,18 +718,6 @@ fn admit_canonical_sdk_http_binding(
     }
 }
 
-const fn terminal_state_name(state: TerminalState) -> &'static str {
-    match state {
-        TerminalState::Completed => "completed",
-        TerminalState::Cancelled => "cancelled",
-        TerminalState::TimedOut => "timed_out",
-        TerminalState::Failed => "failed",
-        TerminalState::Unavailable => "unavailable",
-        TerminalState::EffectUnknown => "effect_unknown",
-        TerminalState::Partial => "partial",
-    }
-}
-
 const fn cancellation_point_name(point: CancellationPoint) -> &'static str {
     match point {
         CancellationPoint::BeforeAdmission => "before_admission",
@@ -803,10 +791,9 @@ pub(crate) fn problem_error(body: &Value, status: u16, missing_value: &'static s
 
 /// Whether an event name ends the operation's stream.
 fn is_terminal_event(event: &str) -> bool {
-    matches!(
-        event,
-        "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown"
-    )
+    TerminalState::ALL
+        .iter()
+        .any(|state| state.as_str() == event)
 }
 
 fn protocol(status: u16, message: impl Into<String>) -> ClientError {

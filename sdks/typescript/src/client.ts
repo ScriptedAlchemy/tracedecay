@@ -15,6 +15,7 @@ import {
 } from "./request-control";
 export type { OperationRequestOptions, PageOptions } from "./request-control";
 import {
+  OPERATION_TERMINATIONS,
   applicationProblemStatusMatches,
   isHttpProblemEnvelope,
   type ApplicationProblemRecord,
@@ -159,14 +160,7 @@ interface StreamFrontier {
   resumeToken?: string;
 }
 
-const TERMINAL_EVENTS = new Set([
-  "completed",
-  "cancelled",
-  "timed_out",
-  "failed",
-  "partial",
-  "effect_unknown",
-]);
+const TERMINAL_EVENTS: ReadonlySet<string> = new Set(OPERATION_TERMINATIONS);
 const MAX_PAGE_SIZE = 1_000;
 const MAX_OPAQUE_CURSOR_BYTES = 4_096;
 const MAX_RESUME_TOKEN_BYTES = 4_096;

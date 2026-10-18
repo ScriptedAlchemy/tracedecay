@@ -16,6 +16,7 @@ import {
 } from "../src/operations";
 import { factStoreCurateReceiptMatches } from "../src/automation-receipt";
 import {
+  OPERATION_TERMINATIONS,
   decodeCanonicalSchema,
   decodeHttpSuccessEnvelope,
   type HttpSuccessEnvelope,
@@ -312,6 +313,17 @@ async function withServer(
   }
 }
 
+const OPEN_EVENT = {
+  event: "open",
+  data: {
+    correlation_id: "request.operation",
+    frontier: {
+      next_sequence: 0,
+      retained_from_sequence: 0,
+      resume_token: "resume",
+    },
+  },
+};
 function json(
   response: ServerResponse,
   status: number,
@@ -1993,6 +2005,99 @@ describe("TraceDecayClient operation lifecycle", () => {
           events.push(event.event);
         }
         expect(events).toEqual(["open", "open", "completed"]);
+      },
+    );
+  });
+
+  it.each(OPERATION_TERMINATIONS)(
+    "ends the stream after a %s terminal without reconnecting",
+    async (termination) => {
+      await withServer(
+        [
+          (_request, response) => {
+            response.writeHead(200, { "content-type": "text/event-stream" });
+            response.end(
+              [
+                "event: open",
+                `data: ${JSON.stringify(OPEN_EVENT)}`,
+                "",
+                `event: ${termination}`,
+                "id: 0",
+                `data: ${JSON.stringify({
+                  event: termination,
+                  data: {
+                    sequence: 0,
+                    terminal: {
+                      termination,
+                      receipt: {
+                        ...RECEIPT,
+                        termination,
+                        cancellation: { observed: true },
+                      },
+                    },
+                  },
+                })}`,
+                "",
+                "",
+              ].join("\n"),
+            );
+          },
+        ],
+        async (baseUrl, requests) => {
+          const client = createClient({
+            baseUrl,
+            projectId: "project.sdk",
+            token: "sdk-secret",
+          });
+          const events = [];
+          for await (const event of client.streamOperation("request.operation", {
+            maxReconnects: 3,
+          })) {
+            events.push(event.event);
+          }
+          expect(events).toEqual(["open", termination]);
+          expect(requests).toHaveLength(1);
+        },
+      );
+    },
+  );
+
+  it("rejects an unavailable terminal whose receipt disagrees", async () => {
+    await withServer(
+      [
+        (_request, response) => {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          response.end(
+            [
+              "event: unavailable",
+              "id: 0",
+              `data: ${JSON.stringify({
+                event: "unavailable",
+                data: {
+                  sequence: 0,
+                  terminal: { termination: "unavailable", receipt: RECEIPT },
+                },
+              })}`,
+              "",
+              "",
+            ].join("\n"),
+          );
+        },
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+        const consume = async () => {
+          for await (const _event of client.streamOperation("request.operation")) {
+            // Drain the stream.
+          }
+        };
+        await expect(consume()).rejects.toThrow(
+          "the SSE terminal event is inconsistent",
+        );
       },
     );
   });

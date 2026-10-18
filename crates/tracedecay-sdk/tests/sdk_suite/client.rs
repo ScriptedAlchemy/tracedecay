@@ -13,6 +13,7 @@ use tracedecay_sdk::operations::{
     ApplicationFactStoreCurate, MultiRootScopeSetRead, OperationTransport, TypedOperation,
     WorkflowListDefinitions,
 };
+use tracedecay_tool_catalog::TerminalState;
 
 #[derive(Debug, Default)]
 struct RecordingMcpTransport {
@@ -820,6 +821,70 @@ fn near_limit_multiline_sse_frames_still_decode() {
         Some(padding.len())
     );
     assert!(events[1].terminal());
+    server.join().unwrap();
+}
+
+fn terminal_frame(event: &str, receipt_termination: &str) -> String {
+    format!(
+        concat!(
+            "event: {event}\nid: 0\n",
+            "data: {{\"event\":\"{event}\",\"data\":{{\"sequence\":0,\"terminal\":{{",
+            "\"termination\":\"{event}\",\"receipt\":{{\"started_at\":1,\"ended_at\":2,",
+            "\"effective_deadline\":{{\"expires_at\":3}},\"cancellation\":null,",
+            "\"budget\":{{\"units_consumed\":1,\"bytes_consumed\":1,\"elapsed_micros\":1}},",
+            "\"termination\":\"{receipt}\"}}}}}}}}\n\n"
+        ),
+        event = event,
+        receipt = receipt_termination,
+    )
+}
+
+#[test]
+fn every_server_terminal_state_ends_the_stream_without_reconnecting() {
+    for state in TerminalState::ALL {
+        let name = state.as_str();
+        let body = format!("{SSE_OPEN_FRAME}{}", terminal_frame(name, name));
+        let (base_url, server) = serve(vec![event_response(&body)]);
+        let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+            .build()
+            .unwrap();
+        let mut stream = client
+            .stream_operation(
+                "request.operation",
+                StreamOptions {
+                    resume: None,
+                    max_reconnects: 3,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(stream.next().unwrap().unwrap().event, "open");
+        let terminal = stream.next().unwrap().unwrap();
+        assert_eq!(terminal.event, name);
+        assert!(terminal.terminal(), "{name} must be terminal");
+        assert!(stream.next().is_none(), "{name} must end iteration");
+        assert_eq!(server.join().unwrap().len(), 1, "{name} must not reconnect");
+    }
+}
+
+#[test]
+fn unavailable_terminal_with_a_disagreeing_receipt_is_a_protocol_error() {
+    let body = format!(
+        "{SSE_OPEN_FRAME}{}",
+        terminal_frame("unavailable", "completed")
+    );
+    let (base_url, server) = serve(vec![event_response(&body)]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let mut stream = client
+        .stream_operation("request.operation", StreamOptions::default())
+        .unwrap();
+    assert_eq!(stream.next().unwrap().unwrap().event, "open");
+    assert!(matches!(
+        stream.next(),
+        Some(Err(ClientError::Protocol { .. }))
+    ));
     server.join().unwrap();
 }
 
