@@ -111,8 +111,7 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         "fresh project open must start Hook V2 replay"
     );
     let graph_weak = Arc::downgrade(&graph);
-    drop(graph);
-    drop(server);
+    drop((feedback_cycle, graph, server));
     let shutdown = engine.shutdown_all().await;
     assert!(
         shutdown.project_servers.is_clean(),

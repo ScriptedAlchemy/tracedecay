@@ -15,8 +15,6 @@ use super::{
 use crate::db::DatabaseAuthority;
 use crate::shard_runtime::shard::ShardRuntimeEvictionBlocker;
 
-/// The store-close reserve is 12 s, so this leaves most of it for the
-/// shutdown checkpoints themselves.
 const SHUTDOWN_HOLD_DRAIN_POLL: Duration = Duration::from_millis(10);
 
 /// What still keeps one mounted runtime from closing at shutdown.
@@ -164,8 +162,10 @@ impl StoreRuntimeRegistry {
     /// passes: owners joined before store close can still be unwinding the
     /// tasks that hold their leases, and under load that tail outlasts the
     /// owner join (#4138). The deadline is the caller's store-close budget, so
-    /// the drain spends whatever the phases before it left. A runtime still
-    /// held at the deadline stays mounted and is logged with its blockers.
+    /// the drain spends whatever the phases before it left. The last pass is
+    /// the last poll that fits before `deadline`, so the close returns, and
+    /// logs each runtime still held with its blockers, before the caller's
+    /// own deadline cancels it. A runtime still held then stays mounted.
     /// Returns the number of runtimes closed.
     #[tracing::instrument(
         name = "runtime_core.registry.close_idle_for_shutdown",
@@ -183,7 +183,7 @@ impl StoreRuntimeRegistry {
         self.cancel_and_join_opens_for_shutdown(&cx).await?;
         let mut closed = 0;
         loop {
-            let final_pass = std::time::Instant::now() >= deadline;
+            let final_pass = std::time::Instant::now() + SHUTDOWN_HOLD_DRAIN_POLL >= deadline;
             let (batch, held) = self.close_idle_batch(final_pass).await?;
             closed += batch;
             if !held || final_pass {
@@ -967,11 +967,10 @@ mod tests {
         drop(profile);
     }
 
-    /// A lease its owner releases after store close begins must not leave the
-    /// store's WAL behind (#4138). The holder here outlasts the fixed three
-    /// seconds the drain used to stop at: the caller's deadline, the
-    /// store-close budget, ends the drain. The profile runtime stays pinned
-    /// throughout, so the close returns at that deadline.
+    /// A lease released after store close begins can still have its WAL
+    /// truncated before the caller's deadline. The pinned profile runtime
+    /// keeps the drain running to its last poll before that deadline, so the
+    /// close still returns before the caller's own deadline cancels it.
     #[asupersync::test]
     async fn shutdown_close_waits_for_a_lease_released_while_it_runs() {
         let temporary = tempfile::tempdir().unwrap();
@@ -983,12 +982,11 @@ mod tests {
             drop(code);
         });
 
-        assert_eq!(
-            registry
-                .close_idle_for_shutdown(std::time::Instant::now() + Duration::from_secs(5))
-                .await
-                .unwrap(),
-            1
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        assert_eq!(registry.close_idle_for_shutdown(deadline).await.unwrap(), 1);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the drain must return before its caller's deadline"
         );
         assert!(matches!(
             registry.lookup(&binding),

@@ -2568,6 +2568,7 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
         server.cg().await.store_layout().graph_db_path.is_file(),
         "authorized retry must recreate the generated project database"
     );
+    drop(server);
     let receipt = engine.shutdown_all().await;
     assert!(
         receipt.background.unfinished().is_empty(),

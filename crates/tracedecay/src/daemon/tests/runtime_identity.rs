@@ -480,6 +480,13 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             .is_none(),
         "a linked worktree without the watch opt-in must never mount a code-index scheduler"
     );
+    drop((
+        primary_server,
+        primary_graph,
+        linked_graph,
+        reopened_linked_server,
+        reopened_linked_graph,
+    ));
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
         .expect("linked-worktree shutdown must remain bounded");
@@ -667,6 +674,12 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
         // the daemon. Name the published level so that degradation fails here.
         assert_reopened_linked_route_is_not_degraded(&servers, &linked_key);
     }
+    drop((
+        primary_server,
+        primary_graph,
+        reopened_linked_server,
+        reopened_linked_graph,
+    ));
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
         .expect("opted-in linked-worktree shutdown must remain bounded");
@@ -856,10 +869,8 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
     assert!(primary_scope.is_dir());
     assert!(shared.join(&primary_artifact).is_file());
 
-    drop(linked_graph);
-    drop(primary_graph);
-    drop(linked_server);
-    drop(primary_server);
+    drop((lease, linked_lease, linked_graph, primary_graph));
+    drop((linked_server, primary_server));
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await
         .expect("shutdown after scope retention must remain bounded");
