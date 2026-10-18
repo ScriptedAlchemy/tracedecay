@@ -1413,6 +1413,30 @@ mod tests {
             .collect()
     }
 
+    /// The first lookup that is not `Evicting`: a lost runtime stays mapped
+    /// until its reader workers have exited.
+    #[cfg(target_os = "linux")]
+    async fn lookup_after_lost_runtime_closes(
+        registry: &StoreRuntimeRegistry,
+        binding: &StoreRuntimeBindingV1,
+    ) -> StoreRuntimeLookup {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let lookup = registry.lookup(binding);
+            if !matches!(lookup, StoreRuntimeLookup::Evicting { .. }) {
+                return lookup;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a lost runtime's reader workers must exit"
+            );
+            let _ = crate::native_runtime::sleep_until(
+                std::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await;
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[asupersync::test]
     async fn a_store_unlinked_under_its_runtime_closes_its_files_and_reopens_fresh() {
@@ -1455,7 +1479,7 @@ mod tests {
         }
         assert!(!code.physical_snapshot().writer_present);
         assert!(matches!(
-            registry.lookup(code.binding()),
+            lookup_after_lost_runtime_closes(&registry, code.binding()).await,
             StoreRuntimeLookup::Missing { .. }
         ));
 
@@ -1527,7 +1551,7 @@ mod tests {
         }
 
         assert!(matches!(
-            registry.lookup(code.binding()),
+            lookup_after_lost_runtime_closes(&registry, code.binding()).await,
             StoreRuntimeLookup::Missing { .. }
         ));
         assert!(

@@ -92,6 +92,7 @@ impl RepositoryPhysicalAttachmentFactory {
                 drained: false,
                 closed: false,
                 file_lost: false,
+                lost_readers: None,
                 close_failure: None,
             })),
             drain_serial: Mutex::new(()),
@@ -303,6 +304,7 @@ impl RepositoryPhysicalAttachmentFactory {
             drained: false,
             closed: false,
             file_lost: false,
+            lost_readers: None,
             close_failure: None,
         }));
         let _ = lost_state.set(Arc::downgrade(&state));
@@ -378,6 +380,9 @@ struct RepositoryRuntimePhysicalState {
     drained: bool,
     closed: bool,
     file_lost: bool,
+    /// The reader pool of a lost file, kept until its workers have exited so
+    /// the registry can tell when no connection to the old file remains.
+    lost_readers: Option<ReaderPool<RepositoryRuntimeReadExecutor>>,
     close_failure: Option<String>,
 }
 
@@ -396,7 +401,11 @@ fn close_lost_file(state: &Mutex<RepositoryRuntimePhysicalState>) {
     if let Some(readers) = &readers {
         readers.close_for_lost_file();
     }
-    drop((writer, readers));
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .lost_readers = readers;
+    drop(writer);
 }
 
 impl RepositoryRuntimePhysicalAttachment {
@@ -404,6 +413,21 @@ impl RepositoryRuntimePhysicalAttachment {
     /// attachment, which then closed every connection to it.
     pub fn file_lost(&self) -> bool {
         self.lock_state().file_lost
+    }
+
+    /// Whether a lost file has no open connection left: every reader worker
+    /// exited. Also true for an attachment whose file was never lost.
+    pub fn lost_file_closed(&self) -> bool {
+        let mut state = self.lock_state();
+        if state
+            .lost_readers
+            .as_ref()
+            .is_some_and(|readers| !readers.workers_exited())
+        {
+            return false;
+        }
+        state.lost_readers = None;
+        true
     }
 
     pub fn binding(&self) -> StoreRuntimeBindingV1 {
@@ -1222,6 +1246,54 @@ mod tests {
         );
         assert_eq!(drain, Ok(()));
         let _ = busy.join();
+    }
+
+    /// This process's descriptors on files under `directory` that were unlinked.
+    #[cfg(target_os = "linux")]
+    fn deleted_descriptors(directory: &std::path::Path) -> Vec<String> {
+        let prefix = directory.display().to_string();
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+            .map(|target| target.display().to_string())
+            .filter(|target| target.starts_with(&prefix) && target.ends_with(" (deleted)"))
+            .collect()
+    }
+
+    /// A reader lease or retained snapshot holds the pool, so the pool must
+    /// stop holding the unlinked inode itself: no worker connection, and no
+    /// pinned descriptor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_lost_file_closes_every_descriptor_while_a_reader_pool_is_still_held() {
+        let directory = TempDir::new().unwrap();
+        let attachment = attach_seeded_store(directory.path(), &binding(), 0);
+        let held = attachment
+            .lock_state()
+            .readers
+            .clone()
+            .expect("an attached store has readers");
+        fs::remove_file(directory.path().join("store-0.sqlite3")).unwrap();
+
+        let deadline =
+            std::time::Instant::now() + crate::FILE_PROBE_INTERVAL + Duration::from_secs(10);
+        while !(attachment.file_lost()
+            && attachment.lost_file_closed()
+            && deleted_descriptors(directory.path()).is_empty())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a held pool must not keep the unlinked file open: lost={} closed={} {:?}",
+                attachment.file_lost(),
+                attachment.lost_file_closed(),
+                deleted_descriptors(directory.path())
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(held.workers_exited());
+        drop(held);
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
     }
 
     #[test]
