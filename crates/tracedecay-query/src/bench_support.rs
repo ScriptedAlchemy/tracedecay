@@ -52,11 +52,17 @@ pub(crate) struct SealedDrainBounds {
     pub(crate) page_bytes: usize,
 }
 
-/// Working directory of the profiling job is not the crate root.
-pub(crate) fn default_corpus_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(DEFAULT_CORPUS_RELATIVE)
+/// Resolve at launch time so cached binaries do not retain a compiler's sandbox.
+pub(crate) fn default_corpus_root() -> Result<PathBuf, String> {
+    let workspace = match std::env::var_os("BUILD_WORKSPACE_DIRECTORY") {
+        Some(workspace) => PathBuf::from(workspace),
+        None => PathBuf::from(
+            std::env::var_os("CARGO_MANIFEST_DIR")
+                .ok_or_else(|| "pass --corpus outside a Bazel launch".to_owned())?,
+        )
+        .join("../.."),
+    };
+    Ok(workspace.join(DEFAULT_CORPUS_RELATIVE))
 }
 
 /// Ordered, `.gitignore`-blind directory walk. An ignore-crate walk would
