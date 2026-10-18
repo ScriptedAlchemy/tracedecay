@@ -94,10 +94,10 @@ use operation_resource::{AttemptAdmissionTimingV1, work_operation_resource_obser
 use provider_launch::ProviderProcess;
 use provider_output::{overflow_outcome, provider_session, stream_summary};
 
-fn provider_stdout_artifacts<S: WorkflowArtifactStorePort>(
+async fn provider_stdout_artifacts(
     identity: &WorkAttemptIdentityV1,
     captured: Option<&(Vec<u8>, u64)>,
-    store: Option<&S>,
+    store: Option<&tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority>,
 ) -> Result<Vec<WorkArtifactRefV1>, ()> {
     let Some((bytes, total)) = captured.filter(|(bytes, total)| {
         !bytes.is_empty() && *total == u64::try_from(bytes.len()).unwrap_or(u64::MAX)
@@ -141,13 +141,19 @@ fn provider_stdout_artifacts<S: WorkflowArtifactStorePort>(
                 "work attempt provider stdout payload could not be verified"
             );
         })?;
-    store.persist(&payload).map_err(|error| {
-        tracing::warn!(
-            task = identity.task_id().as_str(),
-            ?error,
-            "work attempt provider stdout payload could not be persisted"
-        );
-    })?;
+    store
+        .transact(move |storage| storage.persist(&payload))
+        .await
+        .unwrap_or(Err(
+            tracedecay_contracts::WorkflowArtifactStoreError::Unavailable,
+        ))
+        .map_err(|error| {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?error,
+                "work attempt provider stdout payload could not be persisted"
+            );
+        })?;
     Ok(vec![artifact])
 }
 
@@ -443,12 +449,7 @@ impl WorkAttemptProcessRegistryV1 {
         let task_key = key.clone();
         let (start, started) = tokio::sync::oneshot::channel();
         let future = task(Arc::clone(&cancellation));
-        // The attempt's own Work steps are awaited writer jobs, but it still
-        // persists provider output through the synchronous workflow artifact
-        // store and reconciles the workflow fan-out afterwards, both of which
-        // park their thread on the writer, so it runs on a blocking-pool thread
-        // rather than a native worker.
-        let Ok(task) = native_runtime::NativeTask::spawn_off_native_thread(async move {
+        let Ok(task) = native_runtime::NativeTask::spawn(async move {
             let admitted = tokio::select! {
                 result = started => result.is_ok(),
                 () = task_lifecycle.cancelled() => false,
@@ -500,7 +501,7 @@ impl WorkAttemptProcessRegistryV1 {
             .is_some_and(|holder| holder.worktree_id.as_ref() == Some(worktree_id))
     }
 
-    pub(super) fn holds_worktree(&self, worktree_id: &WorktreeId) -> bool {
+    pub fn holds_worktree(&self, worktree_id: &WorktreeId) -> bool {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -680,7 +681,8 @@ pub(super) fn spawn_attempt_execution(
             &project_root,
             &identity,
             observability_producer,
-        );
+        )
+        .await;
     });
 }
 
@@ -713,13 +715,17 @@ async fn run_attempt(
             return;
         }
     };
-    let workflow_artifacts = registered.database.workflow_storage().map_err(|error| {
-        tracing::warn!(
-            task = attempt.identity().task_id().as_str(),
-            ?error,
-            "work attempt provider output store could not be attached"
-        );
-    });
+    let workflow_artifacts = registered
+        .database
+        .workflow_storage()
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                task = attempt.identity().task_id().as_str(),
+                ?error,
+                "work attempt provider output store could not be attached"
+            );
+        });
     let identity = attempt.identity().clone();
     // The registration-pinned work topology policy carries the concurrency
     // policy this attempt was admitted under; its canonical digest is the
@@ -736,10 +742,25 @@ async fn run_attempt(
         }
     };
 
-    match select_with_resolver(
-        &registered.proposal_routing.executable_binding_resolver,
-        &attempt,
-    ) {
+    let resolver = registered
+        .proposal_routing
+        .executable_binding_resolver
+        .clone();
+    let resolving = attempt.clone();
+    let selection =
+        native_runtime::spawn_blocking(move || select_with_resolver(&resolver, &resolving))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    task = identity.task_id().as_str(),
+                    %error,
+                    "work provider binding could not be resolved on the blocking pool"
+                );
+                Err(ProviderDenial::preferred(
+                    WorkProviderAvailabilityV1::Unavailable,
+                ))
+            });
+    match selection {
         Ok(selection) => match selection.provider.protocol {
             WorkProviderProtocol::CodexAppServerJsonRpc => {
                 execute_app_server(
@@ -1283,6 +1304,7 @@ async fn execute_provider_with_environment(
     let mut outcome = overflow_outcome(outcome, &stdout, &stderr);
     let artifacts =
         provider_stdout_artifacts(&identity, captured_stdout.as_ref(), workflow_artifacts)
+            .await
             .unwrap_or_else(|()| {
                 outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
                 Vec::new()
@@ -1569,6 +1591,7 @@ async fn execute_app_server(
     let mut outcome = overflow_outcome(outcome, &stdout, &None);
     let artifacts =
         provider_stdout_artifacts(&identity, captured_stdout.as_ref(), workflow_artifacts)
+            .await
             .unwrap_or_else(|()| {
                 outcome = WorkAttemptProviderOutcomeV1::ProtocolFailed;
                 Vec::new()

@@ -350,7 +350,20 @@ pub(super) async fn admit_execution(
             tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
         ));
     }
-    let execution_snapshot = prepare_execution_snapshot(registered, context, &binding, &command)?;
+    let execution_snapshot = {
+        let (registered, context, binding, command) = (
+            registered.clone(),
+            context.clone(),
+            binding.clone(),
+            command.clone(),
+        );
+        tracedecay_application::work::RegisteredWorkApplicationServicesV1::attach(
+            &registered.database,
+        )
+        .map_err(|_| work_product_authority_unavailable())?
+        .read(move |_| prepare_execution_snapshot(&registered, &context, &binding, &command))
+        .await?
+    };
     let mutation = services
         .mutate(
             context.clone(),

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use tracing::Instrument;
+
 use tracedecay_contracts::{CancellationContext, Deadline, WorkAttemptListOperationV1};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::CapabilityId;
@@ -91,11 +93,13 @@ pub(super) async fn dispatch_work_application(
         WorkApplicationInvocationV1::GenerateProposal(request) => {
             let result = intelligence::generate_proposal(
                 &registered,
+                &services,
                 &context,
                 capability,
                 &use_case,
                 request,
-            );
+            )
+            .await;
             if let Ok(proposal) = &result {
                 let _ = tracedecay_application::observability::record_task_intelligence_decision(
                     observability_producer.as_deref(),
@@ -300,19 +304,22 @@ pub(super) async fn dispatch_work_application(
             )
             .await
         }
-        WorkApplicationInvocationV1::AttemptStatus(request) => attempt_operations::attempt_status(
-            &registered,
-            &services,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            observed_at,
-            deadline,
-            request,
-        ),
+        WorkApplicationInvocationV1::AttemptStatus(request) => {
+            attempt_operations::attempt_status(
+                &registered,
+                &services,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                observed_at,
+                deadline,
+                request,
+            )
+            .await
+        }
         WorkApplicationInvocationV1::CancelAttempt(command) => {
             attempt_operations::cancel_attempt(
                 &registered,
@@ -358,77 +365,96 @@ pub(super) async fn dispatch_work_application(
             .await
         }
         WorkApplicationInvocationV1::ListAttempts(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.list_attempts").entered();
-            {
-                complete_work_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case.clone(),
-                    input_digest,
-                    services.attempts().list(
-                        &context,
-                        WorkAttemptListOperationV1::ListAttempts,
-                        &request,
-                        || {
-                            preparation::current_work_product_attempt_topology(
-                                &registered,
-                                &context,
-                                capability,
-                                &use_case,
-                                observed_at,
-                            )
-                        },
-                    ),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::ListAttempts,
-                )
-            }
+            let listed = {
+                let (registered, context, use_case) =
+                    (registered.clone(), context.clone(), use_case.clone());
+                services
+                    .read(move |services| {
+                        services.attempts().list(
+                            &context,
+                            WorkAttemptListOperationV1::ListAttempts,
+                            &request,
+                            || {
+                                preparation::current_work_product_attempt_topology(
+                                    &registered,
+                                    &context,
+                                    capability,
+                                    &use_case,
+                                    observed_at,
+                                )
+                            },
+                        )
+                    })
+                    .instrument(tracing::trace_span!("daemon.service.work.list_attempts"))
+                    .await
+            };
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                listed,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::ListAttempts,
+            )
         }
-        WorkApplicationInvocationV1::ExecutionHistory(request) => intelligence::execution_history(
-            &registered,
-            &services,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            capability,
-            use_case,
-            input_digest,
-            observed_at,
-            deadline,
-            request,
-        ),
+        WorkApplicationInvocationV1::ExecutionHistory(request) => {
+            intelligence::execution_history(
+                &registered,
+                &services,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                capability,
+                use_case,
+                input_digest,
+                observed_at,
+                deadline,
+                request,
+            )
+            .await
+        }
         WorkApplicationInvocationV1::HydrateArtifacts(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.hydrate_artifacts").entered();
-            {
-                complete_work_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case.clone(),
-                    input_digest,
-                    services
-                        .artifact_hydration()
-                        .hydrate(&context, &request, |_authority| {
-                            preparation::current_work_product_attempt_topology(
-                                &registered,
-                                &context,
-                                capability,
-                                &use_case,
-                                observed_at,
-                            )
-                        }),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::HydrateArtifacts,
-                )
-            }
+            let hydrated = {
+                let (registered, context, use_case) =
+                    (registered.clone(), context.clone(), use_case.clone());
+                services
+                    .read(move |services| {
+                        services
+                            .artifact_hydration()
+                            .hydrate(&context, &request, |_authority| {
+                                preparation::current_work_product_attempt_topology(
+                                    &registered,
+                                    &context,
+                                    capability,
+                                    &use_case,
+                                    observed_at,
+                                )
+                            })
+                    })
+                    .instrument(tracing::trace_span!(
+                        "daemon.service.work.hydrate_artifacts"
+                    ))
+                    .await
+            };
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                hydrated,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::HydrateArtifacts,
+            )
         }
         WorkApplicationInvocationV1::RetrieveEvidence(request) => complete_work_read(
             &registered,
@@ -439,60 +465,53 @@ pub(super) async fn dispatch_work_application(
             use_case.clone(),
             input_digest,
             {
-                let retrieved: Pin<
-                    Box<
-                        dyn Future<
-                                Output = Result<
-                                    tracedecay_contracts::WorkEvidenceRetrievalV1,
-                                    tracedecay_contracts::ApplicationProblem,
-                                >,
-                            > + Send,
-                    >,
-                > = Box::pin(evidence_retrieval::retrieve(
-                    &registered,
-                    &context,
-                    capability,
-                    use_case,
-                    request,
-                ));
-                retrieved.await
+                let (registered, context) = (registered.clone(), context.clone());
+                evidence_retrieval::retrieve(registered, context, capability, use_case, request)
+                    .await
             },
             observed_at,
             deadline,
             WorkApplicationOutcomeV1::RetrieveEvidence,
         ),
         WorkApplicationInvocationV1::Topology(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.topology").entered();
-            {
-                complete_work_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case.clone(),
-                    input_digest,
-                    tracedecay_contracts::execution_topology_view(
-                        services.attempts(),
-                        services.placement(),
-                        &registered.work_topology_policy,
-                        &context,
-                        &request,
-                        || {
-                            preparation::current_work_product_attempt_topology(
-                                &registered,
-                                &context,
-                                capability,
-                                &use_case,
-                                observed_at,
-                            )
-                        },
-                    ),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::Topology,
-                )
-            }
+            let view = {
+                let (registered, context, use_case) =
+                    (registered.clone(), context.clone(), use_case.clone());
+                services
+                    .read(move |services| {
+                        tracedecay_contracts::execution_topology_view(
+                            services.attempts(),
+                            services.placement(),
+                            &registered.work_topology_policy,
+                            &context,
+                            &request,
+                            || {
+                                preparation::current_work_product_attempt_topology(
+                                    &registered,
+                                    &context,
+                                    capability,
+                                    &use_case,
+                                    observed_at,
+                                )
+                            },
+                        )
+                    })
+                    .instrument(tracing::trace_span!("daemon.service.work.topology"))
+                    .await
+            };
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                view,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::Topology,
+            )
         }
         WorkApplicationInvocationV1::TopologyMetrics(request) => {
             let observations =
@@ -534,32 +553,44 @@ pub(super) async fn dispatch_work_application(
             )
         }
         WorkApplicationInvocationV1::PrepareDuplicateAdjudication(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.prepare_duplicate").entered();
-            {
-                let prepared = preparation::prepare_duplicate_adjudication(
-                    &registered,
-                    &services,
-                    &context,
-                    capability,
-                    &use_case,
-                    request,
-                    &canonical_request_id,
-                    observed_at,
+            let prepared = {
+                let (registered, context, use_case, canonical_request_id) = (
+                    registered.clone(),
+                    context.clone(),
+                    use_case.clone(),
+                    canonical_request_id.clone(),
                 );
-                complete_work_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    prepared,
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::PrepareDuplicateAdjudication,
-                )
-            }
+                services
+                    .read(move |services| {
+                        preparation::prepare_duplicate_adjudication(
+                            &registered,
+                            services,
+                            &context,
+                            capability,
+                            &use_case,
+                            request,
+                            &canonical_request_id,
+                            observed_at,
+                        )
+                    })
+                    .instrument(tracing::trace_span!(
+                        "daemon.service.work.prepare_duplicate"
+                    ))
+                    .await
+            };
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::PrepareDuplicateAdjudication,
+            )
         }
         WorkApplicationInvocationV1::AdjudicateDuplicate(command) => {
             let authority = match tracedecay_domain::WorkAuthority::new(
@@ -579,13 +610,21 @@ pub(super) async fn dispatch_work_application(
             };
             let adjudicated = tracing::Instrument::instrument(
                 async {
-                    let evidence = preparation::current_duplicate_adjudication_evidence(
-                        &registered,
-                        &context,
-                        capability,
-                        &use_case,
-                        observed_at,
-                    )?;
+                    let evidence = {
+                        let (registered, context, use_case) =
+                            (registered.clone(), context.clone(), use_case.clone());
+                        services
+                            .read(move |_| {
+                                preparation::current_duplicate_adjudication_evidence(
+                                    &registered,
+                                    &context,
+                                    capability,
+                                    &use_case,
+                                    observed_at,
+                                )
+                            })
+                            .await?
+                    };
                     services
                         .adjudicate_duplicate(context.clone(), command, evidence)
                         .await
@@ -677,52 +716,57 @@ pub(super) async fn dispatch_work_application(
             .await
         }
         WorkApplicationInvocationV1::Views(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.views").entered();
-            {
-                let Ok(capability) = CapabilityId::new(*capability) else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                };
-                let binding =
-                    tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
-                let product_services =
-                    match tracedecay_application::work::RegisteredWorkProductServicesV1::attach_with_attempt_authority(
-                        &registered.database,
-                        binding,
-                        registered.authority.clone(),
-                    ) {
-                        Ok(services) => services,
-                        Err(_) => {
-                            return DaemonInvocationResponse::problem(
-                                request_id,
-                                DaemonInvocationProblem::Unavailable,
-                            );
-                        }
-                    };
-                complete_work_read(
-                    &registered,
+            let Ok(capability) = CapabilityId::new(*capability) else {
+                return DaemonInvocationResponse::problem(
                     request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            };
+            let binding =
+                tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
+            let product_services =
+                match tracedecay_application::work::RegisteredWorkProductServicesV1::attach_with_attempt_authority(
+                    &registered.database,
+                    binding,
+                    registered.authority.clone(),
+                ) {
+                    Ok(services) => services,
+                    Err(_) => {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            DaemonInvocationProblem::Unavailable,
+                        );
+                    }
+                };
+            let read_context = context.clone();
+            let graph = services
+                .read(move |_| {
                     product_services
                         .reads()
-                        .read_graph(&context, request)
-                        .map_err(work_product_problem),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::Views,
-                )
-            }
+                        .read_graph(&read_context, request)
+                        .map_err(work_product_problem)
+                })
+                .instrument(tracing::trace_span!("daemon.service.work.views"))
+                .await;
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                graph,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::Views,
+            )
         }
         WorkApplicationInvocationV1::Experience(request) => {
             let experienced: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>> =
                 Box::pin(intelligence::experience(
                     &registered,
+                    &services,
                     request_id,
                     &context,
                     canonical_request_id,
@@ -736,46 +780,61 @@ pub(super) async fn dispatch_work_application(
                 ));
             experienced.await
         }
-        WorkApplicationInvocationV1::CompareProposal(request) => intelligence::compare_proposal(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            observed_at,
-            deadline,
-            capability,
-            request,
-        ),
+        WorkApplicationInvocationV1::CompareProposal(request) => {
+            intelligence::compare_proposal(
+                &registered,
+                &services,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                observed_at,
+                deadline,
+                capability,
+                request,
+            )
+            .await
+        }
         WorkApplicationInvocationV1::PrepareGraphMutation(request) => {
-            let _span =
-                tracing::trace_span!("daemon.service.work.prepare_graph_mutation").entered();
-            {
-                let prepared = preparation::prepare_graph_mutation(
-                    &registered,
-                    &context,
-                    capability,
-                    &use_case,
-                    request,
-                    &canonical_request_id,
-                    observed_at,
+            let prepared = {
+                let (registered, context, use_case, canonical_request_id) = (
+                    registered.clone(),
+                    context.clone(),
+                    use_case.clone(),
+                    canonical_request_id.clone(),
                 );
-                complete_work_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    prepared,
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::PrepareGraphMutation,
-                )
-            }
+                services
+                    .read(move |_| {
+                        preparation::prepare_graph_mutation(
+                            &registered,
+                            &context,
+                            capability,
+                            &use_case,
+                            request,
+                            &canonical_request_id,
+                            observed_at,
+                        )
+                    })
+                    .instrument(tracing::trace_span!(
+                        "daemon.service.work.prepare_graph_mutation"
+                    ))
+                    .await
+            };
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::PrepareGraphMutation,
+            )
         }
         WorkApplicationInvocationV1::MutateGraph(request) => {
             let mutated = tracing::Instrument::instrument(
@@ -858,48 +917,57 @@ pub(super) async fn dispatch_work_application(
             response
         }
         WorkApplicationInvocationV1::RunControl(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.run_control").entered();
-            {
-                complete_work_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    services.run_control().read(&context, &request),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::RunControl,
-                )
-            }
+            let read_context = context.clone();
+            let reading = services
+                .read(move |services| services.run_control().read(&read_context, &request))
+                .instrument(tracing::trace_span!("daemon.service.work.run_control"))
+                .await;
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                reading,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::RunControl,
+            )
         }
         WorkApplicationInvocationV1::PlacementPreflight(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.placement_preflight").entered();
-            {
-                let placement_root = project_root.clone();
-                complete_work_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    services.placement().preflight(&context, request, |target| {
-                        observe_placement_target(placement_root.as_deref(), target, observed_at)
-                    }),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::PlacementPreflight,
-                )
-            }
+            let (placement_root, read_context) = (project_root.clone(), context.clone());
+            let preflight = services
+                .read(move |services| {
+                    services
+                        .placement()
+                        .preflight(&read_context, request, |target| {
+                            observe_placement_target(placement_root.as_deref(), target, observed_at)
+                        })
+                })
+                .instrument(tracing::trace_span!(
+                    "daemon.service.work.placement_preflight"
+                ))
+                .await;
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                preflight,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::PlacementPreflight,
+            )
         }
         WorkApplicationInvocationV1::AdmitPlacement(command) => {
             let placement_root = project_root.clone();
             let admitted = tracing::Instrument::instrument(
-                services.admit_placement(context.clone(), command, |target| {
+                services.admit_placement(context.clone(), command, move |target| {
                     observe_placement_target(placement_root.as_deref(), target, observed_at)
                 }),
                 tracing::trace_span!("daemon.service.work.admit_placement"),
@@ -920,27 +988,29 @@ pub(super) async fn dispatch_work_application(
             )
         }
         WorkApplicationInvocationV1::PlacementStatus(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.placement_status").entered();
-            {
-                complete_work_read(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    services.placement().status(&context, &request),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::PlacementStatus,
-                )
-            }
+            let read_context = context.clone();
+            let status = services
+                .read(move |services| services.placement().status(&read_context, &request))
+                .instrument(tracing::trace_span!("daemon.service.work.placement_status"))
+                .await;
+            complete_work_read(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                status,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::PlacementStatus,
+            )
         }
         WorkApplicationInvocationV1::ReleasePlacement(command) => {
             let placement_root = project_root.clone();
             let released = tracing::Instrument::instrument(
-                services.release_placement(context.clone(), command, |target| {
+                services.release_placement(context.clone(), command, move |target| {
                     observe_placement_target(placement_root.as_deref(), target, observed_at)
                 }),
                 tracing::trace_span!("daemon.service.work.release_placement"),

@@ -233,25 +233,6 @@ impl WorkSynthesisAdmissionStoragePort for WorkSqliteJobStorage<'_> {
     }
 }
 
-impl WorkSqliteJobStorage<'_> {
-    /// Loads one admitted synthesis source payload inside the job, where the
-    /// workflow artifact store's own transaction would wait on this writer.
-    pub fn load_workflow_artifact(
-        &self,
-        artifact: &tracedecay_domain::WorkArtifactRefV1,
-    ) -> Result<
-        tracedecay_contracts::WorkflowArtifactPayload,
-        tracedecay_contracts::WorkflowArtifactStoreError,
-    > {
-        let bytes = crate::workflow::run_journal::stored_payload_tx(
-            self.transaction,
-            artifact.digest().as_str(),
-        )?
-        .ok_or(tracedecay_contracts::WorkflowArtifactStoreError::Missing)?;
-        tracedecay_contracts::WorkflowArtifactPayload::new(artifact.clone(), bytes)
-    }
-}
-
 fn next_fence_epoch_tx(
     transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,

@@ -16,8 +16,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::{WorkProductAuthorizedRelationScopeV1, WorkProductGraphV1};
 
 use super::{fold_graph, load_journal};
-use crate::exact_sql::ExactSqlTransaction;
-use crate::work::{RegisteredWorkWrite, WorkSqliteStorage};
+
+use crate::work::RegisteredWorkWrite;
 use crate::work_run_control::WorkSqliteJobStorage;
 
 type AdmissionError = WorkProductAttemptAdmissionErrorV1;
@@ -59,37 +59,6 @@ pub(crate) fn admit_synthesis(
     require_declared_authority(&admission.admission)?;
     require_request_active(&admission.admission.product_context)?;
     admit_synthesis_in_transaction(transaction, admission)
-}
-
-impl WorkProductAttemptAdmissionPortV1 for WorkSqliteStorage {
-    fn admit_attempt(
-        &self,
-        admission: &WorkProductAttemptAdmissionV1,
-    ) -> Result<WorkProductAttemptAdmissionOutcomeV1, AdmissionError> {
-        admission.validate()?;
-        require_declared_authority(admission)?;
-        require_request_active(&admission.product_context)?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| AdmissionError::Unavailable)?;
-        let outcome = admit_attempt_in_transaction(&transaction, admission);
-        match outcome {
-            Ok(WorkProductAttemptAdmissionOutcomeV1::Inserted { product, attempt }) => {
-                transaction
-                    .commit()
-                    .map_err(|_| AdmissionError::DurabilityUncertain)?;
-                Ok(WorkProductAttemptAdmissionOutcomeV1::Inserted { product, attempt })
-            }
-            Ok(WorkProductAttemptAdmissionOutcomeV1::Replayed { product, attempt }) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| AdmissionError::DurabilityUncertain)?;
-                Ok(WorkProductAttemptAdmissionOutcomeV1::Replayed { product, attempt })
-            }
-            Err(error) => rollback_after_failure(transaction, error),
-        }
-    }
 }
 
 fn admit_attempt_in_transaction(
@@ -341,14 +310,4 @@ fn require_request_active(
         return Err(AdmissionError::TimedOut);
     }
     Ok(())
-}
-
-fn rollback_after_failure<T>(
-    transaction: ExactSqlTransaction,
-    error: AdmissionError,
-) -> Result<T, AdmissionError> {
-    transaction
-        .rollback()
-        .map_err(|_| AdmissionError::DurabilityUncertain)?;
-    Err(error)
 }

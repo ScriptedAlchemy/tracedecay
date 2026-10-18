@@ -1025,7 +1025,7 @@ async fn workflow_storage_retains_one_issuing_client_until_all_clones_drop() {
 
     let database = owner.issue_lease().unwrap();
     install_workflow_schema_for_purpose_test(&database).await;
-    let storage = database.workflow_storage().unwrap();
+    let storage = database.workflow_storage().await.unwrap();
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
@@ -1314,7 +1314,7 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
             .is_err()
     );
     assert!(database.work_storage().is_err());
-    assert!(database.workflow_storage().is_err());
+    assert!(database.workflow_storage().await.is_err());
     assert!(database.authorized_scope_set_storage().is_err());
     assert!(database.handoff_open_storage().await.is_err());
     assert!(
