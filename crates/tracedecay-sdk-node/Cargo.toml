@@ -1,0 +1,17 @@
+[package]
+name = "tracedecay-sdk-node"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "napi-rs binding of the shared Rust SDK for the Node package"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+napi = { version = "3.14", default-features = false, features = ["napi9", "async", "tokio_rt"] }
+napi-derive = "3.6"
+tracedecay-sdk = { path = "../tracedecay-sdk" }

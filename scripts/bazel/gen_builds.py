@@ -207,6 +207,9 @@ RUNTIME_BINARIES = (
 )
 
 
+# The Linux file name of a cdylib-only crate's Node addon (napi-rs spelling).
+NATIVE_ADDON_FILE = "tracedecay-sdk.linux-x64-gnu.node"
+
 # Marks a resolution context that Cargo builds with `--no-default-features`.
 NO_DEFAULT_FEATURES = "!no-default-features"
 
@@ -1014,15 +1017,24 @@ def main():
         dev_tree = contexts[(name, "normal,build,dev", frozenset())]
         bin_target_names = {}  # cargo bin name -> target its tests spawn
         md = member_deps_of[name]
-        lib_t = next((t for t in p["targets"] if "lib" in t["kind"]), None)
+        lib_t = next(
+            (t for t in p["targets"] if "lib" in t["kind"] or t["kind"] == ["cdylib"]),
+            None,
+        )
+        # A cdylib-only crate is a native addon: one shared library with no
+        # dev variant, no unit test, and a `.node` copy (NATIVE_ADDONS).
+        native_addon = lib_t is not None and lib_t["kind"] == ["cdylib"]
         has_build = any("custom-build" in t["kind"] for t in p["targets"])
 
         out = [BANNER]
         out.append('package(default_visibility = ["//visibility:public"])\n')
+        rust_rules = '"rust_binary", "rust_library"'
+        if native_addon:
+            rust_rules += ', "rust_shared_library"'
         out.append(
             f'load("@{CRATE_HUB}//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")\n'
             'load("@rules_rust//cargo:defs.bzl", "cargo_build_script")\n'
-            'load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")\n'
+            f'load("@rules_rust//rust:defs.bzl", {rust_rules})\n'
             'load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")\n'
         )
 
@@ -1031,6 +1043,8 @@ def main():
                 variants[name].items(),
                 key=lambda kv: tname(name, kv[0][0], kv[0][1]),
             ):
+                if native_addon and vkind == "dev":
+                    continue
                 tgt = unique_name(tname(name, vkind, closure))
                 deps = dedup(
                     sorted(
@@ -1054,7 +1068,7 @@ def main():
                     srcs_expr_lib += " + [" + q(lib_mod_labels) + "]"
                 format_sources(srcs_expr_lib, lib_t["edition"])
                 out += [
-                    "rust_library(",
+                    "rust_shared_library(" if native_addon else "rust_library(",
                     f'    name = "{tgt}",',
                     "    srcs = " + srcs_expr_lib + ",",
                     f'    crate_root = "{rel_src(p, lib_t)}",',
@@ -1076,6 +1090,17 @@ def main():
                 + "],",
                     ")\n",
                 ]
+                if native_addon:
+                    # Node loads any file by `process.dlopen`; the napi-rs
+                    # `<name>.<platform>.node` spelling names the platform.
+                    out += [
+                        "genrule(",
+                        '    name = "addon",',
+                        f'    srcs = [":{tgt}"],',
+                        f'    outs = ["{NATIVE_ADDON_FILE}"],',
+                        '    cmd = "for f in $(SRCS); do case $$f in *.so) cp $$f $@;; esac; done",',
+                        ")\n",
+                    ]
 
         if has_build:
             srcs = srcs_expr(["build.rs"] + BUILD_SCRIPT_SRCS_EXTRA.get(name, []))
@@ -1338,7 +1363,7 @@ def main():
                 ")\n",
             ]
 
-        if lib_t:
+        if lib_t and not native_addon:
             lib_runfiles_env = runtime_binaries(p, lib_t, lib_pulled)
             dev_edges = md["normal"] + md["dev"]
             deps = dedup(
