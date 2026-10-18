@@ -85,4 +85,13 @@ pub(super) mod fake {
             read
         }
     }
+
+    #[derive(Default)]
+    pub(crate) struct TaskClock(Option<Arc<FakeClock>>);
+
+    impl TaskClock {
+        pub(crate) fn swap(&mut self) {
+            INSTALLED.with(|installed| std::mem::swap(&mut *installed.borrow_mut(), &mut self.0));
+        }
+    }
 }

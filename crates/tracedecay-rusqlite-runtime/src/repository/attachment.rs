@@ -576,6 +576,11 @@ impl RepositoryRuntimePhysicalAttachment {
 
     #[tracing::instrument(name = "rusqlite.attachment.drain", level = "trace", skip_all)]
     pub fn drain(&self) -> Result<(), String> {
+        if crate::storage_pool::on_pool() {
+            return Err(
+                "repository physical attachment cannot drain on a storage pool thread".to_owned(),
+            );
+        }
         let mut state = self.lock_state();
         if state.closed {
             return Ok(());
@@ -923,6 +928,214 @@ mod tests {
             .unwrap();
         assert_eq!(canonical_value, "A");
         assert_eq!(replacement_value, "B");
+    }
+
+    /// This process's threads whose name starts with `prefix`, compared on
+    /// the 15 bytes Linux keeps of a thread name.
+    #[cfg(target_os = "linux")]
+    fn threads_named(prefix: &str) -> usize {
+        let kept = &prefix[..prefix.len().min(15)];
+        fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|task| fs::read_to_string(task.ok()?.path().join("comm")).ok())
+            .filter(|name| name.trim_end().starts_with(kept))
+            .count()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn threads() -> std::collections::BTreeMap<String, String> {
+        fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter_map(|task| {
+                let task = task.ok()?;
+                let name = fs::read_to_string(task.path().join("comm")).ok()?;
+                Some((
+                    task.file_name().to_string_lossy().into_owned(),
+                    name.trim_end().to_owned(),
+                ))
+            })
+            .collect()
+    }
+
+    fn attach_seeded_store(
+        directory: &std::path::Path,
+        binding: &StoreRuntimeBindingV1,
+        index: usize,
+    ) -> RepositoryRuntimePhysicalAttachment {
+        let path = directory.join(format!("store-{index}.sqlite3"));
+        create_identity_database(&path, "seed");
+        RepositoryPhysicalAttachmentFactory
+            .attach(
+                &native_runtime(),
+                binding.clone(),
+                locator(binding),
+                path.canonicalize().unwrap(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn alone_in_child_process(test: &str) -> bool {
+        const CHILD: &str = "TRACEDECAY_ATTACHMENT_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            return true;
+        }
+        let test = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test.as_str(), "--exact", "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{test} failed in its child process:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sixty_four_attached_stores_run_on_the_fixed_storage_pool() {
+        if !alone_in_child_process("sixty_four_attached_stores_run_on_the_fixed_storage_pool") {
+            return;
+        }
+        let directory = TempDir::new().unwrap();
+        let binding = binding();
+        let exercise = |index: usize| {
+            let attachment = attach_seeded_store(directory.path(), &binding, index);
+            let handle = attachment.exact_sql_handle().unwrap();
+            handle
+                .execute(statement(
+                    "INSERT INTO identity_probe (value) VALUES (?)",
+                    vec![ExactSqlValue::Text(format!("store-{index}"))],
+                ))
+                .unwrap();
+            let rows = handle
+                .query(
+                    statement("SELECT count(*) FROM identity_probe", vec![]),
+                    Duration::from_secs(10),
+                )
+                .unwrap();
+            assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(2)]);
+            attachment
+        };
+        native_runtime();
+        let before = threads();
+        let attachments = (0..64).map(exercise).collect::<Vec<_>>();
+        let started = threads()
+            .into_iter()
+            .filter(|(id, _)| !before.contains_key(id))
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>();
+
+        let pool = &crate::storage_pool::STORE_THREAD_PREFIX[..15];
+        assert!(
+            started.len() == crate::storage_pool::store_threads()
+                && started.iter().all(|name| name.starts_with(pool)),
+            "64 stores may start the storage pool's threads and no other: {started:?}"
+        );
+        assert_eq!(
+            threads_named("tracedecay-rusqlite"),
+            0,
+            "no attached store may own a writer or reader thread"
+        );
+        assert_eq!(
+            threads_named(crate::storage_pool::STORE_THREAD_PREFIX),
+            crate::storage_pool::store_threads(),
+            "every store's writer and readers run on the fixed pool"
+        );
+        for attachment in &attachments {
+            attachment.drain().unwrap();
+            attachment.close_and_join().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_pool_task_is_refused_synchronous_store_calls_instead_of_parked() {
+        let directory = TempDir::new().unwrap();
+        let attachment = attach_seeded_store(directory.path(), &binding(), 0);
+        let handle = attachment.exact_sql_handle().unwrap();
+        let on_pool = handle.clone();
+        let (report, refused) = mpsc::channel();
+        crate::storage_pool::spawn(async move {
+            let write = on_pool.execute(statement(
+                "INSERT INTO identity_probe (value) VALUES ('from the pool')",
+                vec![],
+            ));
+            let read = on_pool.query(
+                statement("SELECT count(*) FROM identity_probe", vec![]),
+                Duration::from_secs(10),
+            );
+            let _ = report.send((write.map(|_| ()), read.map(|_| ())));
+        })
+        .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+        let (write, read) = refused
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a pool task's synchronous store calls must return, not park");
+        assert_eq!(write, Err(ExactSqlError::WriterUnavailable));
+        assert!(read.is_err(), "a pool task's synchronous read must refuse");
+        let rows = handle
+            .query(
+                statement("SELECT count(*) FROM identity_probe", vec![]),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(
+            rows.rows[0].values,
+            vec![ExactSqlValue::Integer(1)],
+            "a refused write must not reach the writer"
+        );
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
+
+    #[test]
+    fn a_pool_task_is_refused_a_drain_and_a_writer_join_while_the_close_completes() {
+        let directory = TempDir::new().unwrap();
+        let attachment = Arc::new(attach_seeded_store(directory.path(), &binding(), 0));
+        let donor = attach_seeded_store(directory.path(), &binding(), 1);
+        let writer = Arc::try_unwrap(donor.lock_state().writer.take().unwrap())
+            .unwrap_or_else(|_| panic!("only its attachment holds the writer"));
+        let writer_status = writer.checkpoint_handle().status_subscription();
+        let on_pool = Arc::clone(&attachment);
+        let (report, refused) = mpsc::channel();
+        crate::storage_pool::spawn(async move {
+            let _ = report.send((on_pool.drain(), writer.shutdown_and_join()));
+        })
+        .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+        let (drain, join) = refused
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a pool task's drain and writer join must return, not park");
+        assert!(drain.is_err(), "a pool task's drain must refuse");
+        attachment
+            .exact_sql_handle()
+            .expect("a refused drain leaves the attachment open")
+            .execute(statement(
+                "INSERT INTO identity_probe (value) VALUES ('after the refused drain')",
+                vec![],
+            ))
+            .expect("a refused drain leaves the writer serving");
+        assert!(
+            matches!(join, Err(crate::WriterActorError::WaitCancelled)),
+            "a pool task's writer join must report the wait it refused, got {join:?}"
+        );
+        let closing = std::time::Instant::now();
+        while !writer_status.is_closed() {
+            assert!(
+                closing.elapsed() < Duration::from_secs(10),
+                "the writer whose join was refused must still close"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+        donor.drain().unwrap();
+        donor.close_and_join().unwrap();
     }
 
     #[test]
