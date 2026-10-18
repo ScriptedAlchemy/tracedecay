@@ -75,6 +75,8 @@ pub enum WorkProductEventPortErrorV1 {
     IdempotencyConflict,
     #[error("Work event authority is unavailable")]
     Unavailable,
+    #[error("Work event storage failed: {0}")]
+    Storage(crate::WorkStorageFailureV1),
     #[error("Work event append was cancelled")]
     Cancelled,
     #[error("Work event append timed out")]

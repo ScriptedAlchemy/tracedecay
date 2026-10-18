@@ -1,7 +1,5 @@
 use tracedecay_domain::{RetrievalFailure, RetrieverOutcome};
-use tracedecay_query::retrieval::lexical::{
-    LexicalLaneRetriever, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
-};
+use tracedecay_query::retrieval::lexical::MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
 
 use crate::candidate_producers::{
     complete, real_lexical_source_fixture_from_sources, sealed_artifact,

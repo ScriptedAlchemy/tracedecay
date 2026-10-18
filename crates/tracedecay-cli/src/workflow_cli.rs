@@ -6,17 +6,10 @@
 
 use serde_json::Value;
 use tracedecay_api::WorkflowOperation;
-use tracedecay_contracts::{
-    ApplicationOutcome, ResultContractRef, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
-    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
-    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    workflow_executable_binding_registry,
-};
+use tracedecay_contracts::{ResultContractRef, workflow_executable_binding_registry};
 use tracedecay_tool_catalog::OperationId;
 
-use tracedecay_daemon_protocol::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
+use tracedecay_daemon_protocol::WorkflowApplicationInvocation;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::application_cli::{WORKFLOW, config_error};
@@ -46,138 +39,8 @@ pub(crate) fn decode_workflow_invocation(
     operation: WorkflowOperation,
     body: Value,
 ) -> Result<WorkflowApplicationInvocation> {
-    match operation {
-        WorkflowOperation::RegisterDefinition => decode::<WorkflowDefinitionRegisterRequest>(body)
-            .map(WorkflowApplicationInvocation::RegisterDefinition),
-        WorkflowOperation::ActivateDefinition => decode::<WorkflowDefinitionActivateRequest>(body)
-            .map(WorkflowApplicationInvocation::ActivateDefinition),
-        WorkflowOperation::RetireDefinition => decode::<WorkflowDefinitionRetireRequest>(body)
-            .map(WorkflowApplicationInvocation::RetireDefinition),
-        WorkflowOperation::RejectDefinition => decode::<WorkflowDefinitionRejectRequest>(body)
-            .map(WorkflowApplicationInvocation::RejectDefinition),
-        WorkflowOperation::ValidateDefinition => decode::<WorkflowDefinitionValidateRequest>(body)
-            .map(WorkflowApplicationInvocation::ValidateDefinition),
-        WorkflowOperation::GetDefinition => decode::<WorkflowDefinitionGetRequest>(body)
-            .map(WorkflowApplicationInvocation::GetDefinition),
-        WorkflowOperation::ListDefinitions => decode::<WorkflowDefinitionListRequest>(body)
-            .map(WorkflowApplicationInvocation::ListDefinitions),
-        WorkflowOperation::DefinitionHistory => decode::<WorkflowDefinitionHistoryRequest>(body)
-            .map(WorkflowApplicationInvocation::DefinitionHistory),
-        WorkflowOperation::DiffDefinition => decode::<WorkflowDefinitionDiffRequest>(body)
-            .map(WorkflowApplicationInvocation::DiffDefinition),
-        WorkflowOperation::HandoffIssue => {
-            decode::<TaskHandoffIssueRequest>(body).map(WorkflowApplicationInvocation::HandoffIssue)
-        }
-        WorkflowOperation::HandoffRedeem => decode::<TaskHandoffRedeemRequest>(body)
-            .map(WorkflowApplicationInvocation::HandoffRedeem),
-        WorkflowOperation::StartRun => {
-            decode::<tracedecay_contracts::WorkflowRunStartRequest>(body)
-                .map(|request| WorkflowApplicationInvocation::StartRun(Box::new(request)))
-        }
-        WorkflowOperation::PauseRun => {
-            decode::<tracedecay_contracts::WorkflowRunPauseRequest>(body)
-                .map(WorkflowApplicationInvocation::PauseRun)
-        }
-        WorkflowOperation::ResumeRun => {
-            decode::<tracedecay_contracts::WorkflowRunResumeRequest>(body)
-                .map(WorkflowApplicationInvocation::ResumeRun)
-        }
-        WorkflowOperation::CancelRun => {
-            decode::<tracedecay_contracts::WorkflowRunCancelRequest>(body)
-                .map(WorkflowApplicationInvocation::CancelRun)
-        }
-        WorkflowOperation::GetRun => decode::<tracedecay_contracts::WorkflowRunGetRequest>(body)
-            .map(WorkflowApplicationInvocation::GetRun),
-    }
-}
-
-pub(crate) fn workflow_outcome_matches(
-    operation: WorkflowOperation,
-    outcome: &WorkflowApplicationOutcome,
-) -> bool {
-    matches!(
-        (operation, outcome),
-        (
-            WorkflowOperation::RegisterDefinition,
-            WorkflowApplicationOutcome::RegisterDefinition(_)
-        ) | (
-            WorkflowOperation::ActivateDefinition,
-            WorkflowApplicationOutcome::ActivateDefinition(_)
-        ) | (
-            WorkflowOperation::RetireDefinition,
-            WorkflowApplicationOutcome::RetireDefinition(_)
-        ) | (
-            WorkflowOperation::RejectDefinition,
-            WorkflowApplicationOutcome::RejectDefinition(_)
-        ) | (
-            WorkflowOperation::ValidateDefinition,
-            WorkflowApplicationOutcome::ValidateDefinition(_)
-        ) | (
-            WorkflowOperation::GetDefinition,
-            WorkflowApplicationOutcome::GetDefinition(_)
-        ) | (
-            WorkflowOperation::ListDefinitions,
-            WorkflowApplicationOutcome::ListDefinitions(_)
-        ) | (
-            WorkflowOperation::DefinitionHistory,
-            WorkflowApplicationOutcome::DefinitionHistory(_)
-        ) | (
-            WorkflowOperation::DiffDefinition,
-            WorkflowApplicationOutcome::DiffDefinition(_)
-        ) | (
-            WorkflowOperation::HandoffIssue,
-            WorkflowApplicationOutcome::HandoffIssue(_)
-        ) | (
-            WorkflowOperation::HandoffRedeem,
-            WorkflowApplicationOutcome::HandoffRedeem(_)
-        ) | (
-            WorkflowOperation::StartRun,
-            WorkflowApplicationOutcome::StartRun(_)
-        ) | (
-            WorkflowOperation::PauseRun,
-            WorkflowApplicationOutcome::PauseRun(_)
-        ) | (
-            WorkflowOperation::ResumeRun,
-            WorkflowApplicationOutcome::ResumeRun(_)
-        ) | (
-            WorkflowOperation::CancelRun,
-            WorkflowApplicationOutcome::CancelRun(_)
-        ) | (
-            WorkflowOperation::GetRun,
-            WorkflowApplicationOutcome::GetRun(_)
-        )
-    )
-}
-
-pub(crate) fn erase_workflow_outcome(
-    outcome: WorkflowApplicationOutcome,
-) -> Result<ApplicationOutcome<Value>> {
-    let outcome = match outcome {
-        WorkflowApplicationOutcome::RegisterDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::ActivateDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::RetireDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::RejectDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::ValidateDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::GetDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::ListDefinitions(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::DefinitionHistory(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::DiffDefinition(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::HandoffIssue(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::HandoffRedeem(outcome) => serde_json::to_value(outcome),
-        WorkflowApplicationOutcome::StartRun(outcome)
-        | WorkflowApplicationOutcome::PauseRun(outcome)
-        | WorkflowApplicationOutcome::ResumeRun(outcome)
-        | WorkflowApplicationOutcome::CancelRun(outcome)
-        | WorkflowApplicationOutcome::GetRun(outcome) => serde_json::to_value(outcome),
-    }?;
-    serde_json::from_value(outcome).map_err(Into::into)
-}
-
-fn decode<T>(body: Value) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    WORKFLOW.decode(body)
+    WorkflowApplicationInvocation::decode(operation.operation_key(), body)
+        .map_err(|error| WORKFLOW.decode_error(error))
 }
 
 #[cfg(test)]

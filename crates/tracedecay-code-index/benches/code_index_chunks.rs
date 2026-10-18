@@ -14,32 +14,19 @@ use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitt
 use tracedecay_code_index::incremental::{GenerationChunkManifestV1, plan_chunk_increment};
 use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1, expected_request_digest,
-    project_for_publication,
-};
+use tracedecay_code_index::projection::{expected_request_digest, project_for_publication};
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, FileOccurrenceId,
     LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1,
-    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionReplayReasonV1,
+    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
+    ValidatedCodeFileV1,
 };
 
-const WORKLOAD_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/workload-v1.json"
-);
-const EXPECTED_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/expected-v1.json"
-);
-const DEFAULT_RESULT_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../benchmark_data/query-code-index/result-provisional.json"
-);
+const WORKLOAD_PATH: &str = "benchmark_data/query-code-index/workload-v1.json";
+const EXPECTED_PATH: &str = "benchmark_data/query-code-index/expected-v1.json";
+const RESULT_FILE: &str = "result-provisional.json";
 const CHUNKER_V1: &str = "chunker.query-benchmark.v1";
 const CHUNKER_REPLAY: &str = "chunker.query-benchmark.replay";
 const CHUNKER_INCOMPATIBLE: &str = "chunker.query-benchmark.incompatible";
@@ -172,7 +159,6 @@ struct ExpectedCase {
     chunks_added_or_changed: u64,
     chunks_deleted: u64,
     chunks_reused: u64,
-    projection_calls: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
     projection_operations: u64,
@@ -226,7 +212,6 @@ struct RawSample {
     chunks_added_or_changed: u64,
     chunks_deleted: u64,
     chunks_reused: u64,
-    projection_calls: u64,
     corpus_files: u64,
     corpus_bytes: u64,
     input_bytes: u64,
@@ -257,7 +242,6 @@ impl RawSample {
             chunks_added_or_changed: self.chunks_added_or_changed,
             chunks_deleted: self.chunks_deleted,
             chunks_reused: self.chunks_reused,
-            projection_calls: self.projection_calls,
             changed_ranges: self.changed_ranges,
             invalidated_chunks: self.invalidated_chunks,
             projection_operations: self.projection_operations,
@@ -322,7 +306,6 @@ struct CaseResult {
     chunks_added_or_changed: u64,
     chunks_deleted: u64,
     chunks_reused: u64,
-    projection_calls: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
     projection_operations: u64,
@@ -385,24 +368,6 @@ struct ProcessCounters {
     write_bytes: u64,
 }
 
-struct CountingSink {
-    calls: u64,
-}
-
-impl CodeChunkProjectionSink for CountingSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        self.calls += 1;
-        let decisions = projection_decisions(&request.changes);
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
-}
-
 fn main() -> std::process::ExitCode {
     if let Err(error) = run_cli() {
         eprintln!("query code-index benchmark: {error}");
@@ -420,7 +385,7 @@ fn run_cli() -> Result<(), String> {
         [] => validate_only(),
         [argument] if argument == "--validate-only" => validate_only(),
         [argument] if argument == "--describe" => describe(),
-        [argument] if argument == "--run" => run_measurement(Path::new(DEFAULT_RESULT_PATH)),
+        [argument] if argument == "--run" => run_measurement(&default_result_path()?),
         [run, output, path] if run == "--run" && output == "--output" => {
             run_measurement(Path::new(path))
         }
@@ -478,6 +443,17 @@ fn run_sample_cli(scale_name: &str, case_name: &str) -> Result<(), String> {
         serde_json::to_string(&sample).map_err(|error| format!("serialize sample: {error}"))?
     );
     Ok(())
+}
+
+fn default_result_path() -> Result<PathBuf, String> {
+    if let Some(workspace) = env::var_os("BUILD_WORKSPACE_DIRECTORY") {
+        return Ok(PathBuf::from(workspace)
+            .join("benchmark_data/query-code-index")
+            .join(RESULT_FILE));
+    }
+    let outputs = env::var_os("TEST_UNDECLARED_OUTPUTS_DIR")
+        .ok_or_else(|| "pass --output PATH when running outside Bazel".to_owned())?;
+    Ok(PathBuf::from(outputs).join(RESULT_FILE))
 }
 
 fn run_measurement(output_path: &Path) -> Result<(), String> {
@@ -667,8 +643,7 @@ fn execute_case(
     )
     .map_err(|error| format!("plan {} increment: {error}", case.as_str()))?;
     let request = projection_request(&changes, case, replay_reason)?;
-    let mut sink = CountingSink { calls: 0 };
-    let handoff = project_for_publication(&mut sink, request)
+    let handoff = project_for_publication(request)
         .map_err(|error| format!("project {} changes: {error}", case.as_str()))?;
     // Stop the clock before evidence accounting: serializing the full manifest
     // is measurement bookkeeping, not part of the measured sync journey.
@@ -712,7 +687,6 @@ fn execute_case(
         chunks_added_or_changed: changes.added_or_changed.len() as u64,
         chunks_deleted: changes.deleted.len() as u64,
         chunks_reused: changes.reused_count,
-        projection_calls: sink.calls,
         corpus_files: current.artifacts.len() as u64,
         corpus_bytes,
         input_bytes,
@@ -947,38 +921,6 @@ fn projection_key(profile: &[u8]) -> Result<ProjectionKeyV1, String> {
     })
 }
 
-fn projection_decisions(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectionDecisionV1> {
-    changes
-        .added_or_changed
-        .iter()
-        .map(|change| ChunkProjectionDecisionV1 {
-            chunk_id: change.chunk_id.clone(),
-            prior_chunk_digest: change.prior_digest.clone(),
-            current_chunk_digest: change.current_digest.clone(),
-            operation: if change.prior_digest.is_some() {
-                ProjectionOperationV1::Updated
-            } else {
-                ProjectionOperationV1::Added
-            },
-            outcome: ProjectionOutcomeV1::Applied,
-            output_digest: change.current_digest.clone(),
-        })
-        .chain(
-            changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        )
-        .collect()
-}
-
 fn load_workload() -> Result<WorkloadManifest, String> {
     let bytes = read_repository_file(WORKLOAD_PATH)?;
     parse_json(&bytes, WORKLOAD_PATH)
@@ -998,7 +940,7 @@ fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], path: &str) -> Result<
 }
 
 fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    PathBuf::from("../..")
 }
 
 fn load_base_sources(paths: &[String]) -> Result<Vec<WorkloadFile>, String> {
@@ -1256,7 +1198,6 @@ fn summarize_case(
         chunks_added_or_changed: expected.chunks_added_or_changed,
         chunks_deleted: expected.chunks_deleted,
         chunks_reused: expected.chunks_reused,
-        projection_calls: expected.projection_calls,
         changed_ranges: first.changed_ranges,
         invalidated_chunks: first.invalidated_chunks,
         projection_operations: first.projection_operations,

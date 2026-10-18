@@ -82,15 +82,16 @@ use tracedecay_domain::test_fixtures::digest;
 
 /// Runs `future` with no Tokio runtime anywhere on the stack, so any Tokio
 /// reactor, timer or blocking-pool call on the attempt path panics. Like
-/// `spawn_for_worktree`, it polls the attempt on a blocking-pool thread, where
-/// synchronous storage ports may park without holding a native worker.
+/// `spawn_for_worktree`, it spawns the attempt with `NativeTask::spawn`, so
+/// `native_runtime::spawn_blocking` queues its work instead of running it
+/// inline as it does on a blocking-pool thread.
 fn without_tokio<F>(future: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let outcome = native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_err());
-        native_runtime::NativeTask::spawn_off_native_thread(future)
+        native_runtime::NativeTask::spawn(future)
             .expect("native blocking pool available")
             .wait()
             .await
@@ -1441,22 +1442,6 @@ fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
 #[cfg(target_os = "linux")]
 #[test]
 fn dropping_a_live_provider_kills_its_whole_process_group() {
-    fn alive(pid: &str) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-            !stat
-                .rsplit(')')
-                .next()
-                .is_some_and(|state| state.trim_start().starts_with('Z'))
-        })
-    }
-    async fn pause() {
-        native_runtime::sleep_until(
-            std::time::Instant::now() + std::time::Duration::from_millis(10),
-        )
-        .await
-        .expect("native timer");
-    }
-
     without_tokio(async {
         let directory = tempfile::TempDir::new().unwrap();
         let pids = directory.path().join("pids");
@@ -1499,6 +1484,339 @@ fn dropping_a_live_provider_kills_its_whole_process_group() {
                 pause().await;
             }
         }
+    });
+}
+
+/// Whether `pid` is a live (non-zombie) process.
+#[cfg(target_os = "linux")]
+fn alive(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .is_some_and(|state| state.trim_start().starts_with('Z'))
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn pause() {
+    native_runtime::sleep_until(std::time::Instant::now() + std::time::Duration::from_millis(10))
+        .await
+        .expect("native timer");
+}
+
+/// Runs the production provider path over `executable`, failing the test if
+/// the attempt is still open after `limit`: a drain outside the lifecycle
+/// would otherwise hang for as long as a descendant holds the pipes.
+#[cfg(target_os = "linux")]
+async fn run_attempt_within(
+    fixture: &Fixture,
+    workflow_artifacts: &tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    executable: PathBuf,
+    cancel: Arc<Notify>,
+    limit: std::time::Duration,
+) -> std::time::Duration {
+    let admitted_environment =
+        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+    let started = std::time::Instant::now();
+    native_runtime::timeout(
+        limit,
+        execute_provider_with_environment(
+            &fixture.steps(),
+            Some(workflow_artifacts),
+            &fixture.context,
+            &fixture.attempt,
+            &preferred(
+                executable,
+                WorkProviderProtocol::ClaudeStreamJson,
+                &CLAUDE_STREAM_JSON_ARGV,
+                requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+            ),
+            &admitted_environment,
+            cancel,
+            None,
+            None,
+            AttemptAdmissionTimingV1::for_test(),
+        ),
+    )
+    .await
+    .expect("the attempt was still open after its lifecycle bound");
+    started.elapsed()
+}
+
+/// Reads the `<leader pid> <descendant pid>` line a fixture provider wrote.
+#[cfg(target_os = "linux")]
+async fn provider_pids(path: &Path) -> (String, String) {
+    loop {
+        if let Some(pids) = std::fs::read_to_string(path)
+            .ok()
+            .filter(|pids| pids.ends_with('\n'))
+        {
+            let mut pids = pids.split_whitespace();
+            return (
+                pids.next().unwrap().to_owned(),
+                pids.next().unwrap().to_owned(),
+            );
+        }
+        pause().await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn assert_dead_soon(pid: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while alive(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "process {pid} outlived its attempt"
+        );
+        pause().await;
+    }
+}
+
+/// A provider that exits while a descendant keeps stdout, stderr, or an
+/// over-cap stream open must still settle `TimedOut` at the attempt deadline,
+/// with the bytes read so far and the descendant killed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descendant_holding_the_provider_pipes_settles_timed_out_at_the_deadline() {
+    // (name, descendant redirections, bytes the leader writes first, cap)
+    let cases = [
+        ("stdout", "2>/dev/null", "hello", 65_536_u64),
+        ("stderr", ">/dev/null", "hello", 65_536),
+        ("over the cap", "", "hello hello hello hello", 8),
+    ];
+    for (name, redirect, written, cap) in cases {
+        without_tokio(async move {
+            let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+            let directory = tempfile::TempDir::new().unwrap();
+            let root = directory.path();
+            let pids = root.join("pids");
+            let executable = fake_executable(
+                root,
+                "lingering-provider",
+                &format!(
+                    "#!/bin/sh\nprintf '{written}'\nsleep 300 </dev/null {redirect} &\nprintf '%s %s\\n' $$ $! > {pids}\nexit 0\n",
+                    pids = pids.display(),
+                ),
+            );
+            let fixture = leased_attempt(
+                root,
+                "Leave a descendant holding the pipes.",
+                &SnapshotShape {
+                    deadline: deadline_in(2),
+                    max_stdout_bytes: cap,
+                    max_stderr_bytes: cap,
+                    ..SnapshotShape::default()
+                },
+            );
+
+            let elapsed = run_attempt_within(
+                &fixture,
+                &workflow_artifacts,
+                executable,
+                Arc::new(Notify::new()),
+                std::time::Duration::from_secs(30),
+            )
+            .await;
+
+            assert!(
+                elapsed < CANCELLATION_GRACE,
+                "{name}: the deadline bounded the drain, got {elapsed:?}"
+            );
+            assert_eq!(fixture.state(), WorkAttemptStateV1::TimedOut, "{name}");
+            assert_eq!(
+                fixture.rows.observed_states(),
+                vec![
+                    WorkAttemptStateV1::Leased,
+                    WorkAttemptStateV1::Running,
+                    WorkAttemptStateV1::TimedOut,
+                ],
+                "{name}: the attempt settles once"
+            );
+            let evidence = fixture.sealed_evidence();
+            assert_eq!(evidence.outcome, WorkAttemptProviderOutcomeV1::TimedOut);
+            let held = evidence.stdout.expect("stdout summary");
+            assert_eq!(held.byte_length, written.len() as u64, "{name}");
+            assert_eq!(held.truncated, written.len() as u64 > cap, "{name}");
+            let (_, descendant) = provider_pids(&pids).await;
+            assert_dead_soon(&descendant).await;
+        });
+    }
+}
+
+/// A descendant that left the provider's group cannot be killed with it. The
+/// attempt abandons its pipes after the kill grace instead of waiting on it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descendant_outside_the_provider_group_cannot_pin_the_attempt() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let pids = root.join("pids");
+        let executable = fake_executable(
+            root,
+            "escaping-provider",
+            &format!(
+                "#!/bin/sh\nsetsid sleep 300 </dev/null &\nprintf '%s %s\\n' $$ $! > {pids}\nexit 0\n",
+                pids = pids.display(),
+            ),
+        );
+        let fixture = leased_attempt(
+            root,
+            "Leave a descendant in its own session.",
+            &SnapshotShape {
+                deadline: deadline_in(2),
+                ..SnapshotShape::default()
+            },
+        );
+
+        let elapsed = run_attempt_within(
+            &fixture,
+            &workflow_artifacts,
+            executable,
+            Arc::new(Notify::new()),
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+
+        assert!(
+            elapsed < CANCELLATION_GRACE,
+            "the kill grace bounded the drain, got {elapsed:?}"
+        );
+        assert_eq!(fixture.state(), WorkAttemptStateV1::TimedOut);
+        let (_, descendant) = provider_pids(&pids).await;
+        // SAFETY: SIGKILL to the one pid this test spawned and still owns.
+        unsafe { libc::kill(descendant.parse().unwrap(), libc::SIGKILL) };
+    });
+}
+
+/// Cancellation after the provider exited, while a descendant still holds its
+/// pipes, ends the group and settles `Cancelled` without the escalation rung.
+#[cfg(target_os = "linux")]
+#[test]
+fn cancelling_while_a_descendant_holds_the_pipes_settles_cancelled() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let pids = root.join("pids");
+        let executable = fake_executable(
+            root,
+            "lingering-provider",
+            &format!(
+                "#!/bin/sh\nsleep 300 </dev/null 2>/dev/null &\nprintf '%s %s\\n' $$ $! > {pids}\nexit 0\n",
+                pids = pids.display(),
+            ),
+        );
+        let fixture = leased_attempt(
+            root,
+            "Cancel during the drain.",
+            &SnapshotShape {
+                deadline: deadline_in(300),
+                ..SnapshotShape::default()
+            },
+        );
+        let cancel = Arc::new(Notify::new());
+        let identity = fixture.identity().clone();
+
+        let driver = async {
+            let (leader, _) = provider_pids(&pids).await;
+            while alive(&leader) || fixture.state() != WorkAttemptStateV1::Running {
+                pause().await;
+            }
+            // Let the lifeline reap the leader and the attempt enter its drain.
+            native_runtime::sleep_until(
+                std::time::Instant::now() + std::time::Duration::from_millis(200),
+            )
+            .await
+            .expect("native timer");
+            fixture
+                .attempts
+                .request_cancellation(
+                    &fixture.context,
+                    CancelWorkAttemptCommand {
+                        task_id: identity.task_id().clone(),
+                        run_id: identity.run_id().clone(),
+                        attempt_id: identity.attempt_id().clone(),
+                        request_id: id("cancellation.work-attempt-exec.drain"),
+                        occurred_at: now_micros(),
+                    },
+                )
+                .unwrap();
+            cancel.notify_one();
+            std::future::pending::<std::time::Duration>().await
+        };
+        let run = run_attempt_within(
+            &fixture,
+            &workflow_artifacts,
+            executable,
+            Arc::clone(&cancel),
+            std::time::Duration::from_secs(30),
+        );
+        let elapsed = tokio::select! {
+            elapsed = run => elapsed,
+            elapsed = driver => elapsed,
+        };
+
+        assert!(
+            elapsed < CANCELLATION_GRACE,
+            "cancellation reached the drain, got {elapsed:?}"
+        );
+        assert_eq!(
+            fixture.rows.observed_states(),
+            vec![
+                WorkAttemptStateV1::Leased,
+                WorkAttemptStateV1::Running,
+                WorkAttemptStateV1::CancellationRequested,
+                WorkAttemptStateV1::CancellationAcknowledged,
+                WorkAttemptStateV1::Cancelled,
+            ]
+        );
+        assert_eq!(
+            fixture.sealed_evidence().outcome,
+            WorkAttemptProviderOutcomeV1::Cancelled
+        );
+        let (_, descendant) = provider_pids(&pids).await;
+        assert_dead_soon(&descendant).await;
+    });
+}
+
+/// A provider whose descendant keeps writing after the provider exits still
+/// has every byte captured, and still settles with the provider's own status.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_descendant_finishing_within_the_deadline_has_its_output_captured() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let executable = fake_executable(
+            root,
+            "trailing-provider",
+            "#!/bin/sh\nprintf early\n(sleep 1; printf late) &\nexit 7\n",
+        );
+        let fixture = leased_attempt(root, "Write after exit.", &SnapshotShape::default());
+
+        run_attempt_within(
+            &fixture,
+            &workflow_artifacts,
+            executable,
+            Arc::new(Notify::new()),
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+
+        let evidence = fixture.sealed_evidence();
+        assert_eq!(
+            evidence.outcome,
+            WorkAttemptProviderOutcomeV1::Exited { code: 7 }
+        );
+        let stdout = evidence.stdout.expect("stdout summary");
+        assert_eq!(stdout.byte_length, "earlylate".len() as u64);
+        assert!(!stdout.truncated);
+        assert_eq!(stdout.digest, sha256_digest(b"earlylate"));
     });
 }
 
@@ -2427,6 +2745,270 @@ fn the_process_registry_isolates_equal_attempt_ids_by_worktree() {
     registry.release_for_worktree(fixture.identity(), &first_worktree);
     assert!(!registry.holds_attempt(&first_worktree, fixture.identity()));
     assert!(registry.holds_attempt(&second_worktree, fixture.identity()));
+}
+
+// ---------------------------------------------------------------------------
+// Codex app-server attempts through the production spawn path
+// ---------------------------------------------------------------------------
+
+/// A fake `codex app-server`: answers the handshake, then runs `ON_TURN` when
+/// the turn starts. `MARKER` is an absolute path the script touches.
+#[cfg(unix)]
+const APP_SERVER_SCRIPT: &str = r#"#!/bin/sh
+printf x > MARKER.launched
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
+    *'"id":1'*) printf '%s\n' '{"id":1,"result":{"thread":{"id":"work-thread"}}}' ;;
+    *'"id":2'*) ON_TURN ;;
+  esac
+done
+"#;
+
+#[cfg(unix)]
+const TURN_COMPLETES: &str = r#"printf '%s\n' '{"method":"item/completed","params":{"item":{"content":[{"type":"output_text","text":"work result"}]}}}'; printf '%s\n' '{"method":"turn/completed","params":{"turn":{"id":"work-turn"}}}'; exit 0"#;
+
+#[cfg(unix)]
+const TURN_HANGS: &str = "printf x > MARKER.turn; sleep 120";
+
+/// Hangs before reading the handshake: the session never starts.
+#[cfg(unix)]
+const STARTUP_HANGS: &str = "#!/bin/sh\nprintf x > MARKER.launched\nsleep 120\n";
+
+/// One Codex app-server attempt spawned by the registry's production
+/// `spawn_for_worktree` (a `NativeTask::spawn`, not the test thread), the way
+/// `spawn_attempt_execution` submits it.
+#[cfg(unix)]
+struct AppServerAttempt {
+    fixture: Arc<Fixture>,
+    registry: Arc<WorkAttemptProcessRegistryV1>,
+    worktree_id: WorktreeId,
+    marker: PathBuf,
+}
+
+#[cfg(unix)]
+impl AppServerAttempt {
+    fn spawn(
+        root: &Path,
+        script: &str,
+        deadline: UtcMicros,
+        store: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    ) -> Self {
+        let marker = root.join("marker");
+        let script = script.replace("MARKER", &marker.to_string_lossy());
+        let executable = fake_executable(root, "fake-codex", &script);
+        let fixture = Arc::new(leased_attempt(
+            root,
+            "Run the app-server session.",
+            &SnapshotShape {
+                backend: WorkProviderBackendV1::CodexAppServer,
+                deadline,
+                ..SnapshotShape::default()
+            },
+        ));
+        let selection = preferred(
+            executable,
+            WorkProviderProtocol::CodexAppServerJsonRpc,
+            &[],
+            requested_route(WorkProviderBackendV1::CodexAppServer),
+        );
+        let admitted_environment =
+            admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+        let worktree_id = fixture.attempt.execution().worktree_id().clone();
+        let registry = Arc::new(WorkAttemptProcessRegistryV1::default());
+        let task_fixture = Arc::clone(&fixture);
+        assert!(registry.spawn_for_worktree(
+            fixture.identity(),
+            &worktree_id,
+            move |cancel| async move {
+                let steps = task_fixture.steps();
+                execute_app_server(
+                    &steps,
+                    Some(&store),
+                    &task_fixture.context,
+                    &task_fixture.attempt,
+                    &selection,
+                    &admitted_environment,
+                    cancel,
+                    None,
+                    None,
+                    AttemptAdmissionTimingV1::for_test(),
+                )
+                .await;
+            },
+        ));
+        Self {
+            fixture,
+            registry,
+            worktree_id,
+            marker,
+        }
+    }
+
+    fn marker_exists(&self, suffix: &str) -> bool {
+        PathBuf::from(format!("{}.{suffix}", self.marker.display())).exists()
+    }
+
+    /// Whether the registry released the attempt, which happens only after
+    /// the attempt future returned, within `within`.
+    async fn finished_within(&self, within: std::time::Duration) -> bool {
+        native_runtime::timeout(within, async {
+            while self
+                .registry
+                .holds_attempt(&self.worktree_id, self.fixture.identity())
+            {
+                native_runtime::sleep_until(
+                    std::time::Instant::now() + std::time::Duration::from_millis(20),
+                )
+                .await
+                .expect("native timer");
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// Exactly one terminal state was durably entered, it is the last one,
+    /// and the effect dispatch is resolved.
+    fn assert_settled_once(&self, expected: WorkAttemptStateV1) {
+        let states = self.fixture.rows.observed_states();
+        let terminals = states.iter().filter(|state| state.is_terminal()).count();
+        assert_eq!(terminals, 1, "one terminal settlement, got {states:?}");
+        assert_eq!(states.last(), Some(&expected), "trail {states:?}");
+        assert_eq!(self.fixture.state(), expected);
+        assert!(
+            self.fixture
+                .effects
+                .load(&self.fixture.context, self.fixture.identity())
+                .unwrap()
+                .and_then(|holder| holder.resolution())
+                .is_some(),
+            "the effect dispatch must be resolved with the settlement"
+        );
+    }
+}
+
+/// Cancelling a Codex app-server session that is still inside its turn must
+/// reach it through the production spawn path and settle `Cancelled` long
+/// before the 300 s wall or the session's own timeout. Were the blocking
+/// session run inline on the attempt's thread, the cancellation arm would not
+/// be polled until the session ended.
+#[cfg(unix)]
+#[test]
+fn cancelling_a_running_app_server_session_settles_cancelled_promptly() {
+    without_tokio(async {
+        let (_artifact_dir, store) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let attempt = AppServerAttempt::spawn(
+            directory.path(),
+            &APP_SERVER_SCRIPT.replace("ON_TURN", TURN_HANGS),
+            deadline_in(300),
+            store,
+        );
+        let fixture = &attempt.fixture;
+
+        while !attempt.marker_exists("turn") || fixture.state() != WorkAttemptStateV1::Running {
+            native_runtime::sleep_until(
+                std::time::Instant::now() + std::time::Duration::from_millis(20),
+            )
+            .await
+            .expect("native timer");
+        }
+        let identity = fixture.identity().clone();
+        fixture
+            .attempts
+            .request_cancellation(
+                &fixture.context,
+                CancelWorkAttemptCommand {
+                    task_id: identity.task_id().clone(),
+                    run_id: identity.run_id().clone(),
+                    attempt_id: identity.attempt_id().clone(),
+                    request_id: id("cancellation.work-attempt-exec.app-server"),
+                    occurred_at: now_micros(),
+                },
+            )
+            .unwrap();
+        attempt
+            .registry
+            .signal_cancellation(&attempt.worktree_id, &identity);
+
+        assert!(
+            attempt
+                .finished_within(std::time::Duration::from_secs(30))
+                .await,
+            "cancellation never reached the running app-server session"
+        );
+        attempt.assert_settled_once(WorkAttemptStateV1::Cancelled);
+        assert_eq!(
+            fixture.sealed_evidence().outcome,
+            WorkAttemptProviderOutcomeV1::Cancelled
+        );
+        assert_eq!(
+            fixture.rows.observed_states(),
+            vec![
+                WorkAttemptStateV1::Leased,
+                WorkAttemptStateV1::Running,
+                WorkAttemptStateV1::CancellationRequested,
+                WorkAttemptStateV1::CancellationAcknowledged,
+                WorkAttemptStateV1::Cancelled,
+            ]
+        );
+    });
+}
+
+/// A session that finishes its turn settles `Succeeded` once, with its answer.
+#[cfg(unix)]
+#[test]
+fn a_completed_app_server_session_settles_succeeded_once() {
+    without_tokio(async {
+        let (_artifact_dir, store) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let attempt = AppServerAttempt::spawn(
+            directory.path(),
+            &APP_SERVER_SCRIPT.replace("ON_TURN", TURN_COMPLETES),
+            deadline_in(300),
+            store,
+        );
+
+        assert!(
+            attempt
+                .finished_within(std::time::Duration::from_secs(30))
+                .await,
+            "the app-server session never completed"
+        );
+        attempt.assert_settled_once(WorkAttemptStateV1::Succeeded);
+        assert_eq!(
+            attempt.fixture.sealed_evidence().outcome,
+            WorkAttemptProviderOutcomeV1::Exited { code: 0 }
+        );
+    });
+}
+
+/// The outer deadline covers session startup: a Codex that never answers the
+/// handshake is cut off at the wall and sealed `TimedOut`, not left to the
+/// session's own timeout (which would seal `ProtocolFailed`).
+#[cfg(unix)]
+#[test]
+fn an_app_server_that_never_starts_its_session_settles_timed_out_once() {
+    without_tokio(async {
+        let (_artifact_dir, store) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let attempt =
+            AppServerAttempt::spawn(directory.path(), STARTUP_HANGS, deadline_in(2), store);
+
+        assert!(
+            attempt
+                .finished_within(std::time::Duration::from_secs(30))
+                .await,
+            "the wall deadline never ended the app-server attempt"
+        );
+        assert!(attempt.marker_exists("launched"), "the session did launch");
+        attempt.assert_settled_once(WorkAttemptStateV1::TimedOut);
+        assert_eq!(
+            attempt.fixture.sealed_evidence().outcome,
+            WorkAttemptProviderOutcomeV1::TimedOut
+        );
+    });
 }
 
 async fn provider_artifact_store() -> (

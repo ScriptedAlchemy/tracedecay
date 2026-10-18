@@ -506,6 +506,19 @@ mod tests {
             )
             .await
             .expect("register original project root");
+        registry
+            .upsert_store_instance(tracedecay_global_db::StoreInstanceUpsert {
+                store_id: "store:proj_renamed:profile_sharded".to_string(),
+                project_id: "proj_renamed".to_string(),
+                store_kind: "code_project".to_string(),
+                storage_mode: "profile_sharded".to_string(),
+                store_relpath: "projects/proj_renamed".to_string(),
+                manifest_relpath: None,
+                last_verified_at: None,
+                last_write_at: None,
+            })
+            .await
+            .expect("register the profile's store for the project");
         tracedecay_runtime_core::storage::write_repository_identity_marker(
             &old_root,
             "proj_renamed",

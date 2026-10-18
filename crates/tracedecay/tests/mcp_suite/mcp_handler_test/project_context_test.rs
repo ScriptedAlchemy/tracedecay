@@ -326,14 +326,7 @@ async fn project_context_reports_a_broken_registry_read_as_a_tool_error() {
     .await;
 
     // A broken alias table refuses; it never becomes a successful context.
-    assert_eq!(
-        crate::support::tool_refusal(&response),
-        json!({
-            "kind": "execution_failed",
-            "code": "graph_tool.failed",
-            "message": "database error: SQLite prepare query failed: no such table: project_aliases (operation: resolve project identity alias)",
-        })
-    );
+    crate::support::assert_missing_alias_table_refusal(&response);
 }
 
 async fn call_project_context(server: &tracedecay::mcp::McpServer, arguments: Value) -> Value {

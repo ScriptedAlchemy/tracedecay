@@ -1,8 +1,5 @@
 //! `SQLite` persistence behind the final configuration control plane.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use super::contracts::{
     ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT,
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
@@ -13,7 +10,7 @@ use super::contracts::{
 };
 use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
-use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbWriteTx};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, CandidateDispositionV1, ChangePlanId, CodeIndexWorkerSelectionV1,
     ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
@@ -66,6 +63,20 @@ use revision::{insert_revision, insert_revision_with_registry};
 pub use mutation::{
     ConfigurationDirectCommitOutcomeV1, commit_direct_in_transaction, protected_change_snapshot_v1,
 };
+
+/// Runs `body` as one write job. A refused or failed job becomes the error
+/// `unavailable` builds; the body's own error is returned as is.
+pub(super) async fn transact_config<R, E>(
+    db: &RegisteredGlobalDb,
+    unavailable: impl FnOnce(tracedecay_domain::errors::TraceDecayError) -> E,
+    body: impl AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> Result<R, E> + Send + Sync + 'static,
+) -> Result<R, E>
+where
+    R: Send + 'static,
+    E: Send + 'static,
+{
+    db.transact(body).await.map_err(unavailable)?
+}
 
 /// Concrete control-plane adapter over one already-open owned session store.
 /// It never accepts an arbitrary connection, opens a fallback database, or
@@ -184,56 +195,51 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             .map_err(ConfigurationError::validation)?;
         validate_snapshot_registry_completeness_with_registry(&resolution.snapshot, registry)
             .map_err(map_store_error)?;
-        let transaction = self
-            .db
-            .begin_write_transaction()
-            .await
-            .map_err(|_| ConfigurationError::Unavailable)?;
-        let outcome = async {
-            let mut rows = transaction
-                .query("SELECT COUNT(*) FROM configuration_revisions", ())
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let existing = rows
-                .next()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?
-                .ok_or_else(|| {
-                    ConfigurationError::validation_message(
-                        "configuration initialization count returned no row",
-                    )
-                })?
-                .get::<i64>(0)
-                .map_err(|_| {
-                    ConfigurationError::validation_message(
-                        "configuration initialization count is not an integer",
-                    )
-                })?;
-            if existing != 0 {
-                return Err(ConfigurationError::RevisionConflict);
-            }
-            let actor_id = ActorId::new("actor.configuration-initialization".to_owned())
-                .map_err(ConfigurationError::validation)?;
-            let revision = ConfigurationRevisionRecordV1 {
-                revision_id: revision_id.clone(),
-                parent_revision_id: None,
-                snapshot: resolution.snapshot.clone(),
-                actor_id,
-                operation_kind: "canonical_initialization".to_owned(),
-                created_at: occurred_at,
-            };
-            insert_revision_with_registry(&transaction, &revision, registry)
-                .await
-                .map_err(map_store_error)
-        }
-        .await;
-        match outcome {
-            Ok(()) => transaction
-                .commit()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable),
-            Err(error) => Err(error),
-        }
+        let revision_id = revision_id.clone();
+        let snapshot = resolution.snapshot.clone();
+        let registry = registry.clone();
+        transact_config(
+            self.db,
+            |_| ConfigurationError::Unavailable,
+            async move |transaction| {
+                let mut rows = transaction
+                    .query("SELECT COUNT(*) FROM configuration_revisions", ())
+                    .await
+                    .map_err(|_| ConfigurationError::Unavailable)?;
+                let existing = rows
+                    .next()
+                    .await
+                    .map_err(|_| ConfigurationError::Unavailable)?
+                    .ok_or_else(|| {
+                        ConfigurationError::validation_message(
+                            "configuration initialization count returned no row",
+                        )
+                    })?
+                    .get::<i64>(0)
+                    .map_err(|_| {
+                        ConfigurationError::validation_message(
+                            "configuration initialization count is not an integer",
+                        )
+                    })?;
+                if existing != 0 {
+                    return Err(ConfigurationError::RevisionConflict);
+                }
+                let actor_id = ActorId::new("actor.configuration-initialization".to_owned())
+                    .map_err(ConfigurationError::validation)?;
+                let revision = ConfigurationRevisionRecordV1 {
+                    revision_id: revision_id.clone(),
+                    parent_revision_id: None,
+                    snapshot: snapshot.clone(),
+                    actor_id,
+                    operation_kind: "canonical_initialization".to_owned(),
+                    created_at: occurred_at,
+                };
+                insert_revision_with_registry(&transaction, &revision, &registry)
+                    .await
+                    .map_err(map_store_error)
+            },
+        )
+        .await
     }
 
     /// Publishes one daemon-owned source binding: the project-open binding
@@ -271,64 +277,57 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             }
         };
         change.validate().map_err(ConfigurationError::validation)?;
-        let transaction = self
-            .db
-            .begin_write_transaction()
-            .await
-            .map_err(|_| ConfigurationError::Unavailable)?;
-        let outcome = async {
-            let current = current_state_from_transaction(&transaction).await?;
-            if &current.revision_id != expected_revision_id {
-                return Err(ConfigurationError::RevisionConflict);
-            }
-            let operation_digest =
-                canonical_sha256(&("tracedecay.configuration.daemon-source-binding.v1", change))
-                    .map_err(ConfigurationError::validation)?;
-            let next_revision_id: ConfigurationRevisionId = derived_identifier(
-                "configuration.revision.v1",
-                &canonical_sha256(&(
-                    "tracedecay.configuration.result-revision.v1",
-                    expected_revision_id,
-                    &operation_digest,
+        let expected_revision_id = expected_revision_id.clone();
+        let change = change.clone();
+        transact_config(
+            self.db,
+            |_| ConfigurationError::Unavailable,
+            async move |transaction| {
+                let current = current_state_from_transaction(&transaction).await?;
+                if current.revision_id != expected_revision_id {
+                    return Err(ConfigurationError::RevisionConflict);
+                }
+                let operation_digest = canonical_sha256(&(
+                    "tracedecay.configuration.daemon-source-binding.v1",
+                    &change,
                 ))
-                .map_err(ConfigurationError::validation)?,
-                "configuration daemon source binding revision id",
-            )?;
-            let snapshot =
-                protected_change_snapshot_v1(&current.snapshot, change, &next_revision_id)?;
-            validate_snapshot_registry_completeness(&snapshot).map_err(map_store_error)?;
-            let actor_id = ActorId::new("actor.tracedecay-daemon.source-binding".to_owned())
                 .map_err(ConfigurationError::validation)?;
-            let revision = ConfigurationRevisionRecordV1 {
-                revision_id: next_revision_id.clone(),
-                parent_revision_id: Some(expected_revision_id.clone()),
-                snapshot,
-                actor_id,
-                operation_kind: operation_kind.to_owned(),
-                created_at: occurred_at,
-            };
-            insert_revision(&transaction, &revision)
-                .await
-                .map_err(map_store_error)?;
-            advance_component_desired_state(&transaction, &next_revision_id, occurred_at)
-                .await
-                .map_err(map_store_error)?;
-            Ok(ConfigurationCurrentStateV1 {
-                revision_id: revision.revision_id,
-                snapshot: revision.snapshot,
-            })
-        }
-        .await;
-        match outcome {
-            Ok(state) => {
-                transaction
-                    .commit()
+                let next_revision_id: ConfigurationRevisionId = derived_identifier(
+                    "configuration.revision.v1",
+                    &canonical_sha256(&(
+                        "tracedecay.configuration.result-revision.v1",
+                        &expected_revision_id,
+                        &operation_digest,
+                    ))
+                    .map_err(ConfigurationError::validation)?,
+                    "configuration daemon source binding revision id",
+                )?;
+                let snapshot =
+                    protected_change_snapshot_v1(&current.snapshot, &change, &next_revision_id)?;
+                validate_snapshot_registry_completeness(&snapshot).map_err(map_store_error)?;
+                let actor_id = ActorId::new("actor.tracedecay-daemon.source-binding".to_owned())
+                    .map_err(ConfigurationError::validation)?;
+                let revision = ConfigurationRevisionRecordV1 {
+                    revision_id: next_revision_id.clone(),
+                    parent_revision_id: Some(expected_revision_id.clone()),
+                    snapshot,
+                    actor_id,
+                    operation_kind: operation_kind.to_owned(),
+                    created_at: occurred_at,
+                };
+                insert_revision(&transaction, &revision)
                     .await
-                    .map_err(|_| ConfigurationError::Unavailable)?;
-                Ok(state)
-            }
-            Err(error) => Err(error),
-        }
+                    .map_err(map_store_error)?;
+                advance_component_desired_state(&transaction, &next_revision_id, occurred_at)
+                    .await
+                    .map_err(map_store_error)?;
+                Ok(ConfigurationCurrentStateV1 {
+                    revision_id: revision.revision_id,
+                    snapshot: revision.snapshot,
+                })
+            },
+        )
+        .await
     }
 
     /// Converge a snapshot written by an earlier published registry onto the
@@ -376,31 +375,30 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         expected_revision_id
             .validate()
             .map_err(ConfigurationError::validation)?;
-        let transaction = self
-            .db
-            .begin_write_transaction()
-            .await
-            .map_err(|_| ConfigurationError::Unavailable)?;
-        let outcome: Pin<
-            Box<
-                dyn Future<Output = Result<ConfigurationCurrentStateV1, ConfigurationError>>
-                    + Send
-                    + '_,
-            >,
-        > = Box::pin(async {
+        let expected_revision_id = expected_revision_id.clone();
+        let registry = registry.clone();
+        let additive_keys = additive_keys
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<Vec<_>>();
+        let retired_keys = retired_keys
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<Vec<_>>();
+        transact_config(self.db, |_| ConfigurationError::Unavailable, async move |transaction| {
             let current = current_state_from_transaction(&transaction).await?;
-            if &current.revision_id != expected_revision_id {
+            if current.revision_id != expected_revision_id {
                 return Err(ConfigurationError::RevisionConflict);
             }
             let additive_keys = additive_keys
                 .iter()
-                .copied()
+                .cloned()
                 .map(SettingKey::new)
                 .collect::<Result<std::collections::BTreeSet<_>, _>>()
                 .map_err(ConfigurationError::validation)?;
             let retired_keys = retired_keys
                 .iter()
-                .copied()
+                .cloned()
                 .map(SettingKey::new)
                 .collect::<Result<std::collections::BTreeSet<_>, _>>()
                 .map_err(ConfigurationError::validation)?;
@@ -442,7 +440,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .map(|definition| definition.key.clone())
                 .collect::<Vec<_>>();
             if missing_keys.is_empty() && removals.is_empty() && stale_defaults.is_empty() {
-                validate_snapshot_registry_completeness_with_registry(&current.snapshot, registry)
+                validate_snapshot_registry_completeness_with_registry(&current.snapshot, &registry)
                     .map_err(map_store_error)?;
                 return Ok(current);
             }
@@ -470,7 +468,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .map_err(ConfigurationError::validation)?;
             let operation_digest = canonical_sha256(&(
                 "tracedecay.configuration.registry-shape-convergence.v1",
-                expected_revision_id,
+                &expected_revision_id,
                 &additions,
                 &removals,
             ))
@@ -479,7 +477,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 "configuration.revision.v1",
                 &canonical_sha256(&(
                     "tracedecay.configuration.result-revision.v1",
-                    expected_revision_id,
+                    &expected_revision_id,
                     &operation_digest,
                 ))
                 .map_err(ConfigurationError::validation)?,
@@ -497,7 +495,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             }
             let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance)
                 .map_err(ConfigurationError::validation)?;
-            validate_snapshot_registry_completeness_with_registry(&snapshot, registry)
+            validate_snapshot_registry_completeness_with_registry(&snapshot, &registry)
                 .map_err(map_store_error)?;
             let revision = ConfigurationRevisionRecordV1 {
                 revision_id: next_revision_id.clone(),
@@ -510,7 +508,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 operation_kind: "registry_shape_convergence".to_owned(),
                 created_at: occurred_at,
             };
-            insert_revision_with_registry(&transaction, &revision, registry)
+            insert_revision_with_registry(&transaction, &revision, &registry)
                 .await
                 .map_err(map_store_error)?;
             advance_component_desired_state(&transaction, &next_revision_id, occurred_at)
@@ -520,18 +518,8 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 revision_id: revision.revision_id,
                 snapshot: revision.snapshot,
             })
-        });
-        let outcome = outcome.await;
-        match outcome {
-            Ok(state) => {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| ConfigurationError::Unavailable)?;
-                Ok(state)
-            }
-            Err(error) => Err(error),
-        }
+        })
+        .await
     }
 
     /// Records a daemon/component activation result. Failed activation keeps
@@ -548,70 +536,65 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .map_err(|reason| map_store_error(invalid_store_data(reason)))?;
             validate_activation_error_code(activation_error_code.as_deref())
                 .map_err(|reason| map_store_error(invalid_store_data(reason)))?;
-            let transaction = self
-                .db
-                .begin_write_transaction()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let outcome = async {
-                let current = current_state_from_transaction(&transaction).await?;
-                if let Some(observed_revision_id) = &observed_revision_id
-                    && read_revision_from_executor(&transaction, observed_revision_id)
+            transact_config(
+                self.db,
+                |_| ConfigurationError::Unavailable,
+                async move |transaction| {
+                    let component = component.clone();
+                    let observed_revision_id = observed_revision_id.clone();
+                    let activation_error_code = activation_error_code.clone();
+                    let current = current_state_from_transaction(&transaction).await?;
+                    if let Some(observed_revision_id) = &observed_revision_id
+                        && read_revision_from_executor(&transaction, observed_revision_id)
+                            .await
+                            .map_err(map_store_error)?
+                            .is_none()
+                    {
+                        return Err(ConfigurationError::PlanStale);
+                    }
+                    let prior = latest_component_activation_state(&transaction, &component)
                         .await
-                        .map_err(map_store_error)?
-                        .is_none()
-                {
-                    return Err(ConfigurationError::PlanStale);
-                }
-                let prior = latest_component_activation_state(&transaction, &component)
+                        .map_err(map_store_error)?;
+                    let prior_last_working = prior
+                        .as_ref()
+                        .and_then(|state| state.last_working_revision_id.clone())
+                        .or_else(|| {
+                            prior
+                                .as_ref()
+                                .and_then(|state| state.observed_revision_id.clone())
+                        });
+                    let failed = activation_error_code.is_some();
+                    let last_working_revision_id = if failed {
+                        prior_last_working.clone()
+                    } else {
+                        observed_revision_id
+                            .clone()
+                            .or_else(|| prior_last_working.clone())
+                    };
+                    let observed_revision_id = if failed {
+                        prior_last_working
+                    } else {
+                        observed_revision_id
+                    };
+                    let restart_required =
+                        observed_revision_id.as_ref() != Some(&current.revision_id) || failed;
+                    insert_component_activation_event(
+                        &transaction,
+                        &StoredComponentActivationState {
+                            component,
+                            desired_revision_id: current.revision_id,
+                            observed_revision_id,
+                            last_working_revision_id,
+                            restart_required,
+                            activation_error_code,
+                        },
+                        occurred_at,
+                    )
                     .await
-                    .map_err(map_store_error)?;
-                let prior_last_working = prior
-                    .as_ref()
-                    .and_then(|state| state.last_working_revision_id.clone())
-                    .or_else(|| {
-                        prior
-                            .as_ref()
-                            .and_then(|state| state.observed_revision_id.clone())
-                    });
-                let failed = activation_error_code.is_some();
-                let last_working_revision_id = if failed {
-                    prior_last_working.clone()
-                } else {
-                    observed_revision_id
-                        .clone()
-                        .or_else(|| prior_last_working.clone())
-                };
-                let observed_revision_id = if failed {
-                    prior_last_working
-                } else {
-                    observed_revision_id
-                };
-                let restart_required =
-                    observed_revision_id.as_ref() != Some(&current.revision_id) || failed;
-                insert_component_activation_event(
-                    &transaction,
-                    &StoredComponentActivationState {
-                        component,
-                        desired_revision_id: current.revision_id,
-                        observed_revision_id,
-                        last_working_revision_id,
-                        restart_required,
-                        activation_error_code,
-                    },
-                    occurred_at,
-                )
-                .await
-                .map_err(map_store_error)
-            }
-            .await;
-            match outcome {
-                Ok(()) => transaction
-                    .commit()
-                    .await
-                    .map_err(|_| ConfigurationError::Unavailable),
-                Err(error) => Err(error),
-            }
+                    .map_err(map_store_error)
+                },
+            )
+            .await
         })
     }
 }
@@ -748,7 +731,7 @@ impl<'db> ProfileConfigurationStore<'db> {
                 .effective_values
                 .contains_key(&definition.key)
         }) {
-            return self.project(current, &registry);
+            return Self::project(&self.profile_id, current, &registry);
         }
         let converged = match self
             .store
@@ -765,7 +748,7 @@ impl<'db> ProfileConfigurationStore<'db> {
             Err(ConfigurationError::RevisionConflict) => self.current_state().await?,
             Err(error) => return Err(error),
         };
-        self.project(converged, &registry)
+        Self::project(&self.profile_id, converged, &registry)
     }
 
     #[tracing::instrument(name = "global_db.configuration.query", level = "trace", skip_all)]
@@ -808,34 +791,30 @@ impl<'db> ProfileConfigurationStore<'db> {
         expected_revision: &ConfigurationRevisionId,
     ) -> Result<ProfileConfigurationCommitV1, ConfigurationError> {
         let registry = ConfigurationRegistry::profile().map_err(ConfigurationError::validation)?;
-        let transaction = self
-            .store
-            .db
-            .begin_write_transaction()
-            .await
-            .map_err(|_| ConfigurationError::Unavailable)?;
-        let outcome = commit_direct_in_transaction_with_registry(
-            &transaction,
-            authority,
-            mutation,
-            expected_revision,
-            &registry,
-        )
-        .await;
-        match outcome {
-            Ok(outcome) => {
-                let current = self.project(outcome.current, &registry)?;
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| ConfigurationError::Unavailable)?;
+        let authority = authority.clone();
+        let mutation = mutation.clone();
+        let expected_revision = expected_revision.clone();
+        let profile_id = self.profile_id.clone();
+        transact_config(
+            self.store.db,
+            |_| ConfigurationError::Unavailable,
+            async move |transaction| {
+                let outcome = commit_direct_in_transaction_with_registry(
+                    &transaction,
+                    &authority,
+                    &mutation,
+                    &expected_revision,
+                    &registry,
+                )
+                .await?;
+                let current = Self::project(&profile_id, outcome.current, &registry)?;
                 Ok(ProfileConfigurationCommitV1 {
                     receipt: outcome.receipt,
                     current,
                 })
-            }
-            Err(error) => Err(error),
-        }
+            },
+        )
+        .await
     }
 
     #[tracing::instrument(
@@ -862,7 +841,7 @@ impl<'db> ProfileConfigurationStore<'db> {
     /// Every value is registered and typed, and every winning candidate is
     /// this profile's own layer or the registry default.
     fn project(
-        &self,
+        expected_profile: &UserProfileId,
         current: ConfigurationCurrentStateV1,
         registry: &ConfigurationRegistry,
     ) -> Result<ProfileConfigurationV1, ConfigurationError> {
@@ -878,7 +857,7 @@ impl<'db> ProfileConfigurationStore<'db> {
             if provenance.iter().any(|candidate| match &candidate.layer {
                 ConfigurationLayerIdV1::Default => false,
                 ConfigurationLayerIdV1::UserProfile { profile_id } => {
-                    profile_id != &self.profile_id
+                    profile_id != expected_profile
                 }
                 ConfigurationLayerIdV1::Project { .. }
                 | ConfigurationLayerIdV1::Collection { .. } => true,
@@ -923,19 +902,10 @@ impl OwnedGlobalDbConfigurationControlStore {
         self.db.clone()
     }
 
-    /// Revalidate mutation access by acquiring the exact guarded writer
-    /// transaction. The capability carries the client-bound authority, so no
-    /// path-derived authority can be substituted here.
-    async fn require_active_mutation_scope(
-        db: &RegisteredGlobalDb,
-    ) -> Result<(), ConfigurationError> {
-        let transaction = db
-            .begin_write_transaction()
-            .await
-            .map_err(|_| ConfigurationError::Unavailable)?;
-        transaction
-            .rollback()
-            .await
+    /// Revalidate mutation access against the capability's client-bound write
+    /// authority, so no path-derived authority can be substituted here.
+    fn require_active_mutation_scope(db: &RegisteredGlobalDb) -> Result<(), ConfigurationError> {
+        db.require_active_write_scope("begin registered global database transaction")
             .map_err(|_| ConfigurationError::Unavailable)
     }
 
@@ -948,7 +918,7 @@ impl OwnedGlobalDbConfigurationControlStore {
     ) -> ConfigurationOperationFuture<'_, ()> {
         let db = self.database();
         Box::pin(async move {
-            Self::require_active_mutation_scope(db.as_ref()).await?;
+            Self::require_active_mutation_scope(db.as_ref())?;
             let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store
                 .record_component_activation(
@@ -1013,8 +983,7 @@ macro_rules! forward_to_registered {
         let db = $self.database();
         $(let $owned = $owned.clone();)*
         Box::pin(async move {
-            OwnedGlobalDbConfigurationControlStore::require_active_mutation_scope(db.as_ref())
-                .await?;
+            OwnedGlobalDbConfigurationControlStore::require_active_mutation_scope(db.as_ref())?;
             let $store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             $call.await
         })

@@ -166,7 +166,7 @@ async fn fresh_v2_project_starts_the_required_automation_scheduler() {
         .lock()
         .await;
     assert!(schedulers.contains_key(&key));
-    drop(schedulers);
+    drop((schedulers, cg, server));
     engine.shutdown_all().await;
 }
 
@@ -345,7 +345,7 @@ async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
             .is_finished(),
         "re-enable must replace a finished scheduler handle"
     );
-    drop(schedulers);
+    drop((schedulers, cg, server));
     engine.shutdown_all().await;
 }
 
@@ -454,7 +454,7 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
             .expect("live scheduler task")
             .is_finished()
     );
-    drop(schedulers);
+    drop((schedulers, cg, server));
     engine.shutdown_all().await;
 
     assert!(
@@ -662,6 +662,7 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     );
     wait_for_automation_scheduler_state(&engine, |schedulers| schedulers.len() == 2).await;
 
+    drop((first_server, second_server));
     engine.shutdown_all().await;
 }
 
@@ -803,7 +804,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
             .is_finished(),
         "finished handle notification must be replaced, not reported as success"
     );
-    drop(schedulers);
+    drop((schedulers, cg, server, cached));
     engine.shutdown_all().await;
 }
 
@@ -933,7 +934,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
         .get(&key)
         .and_then(|owner| owner.task.as_ref())
         .is_some_and(|task| !task.is_finished());
-    drop(schedulers);
+    drop((schedulers, cg, server));
     engine.shutdown_all().await;
     drop(barrier_release);
 
@@ -1017,6 +1018,7 @@ async fn cancel_stops_the_automation_loop_while_the_scheduler_map_is_held() {
         // Hand the live loop back so shutdown can abort it.
         handle.task = Some(automation_loop);
     }
+    drop((cg, server));
     engine.shutdown_all().await;
 
     assert!(
@@ -1099,6 +1101,7 @@ fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
     .expect("native runtime");
     assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
     assert_eq!(decision, AutomationSchedulerExitBarrier::EXIT);
+    drop((cg, server));
     tokio.block_on(engine.shutdown_all());
 }
 
@@ -1193,5 +1196,6 @@ fn project_open_activation_starts_the_automation_loop_without_a_tokio_runtime() 
             > probes,
         "the activation probed the automation configuration"
     );
+    drop((cg, server));
     tokio.block_on(engine.shutdown_all());
 }

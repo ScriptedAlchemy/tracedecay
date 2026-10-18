@@ -7,7 +7,6 @@ import {
   type ResponseFor,
   type ResultFor,
 } from "./operations";
-import { factStoreCurateReceiptMatches } from "./automation-receipt";
 import {
   applyHttpRequestControls,
   type OperationRequestOptions,
@@ -15,7 +14,10 @@ import {
 } from "./request-control";
 export type { OperationRequestOptions, PageOptions } from "./request-control";
 import {
+  OPERATION_TERMINATIONS,
+  applicationProblemBindingMatches,
   applicationProblemStatusMatches,
+  factStoreCurateReceiptMatches,
   isHttpProblemEnvelope,
   type ApplicationProblemRecord,
   type HttpProblemEnvelope,
@@ -61,7 +63,12 @@ export interface OperationStreamResume {
 export interface OperationStreamOptions {
   resume?: OperationStreamResume;
   signal?: AbortSignal;
-  /** Explicit opt-in; transport reconnection is disabled by default. */
+  /**
+   * Explicit opt-in; reconnection is disabled by default. Each reconnect
+   * attempt, including one that fails to connect, spends this budget. Only
+   * transport failures are retried, never the first connection. After the
+   * budget is spent the generator throws one `TraceDecayDisconnectedError`.
+   */
   maxReconnects?: number;
 }
 
@@ -159,14 +166,7 @@ interface StreamFrontier {
   resumeToken?: string;
 }
 
-const TERMINAL_EVENTS = new Set([
-  "completed",
-  "cancelled",
-  "timed_out",
-  "failed",
-  "partial",
-  "effect_unknown",
-]);
+const TERMINAL_EVENTS: ReadonlySet<string> = new Set(OPERATION_TERMINATIONS);
 const MAX_PAGE_SIZE = 1_000;
 const MAX_OPAQUE_CURSOR_BYTES = 4_096;
 const MAX_RESUME_TOKEN_BYTES = 4_096;
@@ -780,9 +780,7 @@ export class TraceDecayClient {
       }
       const validBinding =
         expectedBinding === undefined ||
-        (problemEnvelope.problem.kind === "not_found_or_not_authorized"
-          ? problemEnvelope.binding_id === undefined
-          : problemEnvelope.binding_id === expectedBinding);
+        applicationProblemBindingMatches(problemEnvelope, [expectedBinding]);
       if (
         response.ok ||
         !validBinding ||
@@ -953,81 +951,119 @@ export class TraceDecayClient {
       if (resumeToken !== undefined) {
         url.searchParams.set("resume_token", resumeToken);
       }
-      const response = await this.fetchResponse(
-        url,
-        {
-          method: "GET",
-          headers: this.headers("text/event-stream"),
-          signal: options.signal,
-        },
-        options.signal,
-      );
-      if (!response.ok || response.body === null) {
-        await this.readJson(response);
-        throw new TraceDecayMalformedResponseError(
-          "the daemon did not open an SSE stream",
-          { status: response.status },
-        );
-      }
-      if (!hasMediaType(response, "text/event-stream")) {
-        throw new TraceDecayMalformedResponseError(
-          "the daemon opened an operation stream with an invalid media type",
-          { status: response.status },
-        );
-      }
-
+      let response: Response;
       try {
-        for await (const frame of parseSse(response.body)) {
-          if (frame.retryDelayMs !== undefined) {
-            reconnectDelayMs = frame.retryDelayMs;
-          }
-          const decoded = decodeSse(frame, response.status, operationId);
-          if (decoded.frontier !== undefined) {
-            nextSequence = decoded.frontier.nextSequence;
-            resumeToken = decoded.frontier.resumeToken;
-          }
-          if (decoded.sequence !== undefined) {
-            if (
-              lastSequence !== undefined &&
-              BigInt(decoded.sequence) <= BigInt(lastSequence)
-            ) {
-              continue;
+        response = await this.fetchResponse(
+          url,
+          {
+            method: "GET",
+            headers: this.headers("text/event-stream"),
+            signal: options.signal,
+          },
+          options.signal,
+        );
+      } catch (cause) {
+        // The first connection is not retried. A failed reconnect spends budget
+        // like any other disconnect and keeps the last accepted frontier.
+        if (
+          reconnects === 0 ||
+          reconnects >= maxReconnects ||
+          !(cause instanceof TraceDecayDisconnectedError)
+        ) {
+          throw cause;
+        }
+        reconnects += 1;
+        await waitForReconnect(reconnectDelayMs, options.signal);
+        continue;
+      }
+      let streamFailed = false;
+      try {
+        if (!response.ok || response.body === null) {
+          await this.readJson(response);
+          throw new TraceDecayMalformedResponseError(
+            "the daemon did not open an SSE stream",
+            { status: response.status },
+          );
+        }
+        if (!hasMediaType(response, "text/event-stream")) {
+          throw new TraceDecayMalformedResponseError(
+            "the daemon opened an operation stream with an invalid media type",
+            { status: response.status },
+          );
+        }
+
+        try {
+          for await (const frame of parseSse(response.body)) {
+            if (frame.retryDelayMs !== undefined) {
+              reconnectDelayMs = frame.retryDelayMs;
             }
-            const expected =
-              lastSequence === undefined ? undefined : incrementDecimal(lastSequence);
-            if (expected !== undefined && decoded.sequence !== expected) {
-              throw new TraceDecayMalformedResponseError(
-                "the daemon returned a non-contiguous SSE sequence",
-                { status: response.status, payload: decoded.event },
-              );
+            const decoded = decodeSse(frame, response.status, operationId);
+            if (decoded.frontier !== undefined) {
+              nextSequence = decoded.frontier.nextSequence;
+              resumeToken = decoded.frontier.resumeToken;
             }
-            lastSequence = decoded.lastSequence ?? decoded.sequence;
-            nextSequence = incrementDecimal(lastSequence);
+            if (decoded.sequence !== undefined) {
+              if (
+                lastSequence !== undefined &&
+                BigInt(decoded.sequence) <= BigInt(lastSequence)
+              ) {
+                continue;
+              }
+              const expected =
+                lastSequence === undefined ? undefined : incrementDecimal(lastSequence);
+              if (expected !== undefined && decoded.sequence !== expected) {
+                throw new TraceDecayMalformedResponseError(
+                  "the daemon returned a non-contiguous SSE sequence",
+                  { status: response.status, payload: decoded.event },
+                );
+              }
+              lastSequence = decoded.lastSequence ?? decoded.sequence;
+              nextSequence = incrementDecimal(lastSequence);
+            }
+            yield {
+              event: frame.event,
+              id: decoded.sequence ?? null,
+              data: decoded.event,
+            };
+            if (TERMINAL_EVENTS.has(frame.event)) {
+              return;
+            }
           }
-          yield {
-            event: frame.event,
-            id: decoded.sequence ?? null,
-            data: decoded.event,
-          };
-          if (TERMINAL_EVENTS.has(frame.event)) {
-            return;
+        } catch (cause) {
+          streamFailed = true;
+          if (cause instanceof TraceDecayProtocolError) {
+            throw cause;
+          }
+          if (options.signal?.aborted) {
+            throw new TraceDecayAbortError(options.signal.reason ?? cause);
+          }
+          if (reconnects >= maxReconnects) {
+            if (cause instanceof TraceDecayDisconnectedError) {
+              throw cause;
+            }
+            throw new TraceDecayDisconnectedError(
+              `operation stream disconnected after ${reconnects} reconnects`,
+              cause,
+            );
           }
         }
       } catch (cause) {
-        if (cause instanceof TraceDecayProtocolError) {
-          throw cause;
-        }
-        if (options.signal?.aborted) {
-          throw new TraceDecayAbortError(options.signal.reason ?? cause);
-        }
-        if (reconnects >= maxReconnects) {
-          if (cause instanceof TraceDecayDisconnectedError) {
-            throw cause;
+        streamFailed = true;
+        throw cause;
+      } finally {
+        // Closing a watcher must close its HTTP body without cancelling the operation.
+        // parseSse has already released its reader when this outer cleanup runs.
+        try {
+          await response.body?.cancel();
+        } catch (cause) {
+          // Do not mask a primary failure (including a retryable disconnect).
+          // Otherwise disposal must report that its transport did not close.
+          if (!streamFailed) {
+            throw new TraceDecayDisconnectedError(
+              "failed to close operation stream transport",
+              cause,
+            );
           }
-          throw new TraceDecayDisconnectedError(
-            `operation stream disconnected after ${reconnects} reconnects`,
-            cause,
-          );
         }
       }
 

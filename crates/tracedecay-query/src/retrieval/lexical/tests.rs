@@ -20,8 +20,8 @@ use tracedecay_domain::{
 
 use super::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever, LexicalProximityV1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
-    admit_candidate_sources, lexical_query_parts,
+    LexicalProximityV1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, admit_candidate_sources,
+    lexical_query_parts,
 };
 use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{

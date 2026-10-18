@@ -33,7 +33,6 @@ fn project_source_access_uses_the_configured_binding_and_refuses_foreign_configu
     let binding =
         tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
             &project_id,
-            root.path(),
         )
         .expect("daemon source binding");
     let source_bindings_key =
@@ -67,7 +66,6 @@ fn project_source_access_uses_the_configured_binding_and_refuses_foreign_configu
     let capabilities = project_open_work_capabilities().expect("capabilities");
     let access = project_open_source_access_at(
         &scope,
-        root.path(),
         &configuration,
         requester.clone(),
         capabilities.clone(),
@@ -90,7 +88,6 @@ fn project_source_access_uses_the_configured_binding_and_refuses_foreign_configu
     assert!(
         project_open_source_access_at(
             &foreign_scope,
-            root.path(),
             &configuration,
             access.requester,
             access.effective_capabilities,

@@ -6,11 +6,9 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tracedecay_api::HttpApplicationControls;
+use tracedecay_api::{HttpApplicationControls, HttpJsonEnvelope};
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_contracts::{
-    ApplicationProblemRecord, CancellationSignal, Deadline, RequestId, now_micros,
-};
+use tracedecay_contracts::{CancellationSignal, Deadline, RequestId, now_micros};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{
     CursorBindingMismatchV1, CursorBindingV1, UtcMicros, decode_bound_cursor, encode_bound_cursor,
@@ -83,17 +81,14 @@ pub fn rendered_tool_result<F: FnOnce() -> String>(
 /// An owner's `{kind, value}` HTTP envelope as the tool result: an answer
 /// as its JSON body, a problem as the one refusing tool result with the
 /// typed record at `structuredContent.problem`.
-pub fn owner_envelope_result(payload: &Value) -> Result<ToolResult> {
-    if payload.get("kind").and_then(Value::as_str) != Some("problem") {
-        return Ok(json_result(payload).with_semantic_error(false));
+pub fn owner_envelope_result(envelope: &HttpJsonEnvelope<Value>) -> Result<ToolResult> {
+    let payload = serde_json::to_value(envelope)?;
+    match envelope {
+        HttpJsonEnvelope::Success(_) => Ok(json_result(&payload).with_semantic_error(false)),
+        HttpJsonEnvelope::Problem(problem) => {
+            problem_tool_result(&payload.to_string(), &problem.application.problem)
+        }
     }
-    let problem: ApplicationProblemRecord =
-        serde_json::from_value(payload["value"]["problem"].clone()).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("the owner's problem record does not decode: {error}"),
-            }
-        })?;
-    problem_tool_result(&payload.to_string(), &problem)
 }
 
 /// The fallback request id an owner adapter (`owner` is `Work` or

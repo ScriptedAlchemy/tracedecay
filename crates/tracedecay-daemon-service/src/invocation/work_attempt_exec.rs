@@ -315,6 +315,10 @@ impl AttemptStepsV1 for tracedecay_application::work::RegisteredWorkApplicationS
 /// forced termination.
 const CANCELLATION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a killed provider group may take to close its pipes before the
+/// attempt abandons them. Descendants that left the group keep the pipes open.
+const KILLED_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Joined process owners for provider attempts owned by this daemon process.
 /// This is runtime plumbing only, the durable cancellation request lives in
 /// the attempt row, and restart recovery never consults this map.
@@ -1269,9 +1273,11 @@ async fn execute_provider_with_environment(
         u64::try_from(envelope.deadline().0.saturating_sub(now_micros().0)).unwrap_or(0);
     let wall = std::time::Duration::from_micros(deadline_micros);
 
+    // The deadline and cancellation cover the provider's exit and the drain of
+    // every pipe a descendant may still hold.
     let ending = native_runtime::timeout(wall, async {
         tokio::select! {
-            status = process.wait() => Some(status),
+            status = process.finish() => Some(status),
             () = cancel.notified() => None,
         }
     })
@@ -1283,8 +1289,7 @@ async fn execute_provider_with_environment(
         // An unavailable timer fails closed as an elapsed wall budget.
         Err(_) => {
             let stalled_for = started.elapsed();
-            process.signal(TerminationSignal::Kill);
-            let _ = process.wait().await;
+            kill_and_drain(&mut process).await;
             offer_no_progress_observation(
                 observability_producer,
                 &identity,
@@ -1297,7 +1302,7 @@ async fn execute_provider_with_environment(
         }
     };
 
-    let (captured_stdout, captured_stderr) = process.output().await;
+    let (captured_stdout, captured_stderr) = process.output();
     let provider_session = provider_session(resolved.protocol, captured_stdout.as_ref());
     let stdout = stream_summary(captured_stdout.clone());
     let stderr = stream_summary(captured_stderr);
@@ -1448,11 +1453,16 @@ async fn execute_app_server(
     let deadline_micros =
         u64::try_from(envelope.deadline().0.saturating_sub(now_micros().0)).unwrap_or(0);
     let wall = std::time::Duration::from_micros(deadline_micros);
+    // The coordinator's `wall` timeout is the authoritative deadline and seals
+    // `TimedOut`. The session's own timeout is only a backstop for a
+    // coordinator that is gone; at the same instant it would race the
+    // coordinator and seal a wall-exhausted attempt as a protocol failure.
+    let session_wall = wall.saturating_add(CANCELLATION_GRACE);
     let cancellation = CodexAppServerCancellation::default();
     let config = CodexAppServerSummaryConfig {
         codex_bin: selection.provider.executable.to_string_lossy().into_owned(),
         model: Some(snapshot.model().to_owned()),
-        timeout: wall,
+        timeout: session_wall,
     };
     let prompt = envelope.instructions().to_owned();
     let cwd = PathBuf::from(envelope.worktree_root());
@@ -1477,7 +1487,7 @@ async fn execute_app_server(
             CodexAppServerWorkExecution {
                 cancellation: &session_cancellation,
                 cwd: &cwd,
-                timeout: wall,
+                timeout: session_wall,
                 admitted_environment: &admitted_environment,
                 launch_receipt: &blocking_launch_receipt,
                 approval,
@@ -1716,21 +1726,34 @@ async fn cancel_ladder(
     if native_runtime::timeout(CANCELLATION_GRACE, process.wait())
         .await
         .is_err()
-    {
-        if let Err(problem) = steps
+        && let Err(problem) = steps
             .escalate_cancellation(context, identity, now_micros())
             .await
-        {
-            tracing::warn!(
-                task = identity.task_id().as_str(),
-                ?problem,
-                "work attempt cancellation could not be escalated"
-            );
-        }
-        process.signal(TerminationSignal::Kill);
-        let _ = process.wait().await;
+    {
+        tracing::warn!(
+            task = identity.task_id().as_str(),
+            ?problem,
+            "work attempt cancellation could not be escalated"
+        );
     }
+    // Cancellation ends every member of the provider's group, including
+    // descendants that outlived a provider that exited on the interrupt.
+    kill_and_drain(process).await;
     WorkAttemptProviderOutcomeV1::Cancelled
+}
+
+/// SIGKILLs the provider's group, then waits for its pipes to close. Pipes a
+/// survivor outside the group still holds are abandoned after
+/// [`KILLED_DRAIN_GRACE`].
+async fn kill_and_drain(process: &mut ProviderProcess) {
+    process.signal(TerminationSignal::Kill);
+    if native_runtime::timeout(KILLED_DRAIN_GRACE, process.finish())
+        .await
+        .is_err()
+    {
+        process.abandon_output();
+        let _ = process.finish().await;
+    }
 }
 
 /// Cancellation-ladder rung, kept platform-neutral so call sites compile on

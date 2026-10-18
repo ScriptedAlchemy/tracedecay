@@ -31,7 +31,7 @@
 //! touches a socket, the network, or the operator profile measures the
 //! machine instead of the diff. Nothing here opens a socket, spawns a
 //! daemon, reads `~/.tracedecay`, or resolves a URL. The publication
-//! authority and the projection sink are in-memory; the only path written is
+//! authority is in-memory; the only path written is
 //! a self-created scratch directory under the system temp dir, removed
 //! before exit.
 //!
@@ -48,9 +48,9 @@
 mod artifact_bench;
 
 use artifact_bench::{
-    ActiveControl, AdmittedFile, ApplyingProjectionSink, SealedDrainBounds, decoded_generation,
-    default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
-    replicate, seal_partitioned,
+    ActiveControl, AdmittedFile, SealedDrainBounds, decoded_generation, default_corpus_root,
+    drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile, replicate,
+    seal_partitioned,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -186,9 +186,11 @@ impl Options {
                 other => return Err(format!("unrecognized argument {other:?}")),
             }
         }
-        let corpus_root = corpus_root
-            .or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from))
-            .unwrap_or_else(default_corpus_root);
+        let corpus_root =
+            match corpus_root.or_else(|| std::env::var_os(CORPUS_ENV).map(PathBuf::from)) {
+                Some(root) => root,
+                None => default_corpus_root()?,
+            };
         let replicas = match replicas {
             Some(replicas) => replicas,
             None => match std::env::var(REPLICAS_ENV) {
@@ -305,7 +307,7 @@ fn verify_increment_matches_fresh_full(
         return Err("incremental generation sealed no symbols to spot-check".to_owned());
     }
     let store = MemorySealedPublicationStoreV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
         .map_err(|error| format!("open fresh-full owner: {error}"))?;
     let published = owner
         .build_and_publish(
@@ -371,7 +373,7 @@ fn edit_one_body(files: &[AdmittedFile]) -> Option<(Vec<AdmittedFile>, BTreeSet<
 }
 
 fn build_body_refresh(
-    owner: &mut CodeIndexProductionOwnerV1<MemorySealedPublicationStoreV1, ApplyingProjectionSink>,
+    owner: &mut CodeIndexProductionOwnerV1<MemorySealedPublicationStoreV1>,
     repository: &RepositoryId,
     sanitizer_revision: &SanitizerRevision,
     edited_files: &[AdmittedFile],
@@ -451,7 +453,7 @@ fn build_generations(
     control: &ActiveControl,
 ) -> Result<GenerationRun, String> {
     let store = MemorySealedPublicationStoreV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
         .map_err(|error| format!("open production owner: {error}"))?;
     let clean_request = build_request(
         repository,

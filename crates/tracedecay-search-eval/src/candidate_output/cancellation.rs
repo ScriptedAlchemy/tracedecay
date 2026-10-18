@@ -17,10 +17,7 @@ use tracedecay_domain::{
 };
 
 use super::control::CancelledControl;
-use super::{
-    ApplyingProjectionSink, CandidateOutputError, CandidateWorkloadV1, id,
-    lexical_projection_profile_digest,
-};
+use super::{CandidateOutputError, CandidateWorkloadV1, id, lexical_projection_profile_digest};
 
 pub(super) fn prove_cancellation(
     repo_root: &Path,
@@ -91,7 +88,7 @@ pub(super) fn prove_cancellation(
         max_snapshot_age_micros: None,
     };
     let store = MemorySealedPublicationStoreV1::default();
-    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone())
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let error = match owner.build_and_publish(request, &CancelledControl) {
         Err(error) => error,

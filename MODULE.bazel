@@ -15,11 +15,26 @@ single_version_override(
         "//scripts:bazel/patches/rules-rust-windows-dependency-search.patch",
         "//scripts:bazel/patches/rules-rust-windows-build-flags.patch",
         "//scripts:bazel/patches/rules-rust-windows-file-url-path-deps.patch",
+        # Genrule tools must include Rustfmt's compiler runtime libraries.
+        "//scripts:bazel/patches/rules-rust-rustfmt-runtime-inputs.patch",
     ],
     patch_strip = 1,
 )
 bazel_dep(name = "aspect_rules_js", version = "3.5.1")
+# Apply npm_import's directory traversal normalization to extraction actions
+# too, before a remote worker uploads the package TreeArtifact.
+single_version_override(
+    module_name = "aspect_rules_js",
+    patches = ["//scripts:bazel/patches/rules-js-extraction-directory-modes.patch"],
+    patch_strip = 1,
+)
 bazel_dep(name = "rules_nodejs", version = "6.7.6")
+bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
+
+# Selected only by rbe-linux: ship the compiler, headers, libc, and linker to
+# Linux workers instead of depending on the client's /usr/bin toolchain.
+zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
+use_repo(zig, "zig_sdk")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
@@ -32,10 +47,15 @@ rust.toolchain(
         "fastbuild": "1",
         "opt": "3",
     },
-    versions = ["nightly/2026-10-17"],
-    rustfmt_version = "nightly/2026-10-17",
+    versions = ["nightly/2026-10-18"],
+    rustfmt_version = "nightly/2026-10-18",
+    rust_analyzer_version = "nightly/2026-10-18",
 )
-use_repo(rust, "rust_toolchains")
+use_repo(
+    rust,
+    "rust_toolchains",
+    rust_analyzer_tools = "rust_analyzer_nightly-2026-10-18_tools",
+)
 register_toolchains("@rust_toolchains//:all")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")

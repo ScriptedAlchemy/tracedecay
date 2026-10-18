@@ -6,6 +6,10 @@
   "fixture": "main",
   "status": "active",
   "prompt": "The project database started returning disk I/O errors after a health check. Diagnose the cause without changing anything.",
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "routing-only specialist scenario: measures whether the expected specialist was invoked; answer quality is not verified"
+  },
   "expected_agent": "runtime-storage-doctor",
   "max_tool_calls": 8,
   "notes": "Neutral routing eval for the read-only runtime and storage evidence pipeline."

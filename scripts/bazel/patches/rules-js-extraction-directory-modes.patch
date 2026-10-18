@@ -1,0 +1,179 @@
+diff --git a/npm/private/npm_package_store.bzl b/npm/private/npm_package_store.bzl
+--- a/npm/private/npm_package_store.bzl
++++ b/npm/private/npm_package_store.bzl
+@@ -31,6 +31,10 @@
+ """
+ 
+ _ATTRS = {
++    "_extract_script": attr.label(
++        default = Label("//npm/private:npm_package_extract.mjs"),
++        allow_single_file = True,
++    ),
+     "src": attr.label(
+         doc = """A target providing a `NpmPackageInfo` or `JsInfo` containing the package sources.
+         """,
+@@ -235,6 +239,7 @@
+                 # tar to strip one directory level. Some packages have directory permissions missing
+                 # executable which make the directories not listable (pngjs@5.0.0 for example).
+                 bsdtar = ctx.toolchains[tar_lib.toolchain_type]
++                node = ctx.toolchains["@rules_nodejs//nodejs:runtime_toolchain_type"].nodeinfo.node
+ 
+                 args = ctx.actions.args()
+                 args.add_all(
+@@ -255,14 +260,20 @@
+                     args.add_all(ctx.attr.exclude_package_contents, before_each = "--exclude")
+ 
+                 ctx.actions.run(
+-                    executable = bsdtar.tarinfo.binary,
+-                    inputs = [src],
++                    executable = node,
++                    inputs = [src, ctx.file._extract_script],
++                    tools = [bsdtar.tarinfo.binary],
+                     outputs = [package_store_directory],
+-                    arguments = [args],
++                    arguments = [
++                        ctx.file._extract_script.path,
++                        bsdtar.tarinfo.binary.path,
++                        package_store_directory.path,
++                        args,
++                    ],
+                     mnemonic = "NpmPackageExtract",
+                     progress_message = "Extracting npm package {}@{}".format(package, version),
+                     execution_requirements = _EXTRACT_EXECUTION_REQUIREMENTS,
+-                    toolchain = Label("@tar.bzl//tar/toolchain:type"),
++                    toolchain = Label("@rules_nodejs//nodejs:runtime_toolchain_type"),
+ 
+                     # Always override the locale to give better hermeticity.
+                     # See https://github.com/aspect-build/rules_js/issues/2039
+@@ -489,6 +500,7 @@
+     toolchains = [
+         Label("@bazel_lib//lib:copy_directory_toolchain_type"),
+         tar_lib.toolchain_type,
++        Label("@rules_nodejs//nodejs:runtime_toolchain_type"),
+     ],
+ )
+ 
+diff --git a/npm/private/npm_package_extract.mjs b/npm/private/npm_package_extract.mjs
+new file mode 100644
+--- /dev/null
++++ b/npm/private/npm_package_extract.mjs
+@@ -0,0 +1,22 @@
++import {spawnSync} from 'node:child_process';
++import {chmodSync, lstatSync, readdirSync} from 'node:fs';
++import {join} from 'node:path';
++
++const [tar, output, ...args] = process.argv.slice(2);
++const result = spawnSync(tar, args, {stdio: 'inherit'});
++if (result.error) throw result.error;
++if (result.status !== 0) process.exit(result.status ?? 1);
++
++// Match npm_import's a+X normalization before Bazel reads the TreeArtifact.
++// Repair each directory before descending; never follow package symlinks.
++function normalize(path) {
++    const stat = lstatSync(path);
++    if (stat.isSymbolicLink()) return;
++    if (stat.isDirectory() || (stat.mode & 0o111)) {
++        chmodSync(path, (stat.mode & 0o7777) | 0o111);
++    }
++    if (stat.isDirectory()) {
++        for (const name of readdirSync(path)) normalize(join(path, name));
++    }
++}
++if (process.platform !== 'win32') normalize(output);
+diff --git a/npm/private/BUILD.bazel b/npm/private/BUILD.bazel
+--- a/npm/private/BUILD.bazel
++++ b/npm/private/BUILD.bazel
+@@ -1,6 +1,6 @@
+ "Internal implementation details"
+ 
+-load("@aspect_rules_js//js:defs.bzl", "js_library")
++load("@aspect_rules_js//js:defs.bzl", "js_library", "js_test")
+ load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+ 
+ package(default_visibility = ["//npm:__subpackages__"])
+@@ -11,7 +11,16 @@
+     visibility = ["//visibility:public"],
+ )
+ 
+-exports_files(["credential_helper.mjs"])
++exports_files(["credential_helper.mjs", "npm_package_extract.mjs"])
++
++js_test(
++    name = "npm_package_extract_test",
++    entry_point = "npm_package_extract_test.mjs",
++    args = ["$(rootpath @bsd_tar_toolchains//:resolved_toolchain)"],
++    data = ["npm_package_extract.mjs", "@bsd_tar_toolchains//:resolved_toolchain"],
++    no_copy_to_bin = ["@bsd_tar_toolchains//:resolved_toolchain"],
++    size = "small",
++)
+ 
+ bzl_library(
+     name = "npm_package",
+diff --git a/npm/private/npm_package_extract_test.mjs b/npm/private/npm_package_extract_test.mjs
+new file mode 100644
+--- /dev/null
++++ b/npm/private/npm_package_extract_test.mjs
+@@ -0,0 +1,63 @@
++import assert from 'node:assert/strict';
++import {spawnSync} from 'node:child_process';
++import {chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
++import {join, resolve} from 'node:path';
++import {fileURLToPath} from 'node:url';
++
++// Explicit tar headers reproduce malformed registry directory modes without
++// requiring traversal of an unreadable source directory while archiving it.
++function entry(name, mode, type, content = '') {
++    const header = Buffer.alloc(512);
++    header.write(name);
++    function octal(value, offset, length) {
++        header.write(value.toString(8).padStart(length - 1, '0') + '\0', offset);
++    }
++    octal(mode, 100, 8);
++    octal(0, 108, 8);
++    octal(0, 116, 8);
++    octal(Buffer.byteLength(content), 124, 12);
++    octal(0, 136, 12);
++    header.fill(32, 148, 156);
++    header.write(type, 156);
++    header.write('ustar\0', 257);
++    header.write('00', 263);
++    octal(header.reduce((sum, byte) => sum + byte, 0), 148, 8);
++    const payload = Buffer.alloc(Math.ceil(Buffer.byteLength(content) / 512) * 512);
++    payload.write(content);
++    return Buffer.concat([header, payload]);
++}
++const root = mkdtempSync(join(process.env.TEST_TMPDIR, 'npm-extract-'));
++const output = join(root, 'output');
++mkdirSync(output);
++try {
++    const archive = join(root, 'fixture.tar');
++    writeFileSync(archive, Buffer.concat([
++        entry('package/', 0o755, '5'),
++        entry('package/lib/', 0o666, '5'),
++        entry('package/lib/nested/', 0o666, '5'),
++        entry('package/lib/nested/plain.js', 0o644, '0', 'plain'),
++        entry('package/lib/nested/executable.js', 0o710, '0', 'executable'),
++        Buffer.alloc(1024),
++    ]));
++    const helper = fileURLToPath(new URL('./npm_package_extract.mjs', import.meta.url));
++    const result = spawnSync(process.execPath, [helper, resolve(process.argv[2]), output,
++        '--extract', '--no-same-owner', '--no-same-permissions',
++        '--strip-components', '1', '--file', archive, '--directory', output,
++    ], {stdio: 'inherit'});
++    assert.equal(result.status, 0);
++    const nested = join(output, 'lib/nested');
++    assert.equal(readFileSync(join(nested, 'plain.js'), 'utf8'), 'plain');
++    if (process.platform !== 'win32') {
++        for (const dir of [join(output, 'lib'), nested]) {
++            assert.equal(statSync(dir).mode & 0o111, 0o111);
++        }
++        assert.equal(statSync(join(nested, 'plain.js')).mode & 0o111, 0);
++        assert.equal(statSync(join(nested, 'executable.js')).mode & 0o111, 0o111);
++    }
++} finally {
++    // Keep a failing old implementation from leaving nontraversable staging.
++    for (const dir of [join(output, 'lib'), join(output, 'lib/nested')]) {
++        try { chmodSync(dir, 0o755); } catch {}
++    }
++    rmSync(root, {recursive: true, force: true});
++}

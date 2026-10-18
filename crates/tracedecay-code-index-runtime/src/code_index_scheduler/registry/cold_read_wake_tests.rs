@@ -224,11 +224,18 @@ async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generati
     let root = canonical_existing_identity(&project).unwrap();
     registry.request_complete_generation(&root).await;
     let mut activity = registry.subscribe_owner_activity(&root).await.unwrap();
-    while activity.worker_phase() != super::CodeIndexWorkerPhaseV1::AwaitingAdmission {
+    // The worker sets `AwaitingAdmission` before it first polls its permit
+    // request, so that phase does not say the request is queued. Release the
+    // only permit and wait for it to be gone: the worker holds it, which no
+    // phase can say, and our request below queues behind the source pass.
+    drop(admission);
+    while registry
+        .background_reconcile_admission()
+        .available_permits()
+        != 0
+    {
         activity.changed().await.unwrap();
     }
-    // The current-thread runtime observes the phase after the worker yields
-    // on its admission future, so its semaphore request is already queued.
     // Queue behind the source pass but ahead of its optional preparation.
     // This holds the actual published memo cold, rather than constructing an
     // unrelated scheduler handle which residency may replace before seating.
@@ -239,7 +246,6 @@ async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generati
         std::task::Poll::Ready(())
     })
     .await;
-    drop(admission);
     let admission = next_admission.await.unwrap();
     let mut signals =
         super::owner_signals::CodeIndexOwnerSignalsV1::subscribe(&registry, &root).await;

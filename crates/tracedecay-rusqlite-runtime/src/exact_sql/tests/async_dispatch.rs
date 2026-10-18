@@ -760,6 +760,95 @@ fn a_write_job_commits_on_ok_and_rolls_back_on_err() {
     assert_eq!(job_count(&handle), 1, "an accepted job commits its row");
 }
 
+fn insert_job_row(value: i64) -> ExactSqlStatement {
+    statement(
+        "INSERT INTO job_rows (value) VALUES (?1)",
+        vec![ExactSqlValue::Integer(value)],
+    )
+}
+
+#[test]
+fn a_job_body_that_awaits_a_foreign_future_is_refused_and_rolled_back() {
+    let (_fixture, handle) = job_fixture();
+
+    let refused = crate::native_runtime::block_on(handle.transact_async(
+        JobPolicy::Bounded,
+        async |transaction| {
+            transaction
+                .execute(insert_job_row(1))
+                .map_err(|error| error.to_string())?;
+            crate::storage_pool::sleep(Duration::from_millis(1)).await;
+            Ok::<_, String>(())
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(refused, Err(ExactSqlError::JobAwaitedForeignFuture));
+    assert_eq!(job_count(&handle), 0, "the refused job's row rolled back");
+}
+
+#[test]
+fn an_async_job_body_over_several_statements_commits_and_returns_its_value() {
+    let (_fixture, handle) = job_fixture();
+    async fn insert(
+        transaction: &ExactSqlJobTransaction<'_>,
+        value: i64,
+    ) -> Result<usize, ExactSqlError> {
+        transaction
+            .execute(insert_job_row(value))
+            .map(|result| result.changed_rows)
+    }
+
+    let total = crate::native_runtime::block_on(handle.transact_async(
+        JobPolicy::Bounded,
+        async |transaction| {
+            insert(transaction, 1).await?;
+            insert(transaction, 2).await?;
+            transaction.execute_batch("INSERT INTO job_rows (value) VALUES (3);".to_owned())?;
+            let sum = transaction.query(statement("SELECT SUM(value) FROM job_rows", vec![]))?;
+            Ok::<_, ExactSqlError>(sum.rows[0].values[0].clone())
+        },
+    ))
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(total, Ok(ExactSqlValue::Integer(6)));
+    assert_eq!(
+        job_count(&handle),
+        3,
+        "every statement of the body committed"
+    );
+}
+
+#[test]
+fn a_long_lease_job_renews_its_lease_after_each_statement() {
+    let fixture = fixture('a', 'a');
+    let clock = FakeClock::frozen();
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
+        .unwrap()
+        .with_write_authority(Arc::new(FakeClockAuthority {
+            clock: Arc::clone(&clock),
+            advance: Some((
+                ExactSqlWriteIntent::Query,
+                EXACT_SQL_TRANSACTION_LIMIT * 2 / 3,
+            )),
+        }))
+        .unwrap();
+    let three_reads = |policy| {
+        crate::native_runtime::block_on(handle.transact_with_policy(policy, |transaction| {
+            (0..3).try_for_each(|_| transaction.query(statement("SELECT 1", vec![])).map(|_| ()))
+        }))
+        .unwrap()
+        .unwrap()
+    };
+
+    assert_eq!(three_reads(JobPolicy::AuthorizedLongLease), Ok(()));
+    assert!(
+        three_reads(JobPolicy::Bounded).is_err(),
+        "a bounded job outlives its one lease"
+    );
+}
+
 #[test]
 fn abandoned_commit_retains_completion_until_writer_settlement() {
     use std::sync::atomic::{AtomicUsize, Ordering};
