@@ -916,7 +916,11 @@ impl MaintenanceCoordinator {
             .map(|graph| graph.project_root.clone())
             .collect::<BTreeSet<_>>();
         maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
-        let telemetry_sampling = if continuation.is_none() {
+        // A capacity retirement releasing stores skips this pass: sampling
+        // leases every sampled store until it ends.
+        let telemetry_sampling = if continuation.is_none()
+            && let Ok(_clients) = administration.maintenance_store_clients().try_lock()
+        {
             maintenance_observations
                 .advance_registered(
                     &active_telemetry_paths,
@@ -948,6 +952,9 @@ impl MaintenanceCoordinator {
             }
             let admitted = administration
                 .try_with_writer(|| async {
+                    let Ok(_clients) = administration.maintenance_store_clients().try_lock() else {
+                        return MaintenanceTickOutcome::Retry;
+                    };
                     let (key, unit) = &work[index];
                     match unit {
                         MaintenanceStoreWork::Session(database_path) => {
@@ -1784,7 +1791,8 @@ mod tests {
 
     /// A registered project nothing has mounted since the daemon started is
     /// collected by the first full tick and converges on its continuation,
-    /// instead of waiting for a client to mount it.
+    /// instead of waiting for a client to mount it. A tick that runs while a
+    /// capacity release holds the maintenance store clients defers it.
     #[test]
     fn a_full_tick_collects_an_unmounted_registered_project_without_a_tokio_runtime() {
         let hazards = crate::test_support::native_runtime_hazards();
@@ -1849,6 +1857,26 @@ mod tests {
         let retention = tracedecay_configuration::RetentionConfig::default();
         let branch_gc = super::BranchStoreGcCadenceV1 { branch_gc_days: 30 };
         assert_eq!(generation_files(), 6);
+
+        let release = administration.maintenance_store_clients().lock().await;
+        let deferred = coordinator
+            .run_tick(
+                &profile_root,
+                &profile_database,
+                &administration,
+                &schedulers,
+                &retention,
+                branch_gc,
+                None,
+            )
+            .await;
+        assert_eq!(deferred, MaintenanceTickOutcome::Retry);
+        assert_eq!(
+            generation_files(),
+            6,
+            "a tick leases no store while a capacity release runs"
+        );
+        drop(release);
 
         coordinator
             .run_tick(

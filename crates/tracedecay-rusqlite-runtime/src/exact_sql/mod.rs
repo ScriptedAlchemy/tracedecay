@@ -55,7 +55,7 @@ pub(crate) use column::{
 pub(crate) use json::{decode as decode_json, encode as encode_json};
 pub use types::*;
 
-pub use command::ExactSqlJobTransaction;
+pub use command::{ExactSqlJobTransaction, JobPolicy};
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
@@ -535,19 +535,73 @@ impl ExactSqlHandle {
         R: Send + 'static,
         E: Send + 'static,
     {
+        self.transact_with_policy(JobPolicy::Bounded, job).await
+    }
+
+    /// [`Self::transact`] under `policy`.
+    pub async fn transact_with_policy<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(policy, move |transaction| Ok(job(transaction)))
+            .await
+    }
+
+    /// [`Self::transact_with_policy`] for an async body, so an async helper
+    /// over the job's statements runs unchanged. The body is polled once
+    /// inside the job: its statements are synchronous, so it completes on that
+    /// poll unless it awaited something else, which would hold the writer
+    /// across the wait. Such a job rolls back with
+    /// [`ExactSqlError::JobAwaitedForeignFuture`].
+    pub async fn transact_async<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        body: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: AsyncFn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(policy, move |transaction| {
+            complete_now(body(transaction)).ok_or(ExactSqlError::JobAwaitedForeignFuture)
+        })
+        .await
+    }
+
+    async fn run_job<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<Result<R, E>, ExactSqlError>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
         let (outcome, verdict) = async_channel::bounded(1);
         let (reply, response) = async_channel::bounded(1);
         let job: command::WriterJob = Box::new(move |transaction| {
-            let result = job(transaction);
+            let result = job(transaction)?;
             let commit = result.is_ok();
             let _ = outcome.try_send(result);
-            commit
+            Ok(commit)
         });
         self.writer
             .as_ref()
             .ok_or(ExactSqlError::WriterUnavailable)?
             .try_send(WriterCommand::Job {
                 job,
+                policy,
                 reply,
                 authority: self.write_authority.clone(),
             })
@@ -1095,6 +1149,7 @@ impl ExactSqlTransaction {
 
     fn enqueue_commit(
         mut self,
+        on_commit: Option<Box<dyn FnOnce() + Send + 'static>>,
     ) -> Result<async_channel::Receiver<Result<ExactSqlCommitReceipt, ExactSqlError>>, ExactSqlError>
     {
         let sender = self
@@ -1103,7 +1158,7 @@ impl ExactSqlTransaction {
             .ok_or(ExactSqlError::TransactionClosed)?;
         let (reply, response) = async_channel::bounded(1);
         sender
-            .try_send(TransactionCommand::Commit { reply })
+            .try_send(TransactionCommand::Commit { reply, on_commit })
             .map_err(|error| map_transaction_send_error(error, &self.lease))?;
         Ok(response)
     }
@@ -1111,12 +1166,28 @@ impl ExactSqlTransaction {
     pub fn commit(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
         refuse_on_pool()?;
         let lease = Arc::clone(&self.lease);
-        recv_writer_reply(self.enqueue_commit()?).map_err(|_| transaction_terminal_error(&lease))?
+        recv_writer_reply(self.enqueue_commit(None)?)
+            .map_err(|_| transaction_terminal_error(&lease))?
     }
 
     pub async fn commit_async(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
         let lease = Arc::clone(&self.lease);
-        self.enqueue_commit()?
+        self.enqueue_commit(None)?
+            .recv()
+            .await
+            .map_err(|_| transaction_terminal_error(&lease))?
+    }
+
+    /// Transfers resources to the writer until SQLite commits or rolls back.
+    pub async fn commit_async_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> Result<ExactSqlCommitReceipt, ExactSqlError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let lease = Arc::clone(&self.lease);
+        self.enqueue_commit(Some(Box::new(on_commit)))?
             .recv()
             .await
             .map_err(|_| transaction_terminal_error(&lease))?
@@ -1276,6 +1347,15 @@ fn verify_write_authority(
     match authority {
         Some(authority) => authority.verify(intent),
         None => Ok(()),
+    }
+}
+
+/// One poll; `None` means the future is pending.
+fn complete_now<F: Future>(future: F) -> Option<F::Output> {
+    match std::pin::pin!(future).poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    {
+        std::task::Poll::Ready(output) => Some(output),
+        std::task::Poll::Pending => None,
     }
 }
 

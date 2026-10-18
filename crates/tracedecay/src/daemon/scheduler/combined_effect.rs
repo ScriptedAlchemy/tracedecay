@@ -1460,7 +1460,7 @@ mod tests {
             .engine
             .invocation
             .invocation_service()
-            .expire_all()
+            .expire_all(None)
             .await;
         let observed = RegisteredObservabilityPortV1::new(session_db.as_ref())
             .query(ObservabilityQueryV1 {

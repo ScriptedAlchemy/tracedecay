@@ -142,7 +142,10 @@ impl StoreAdministration {
         level = "trace",
         skip_all
     )]
-    pub(in crate::daemon) async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
+    pub(in crate::daemon) async fn close_retained_graph_runtimes_for_shutdown(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
         let registries = self
             .session_runtime_registries
             .lock()
@@ -152,7 +155,9 @@ impl StoreAdministration {
             .collect::<Vec<_>>();
         let mut first_error = None;
         for registry in registries {
-            if let Err(error) = registry.close_retained_graph_runtimes_for_shutdown().await
+            if let Err(error) = registry
+                .close_retained_graph_runtimes_for_shutdown(deadline)
+                .await
                 && first_error.is_none()
             {
                 first_error = Some(error);
@@ -168,8 +173,9 @@ impl StoreAdministration {
     /// registry admission, cancel reconciliation, join the workers while their
     /// runtimes are still alive, release the telemetry sampler's retained
     /// store handles, and only then drain the retained owners and close every
-    /// store no lease still holds, so each writer truncates its WAL. Closing
-    /// before the join leaves the standing owner attachments leased.
+    /// store no lease still holds, so each writer truncates its WAL. A store
+    /// still held is waited on until `deadline`. Closing before the join
+    /// leaves the standing owner attachments leased.
     #[tracing::instrument(
         name = "daemon.branch_admin.close_stores_for_shutdown",
         level = "trace",
@@ -177,6 +183,7 @@ impl StoreAdministration {
     )]
     pub(in crate::daemon) async fn close_stores_for_shutdown(
         &self,
+        deadline: std::time::Instant,
     ) -> std::result::Result<(), String> {
         let owner = self
             .prepare_memory_graph_reconciliation_shutdown()
@@ -186,7 +193,7 @@ impl StoreAdministration {
         owner.shutdown().await?;
         self.store_telemetry_sampling()
             .release_retained_handles_for_shutdown();
-        self.close_retained_graph_runtimes_for_shutdown()
+        self.close_retained_graph_runtimes_for_shutdown(deadline)
             .await
             .map_err(|error| error.to_string())
     }

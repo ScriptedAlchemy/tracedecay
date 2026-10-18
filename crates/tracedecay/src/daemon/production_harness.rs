@@ -1346,7 +1346,11 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         tracing::trace_span!("daemon.harness.detach"),
     )
     .await;
-    resources.servers.clear();
+    let handed_out = resources
+        .servers
+        .drain()
+        .map(|(_, server)| Arc::downgrade(&server))
+        .collect::<Vec<_>>();
     for server in &servers {
         server.ledger_writes_settled().await;
         server.shutdown_background_tasks().await;
@@ -1372,7 +1376,7 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
     )
     .await;
     tracing::Instrument::instrument(
-        resources.invocation.shutdown(),
+        resources.invocation.shutdown(None),
         tracing::trace_span!("daemon.harness.shutdown_invocation"),
     )
     .await;
@@ -1413,8 +1417,18 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .store_administration
         .shutdown_retirement_reapers()
         .await;
+    // A server its caller still holds keeps its stores leased, and the caller
+    // cannot drop it while it awaits this shutdown, so waiting would only
+    // spend the budget. Close what is idle in one pass instead.
+    let store_close_deadline = if handed_out.iter().any(|server| server.strong_count() != 0) {
+        std::time::Instant::now()
+    } else {
+        std::time::Instant::now() + tracedecay_daemon_service::shutdown::DAEMON_STORE_CLOSE_RESERVE
+    };
     if let Err(error) = tracing::Instrument::instrument(
-        resources.store_administration.close_stores_for_shutdown(),
+        resources
+            .store_administration
+            .close_stores_for_shutdown(store_close_deadline),
         tracing::trace_span!("daemon.harness.shutdown_graph"),
     )
     .await

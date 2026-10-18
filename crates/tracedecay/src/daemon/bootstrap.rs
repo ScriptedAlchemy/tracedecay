@@ -357,7 +357,7 @@ async fn run_foreground_loopback(
                     let invocation_cancel = invocation.clone();
                     move || invocation_cancel.cancel_admissions()
                 },
-                move |_| async move { invocation_join.shutdown().await },
+                move |deadline| async move { invocation_join.shutdown(Some(deadline)).await },
             ),
         ],
         vec![tracedecay_daemon_service::shutdown::ShutdownOwner::new(
@@ -396,9 +396,9 @@ async fn run_foreground_loopback(
         tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
             || {},
-            move |_| async move {
+            move |deadline| async move {
                 memory_graph_reconciliation_join
-                    .close_stores_for_shutdown()
+                    .close_stores_for_shutdown(deadline)
                     .await
             },
         );

@@ -34,6 +34,9 @@ pub enum Error {
     },
     TransactionClosed,
     TransactionExpired,
+    /// A write job's body awaited something other than its own statements,
+    /// so the job rolled back instead of holding the writer across the wait.
+    JobAwaitedForeignFuture,
 }
 
 impl fmt::Display for Error {
@@ -74,6 +77,9 @@ impl fmt::Display for Error {
             }
             Self::TransactionClosed => formatter.write_str("SQLite transaction is closed"),
             Self::TransactionExpired => formatter.write_str("SQLite transaction lease expired"),
+            Self::JobAwaitedForeignFuture => {
+                formatter.write_str("SQLite write job awaited a future other than its statements")
+            }
         }
     }
 }
@@ -100,6 +106,7 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
             ),
             ExactSqlError::TransactionClosed => Self::TransactionClosed,
             ExactSqlError::TransactionExpired => Self::TransactionExpired,
+            ExactSqlError::JobAwaitedForeignFuture => Self::JobAwaitedForeignFuture,
             ExactSqlError::RequestLimitExceeded => {
                 Self::InvalidOperation("SQL request exceeds migration limits".to_owned())
             }

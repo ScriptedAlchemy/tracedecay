@@ -114,7 +114,7 @@ impl DaemonEngine {
                     let invocation_cancel = self.invocation.clone();
                     move || invocation_cancel.cancel_admissions()
                 },
-                move |_| async move { invocation_join.shutdown().await },
+                move |deadline| async move { invocation_join.shutdown(Some(deadline)).await },
             )],
             vec![
                 ShutdownOwner::new(
@@ -273,9 +273,9 @@ impl DaemonEngine {
         ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
             || {},
-            move |_| {
+            move |deadline| {
                 tracing::Instrument::instrument(
-                    async move { administration.close_stores_for_shutdown().await },
+                    async move { administration.close_stores_for_shutdown(deadline).await },
                     tracing::trace_span!("daemon.engine.memory_graph_reconciliation"),
                 )
             },

@@ -180,56 +180,9 @@ struct ResetGraphDb {
 fn verified_graph_db_schema(
     graph_db_path: &Path,
 ) -> tracedecay_domain::errors::Result<(i64, bool)> {
-    let has_header = tracedecay_runtime_core::storage::has_sqlite_database_header(graph_db_path)
-        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "could not verify the store header at {}: {error}",
-                graph_db_path.display()
-            ),
-        })?;
-    if !has_header {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "{} is not a SQLite database; the scoped reset covers only stores refused \
-                 for an incompatible schema version",
-                graph_db_path.display()
-            ),
-        });
-    }
-    let connection = rusqlite::Connection::open_with_flags(
-        graph_db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Database {
-            operation: "open project graph store for reset verification".to_string(),
-            message: error.to_string(),
-        },
-    )?;
-    let schema_version = tracedecay_runtime_core::db::schema_version::read_version_sync(
-        &connection,
-        tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
-    )
-    .map_err(
-        |error| tracedecay_domain::errors::TraceDecayError::Database {
-            operation: "read project graph store schema version".to_string(),
-            message: error.to_string(),
-        },
-    )?
-    .unwrap_or(0);
-    let exact_final_shape =
-        if schema_version != i64::from(tracedecay_runtime_core::db::migrations::SCHEMA_VERSION) {
-            false
-        } else {
-            match tracedecay_runtime_core::db::migrations::verify_admissible_final_shape_rusqlite(
-                &connection,
-            ) {
-                Ok(()) => true,
-                Err(tracedecay_domain::errors::TraceDecayError::ResetRequired { .. }) => false,
-                Err(error) => return Err(error),
-            }
-        };
-    Ok((schema_version, exact_final_shape))
+    let admission =
+        tracedecay_runtime_core::db::migrations::inspect_graph_store_schema(graph_db_path)?;
+    Ok((admission.schema_version, admission.exact_final_shape))
 }
 
 /// Verifies the project graph database under `profile_root` and deletes it

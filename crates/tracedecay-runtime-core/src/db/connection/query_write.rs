@@ -1,9 +1,16 @@
+use super::facade::advance_graph_transaction_generation;
 use super::{
     Connection, Database, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
     DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, Result,
     TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
-use crate::db::engine::Result as EngineResult;
+use crate::db::engine::{Executor, Result as EngineResult, WriteTx};
+use tracedecay_rusqlite_runtime::exact_sql::JobPolicy;
+
+enum JobAbort<E> {
+    Body(E),
+    Commit(TraceDecayError),
+}
 
 impl Database {
     /// Runs a bounded scalar inspection on the retained runtime, projecting the
@@ -77,30 +84,34 @@ impl Database {
     where
         P: crate::db::engine::IntoParams,
     {
-        let transaction = self.begin_write_transaction(operation).await?;
-        let changed = transaction
-            .execute_engine(sql, params)
-            .await
-            .map_err(|error| TraceDecayError::Database {
+        let params = params.into_params();
+        let (operation_name, sql) = (operation.to_owned(), sql.to_owned());
+        self.transact(operation, async move |tx| {
+            let changed = match params.clone() {
+                Ok(params) => tx.execute(&sql, params).await,
+                Err(error) => Err(error),
+            };
+            changed.map_err(|error| TraceDecayError::Database {
                 message: format!("failed to execute brokered write: {error}"),
-                operation: operation.to_owned(),
-            })?;
-        transaction.commit().await?;
-        Ok(changed)
+                operation: operation_name.clone(),
+            })
+        })
+        .await?
     }
 
     /// Executes a SQL batch atomically through the canonical writer broker.
     #[doc(hidden)]
     pub async fn execute_write_batch(&self, operation: &str, sql: &str) -> Result<()> {
-        let transaction = self.begin_write_transaction(operation).await?;
-        transaction
-            .execute_batch(sql)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to execute brokered write batch: {error}"),
-                operation: operation.to_string(),
-            })?;
-        transaction.commit().await
+        let (operation_name, sql) = (operation.to_owned(), sql.to_owned());
+        self.transact(operation, async move |tx| {
+            tx.execute_batch(&sql)
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to execute brokered write batch: {error}"),
+                    operation: operation_name.clone(),
+                })
+        })
+        .await?
     }
 
     /// Executes one authority-revalidated schema or bulk-maintenance batch
@@ -314,6 +325,76 @@ impl Database {
             _client_guard: self.client_guard(),
             _database: std::marker::PhantomData,
         })
+    }
+
+    /// Runs `body` as one write job on the canonical writer: commit, with the
+    /// graph transaction generation advanced, when it returns `Ok`; rollback
+    /// when it returns `Err`. The outer error is the job's own failure,
+    /// including a body that awaits anything but its statements. The job
+    /// holds the writer lane like [`Self::begin_write_transaction`], so it
+    /// queues behind interactive writers instead of retrying `Busy`.
+    pub async fn transact<R, E, F>(
+        &self,
+        operation: &str,
+        body: F,
+    ) -> Result<std::result::Result<R, E>>
+    where
+        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.transact_with_policy(operation, JobPolicy::Bounded, body)
+            .await
+    }
+
+    /// [`Self::transact`] for bulk replacement, under the lease that renews on
+    /// progress (see [`Self::begin_bulk_write_transaction`]).
+    pub async fn transact_bulk<R, E, F>(
+        &self,
+        operation: &str,
+        body: F,
+    ) -> Result<std::result::Result<R, E>>
+    where
+        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.transact_with_policy(operation, JobPolicy::AuthorizedLongLease, body)
+            .await
+    }
+
+    async fn transact_with_policy<R, E, F>(
+        &self,
+        operation: &str,
+        policy: JobPolicy,
+        body: F,
+    ) -> Result<std::result::Result<R, E>>
+    where
+        F: AsyncFn(&WriteTx<'_, '_>) -> std::result::Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let _lane = self.writer().await?;
+        let conn = self.open_writer_connection_unguarded(operation)?;
+        let _client_guard = self.client_guard();
+        let verdict = conn
+            .transact(policy, async move |tx: &WriteTx<'_, '_>| {
+                let value = body(tx).await.map_err(JobAbort::Body)?;
+                advance_graph_transaction_generation(tx)
+                    .await
+                    .map_err(JobAbort::Commit)?;
+                Ok(value)
+            })
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("isolated writer job failed: {error}"),
+                operation: operation.to_owned(),
+            })?;
+        match verdict {
+            Ok(value) => Ok(Ok(value)),
+            Err(JobAbort::Body(error)) => Ok(Err(error)),
+            Err(JobAbort::Commit(error)) => Err(error),
+        }
     }
 
     pub async fn begin_memory_write_transaction(

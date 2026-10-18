@@ -161,10 +161,12 @@ impl ClientBuilder {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {}", settings.token))
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
         authorization.set_sensitive(true);
-        let http = HttpClient::builder()
-            .timeout(self.timeout)
-            .build()
-            .map_err(ClientError::transport)?;
+        let mut builder = HttpClient::builder().timeout(self.timeout);
+        if matches!(&self.mode, ConnectionMode::Local(_)) {
+            // Ambient proxies must never receive local daemon credentials.
+            builder = builder.no_proxy();
+        }
+        let http = builder.build().map_err(ClientError::transport)?;
         let application_root = with_path_segments(
             base,
             ["projects", settings.project_id.as_str(), "application"],

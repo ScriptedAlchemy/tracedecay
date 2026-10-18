@@ -884,6 +884,16 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
 
     #[tracing::instrument(name = "global_db.registered.txn.commit", level = "trace", skip_all)]
     pub async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
+        self.commit_with_on_commit(|| {}).await
+    }
+
+    pub async fn commit_with_on_commit<F>(
+        self,
+        on_commit: F,
+    ) -> tracedecay_runtime_core::db::engine::Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
         if let Err(error) = self
             .authority
             .require_active_write_scope("commit registered global database transaction")
@@ -898,7 +908,10 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
                 ),
             };
         }
-        self.transaction.commit().await.map_err(engine_error)
+        self.transaction
+            .commit_with_on_commit(on_commit)
+            .await
+            .map_err(engine_error)
     }
 
     #[tracing::instrument(name = "global_db.registered.txn.rollback", level = "trace", skip_all)]

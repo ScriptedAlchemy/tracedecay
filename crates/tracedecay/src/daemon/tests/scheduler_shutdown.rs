@@ -843,6 +843,7 @@ async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_g
         .latest_complete_ready_for_scope(&scope)
         .await;
 
+    drop((_warming, server));
     let started = std::time::Instant::now();
     let receipt = engine.shutdown_all().await;
     let elapsed = started.elapsed();

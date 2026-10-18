@@ -59,6 +59,7 @@ impl StoreObservabilityCoreV1 {
 
     async fn shutdown(
         &self,
+        deadline: Option<std::time::Instant>,
     ) -> (
         Result<(), ApplicationContractError>,
         StoreObservabilityCompletionV1,
@@ -75,7 +76,11 @@ impl StoreObservabilityCoreV1 {
             }
         }
         let ancillary_joined = first_error.is_none();
-        if let Err(error) = self.producer.shutdown().await {
+        let producer_shutdown = match deadline {
+            Some(deadline) => self.producer.shutdown_until(deadline).await,
+            None => self.producer.shutdown().await,
+        };
+        if let Err(error) = producer_shutdown {
             tracing::warn!(%error, "registered observability producer shutdown was incomplete");
             if first_error.is_none() {
                 first_error = Some(error);
@@ -442,7 +447,7 @@ impl StoreObservabilityRegistryV1 {
                     };
                     (result, completion)
                 } else {
-                    core.shutdown().await
+                    core.shutdown(None).await
                 };
                 if let Err(error) = &result {
                     tracing::warn!(%error, "background observability owner drain was incomplete");
@@ -726,12 +731,21 @@ impl RegisteredObservabilityProducerV1 {
     /// Releases this alias; the last release drains and closes the store
     /// owners. Consuming the handle is what makes the release single-shot:
     /// the token taken here is the same one drop would take.
+    pub async fn shutdown(self) -> Result<(), ApplicationContractError> {
+        self.shutdown_until(None).await
+    }
+
+    /// [`Self::shutdown`], with the producer drain bounded by the caller's
+    /// `deadline` when it has one, or by the producer's own budget.
     #[tracing::instrument(
         name = "daemon.service.project_runtime.observability_shutdown",
         level = "trace",
         skip_all
     )]
-    pub async fn shutdown(mut self) -> Result<(), ApplicationContractError> {
+    pub(crate) async fn shutdown_until(
+        mut self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), ApplicationContractError> {
         let Some(core) = self.release.take() else {
             // Unreachable for an owned handle: only drop takes the token
             // otherwise. Releasing twice is an idempotent no-op by contract.
@@ -743,7 +757,7 @@ impl RegisteredObservabilityProducerV1 {
         else {
             return Ok(());
         };
-        let (result, settled) = core.shutdown().await;
+        let (result, settled) = core.shutdown(deadline).await;
         let retirement = registry.finish_retirement(core, settled);
         match result {
             Ok(()) => retirement,

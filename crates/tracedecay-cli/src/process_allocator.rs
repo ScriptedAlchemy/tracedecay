@@ -7,11 +7,11 @@
 pub(crate) mod mimalloc_v3 {
     use std::ffi::{c_int, c_long, c_void};
 
-    use rusqlite::ffi::{SQLITE_CONFIG_MALLOC, SQLITE_OK, sqlite3_config, sqlite3_mem_methods};
     use tracedecay_code_index::parallelism::run_on_every_installed_worker;
     use tracedecay_domain::process_heap::{
         ProcessAllocatorReleaseV1, install_process_allocator_release_v1,
     };
+    use tracedecay_rusqlite_runtime::{SqliteAllocatorMethodsV1, install_sqlite_allocator};
 
     unsafe extern "C" {
         fn mi_malloc(size: usize) -> *mut c_void;
@@ -28,6 +28,7 @@ pub(crate) mod mimalloc_v3 {
     const OPTION_PURGE_DECOMMITS: c_int = 5;
     /// `mi_option_purge_delay` in vendored mimalloc 3.3.2.
     const OPTION_PURGE_DELAY: c_int = 15;
+    const SQLITE_OK: c_int = 0;
 
     /// Immediate purge so a long-lived daemon's RSS follows live data.
     ///
@@ -61,21 +62,18 @@ pub(crate) mod mimalloc_v3 {
                 free: mi_free,
             }));
         }
-        let methods = sqlite3_mem_methods {
-            xMalloc: Some(sqlite_malloc),
-            xFree: Some(sqlite_free),
-            xRealloc: Some(sqlite_realloc),
-            xSize: Some(sqlite_size),
-            xRoundup: Some(sqlite_roundup),
-            xInit: Some(sqlite_init),
-            xShutdown: Some(sqlite_shutdown),
-            pAppData: std::ptr::null_mut(),
+        let methods = SqliteAllocatorMethodsV1 {
+            malloc: sqlite_malloc,
+            free: sqlite_free,
+            realloc: sqlite_realloc,
+            size: sqlite_size,
+            roundup: sqlite_roundup,
+            init: sqlite_init,
+            shutdown: sqlite_shutdown,
         };
-        // SAFETY: SQLite copies `methods` before returning. It accepts the
-        // configuration only before its first initialization and refuses it
-        // with `SQLITE_MISUSE` afterwards.
-        let status = unsafe { sqlite3_config(SQLITE_CONFIG_MALLOC, &raw const methods) };
-        if status != SQLITE_OK {
+        // SAFETY: these callbacks form one mimalloc method table, and startup
+        // calls this before any SQLite connection exists.
+        if let Err(status) = unsafe { install_sqlite_allocator(methods) } {
             tracing::warn!(
                 event = "sqlite_allocator_route_refused",
                 status,
