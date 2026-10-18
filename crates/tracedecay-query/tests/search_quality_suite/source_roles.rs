@@ -2,9 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use tracedecay_domain::RetrievalSourceRoleV1;
-use tracedecay_query::retrieval::lexical::{
-    LexicalFieldFilterV1, LexicalFieldV1, LexicalLane, LexicalLaneRetriever,
-};
+use tracedecay_query::retrieval::lexical::{LexicalFieldFilterV1, LexicalFieldV1, LexicalLane};
 
 use super::candidate_producers::{
     complete, real_lexical_source_fixture_from_sources, sealed_artifact,

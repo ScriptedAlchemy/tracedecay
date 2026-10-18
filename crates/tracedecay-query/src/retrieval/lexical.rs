@@ -345,17 +345,6 @@ impl LaneBoundEvidence for LexicalLaneEvidence {
     }
 }
 
-/// The independently disableable lexical-lane retriever contract.
-///
-/// Missing lexical authority rejects the request as unavailable.
-pub trait LexicalLaneRetriever {
-    /// Retrieve the committed lexical candidate prefix for `request`.
-    fn retrieve_lexical(
-        &self,
-        request: &LexicalLaneRequest<'_>,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError>;
-}
-
 impl LexicalLaneRequest<'_> {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
         self.base.budget.validate().map_err(contract_error)?;
@@ -654,14 +643,10 @@ where
         rebuilt.validate().map_err(contract_error)?;
         Ok(rebuilt)
     }
-}
 
-impl<P> LexicalLaneRetriever for LexicalLane<P>
-where
-    P: LexicalPostingReadPort,
-{
+    /// Retrieve the committed lexical candidate prefix for `request`.
     #[tracing::instrument(name = "query.lane.lexical", level = "trace", skip_all)]
-    fn retrieve_lexical(
+    pub fn retrieve_lexical(
         &self,
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>, RetrievalPortError> {
