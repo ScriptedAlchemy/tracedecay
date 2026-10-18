@@ -31,8 +31,8 @@ pub const STORE_THREADS_ENV: &str = "TRACEDECAY_STORE_THREADS";
 /// The name every pool thread carries, followed by `-{index}`.
 pub const STORE_THREAD_PREFIX: &str = "tracedecay-store";
 
-const DEFAULT_STORE_THREADS: usize = 6;
 const STORE_THREAD_RANGE: std::ops::RangeInclusive<usize> = 2..=16;
+const DEFAULT_STORE_THREAD_RANGE: std::ops::RangeInclusive<usize> = 6..=16;
 
 static POOL: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
@@ -43,15 +43,27 @@ thread_local! {
     static ADOPTED: RefCell<Vec<Adopted>> = const { RefCell::new(Vec::new()) };
 }
 
-/// How many threads the pool runs: [`STORE_THREADS_ENV`] when it parses,
-/// else 6, clamped to 2..=16.
+/// How many threads the pool runs: [`STORE_THREADS_ENV`] clamped to 2..=16
+/// when it parses, else the host's available parallelism clamped to 6..=16.
+/// Fewer threads than cores caps SQL parallelism for a process with many
+/// stores opening at once.
 #[must_use]
 pub fn store_threads() -> usize {
-    std::env::var(STORE_THREADS_ENV)
+    match std::env::var(STORE_THREADS_ENV)
         .ok()
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(DEFAULT_STORE_THREADS)
-        .clamp(*STORE_THREAD_RANGE.start(), *STORE_THREAD_RANGE.end())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        Some(threads) => threads.clamp(*STORE_THREAD_RANGE.start(), *STORE_THREAD_RANGE.end()),
+        None => std::thread::available_parallelism()
+            .map_or(
+                *DEFAULT_STORE_THREAD_RANGE.start(),
+                std::num::NonZeroUsize::get,
+            )
+            .clamp(
+                *DEFAULT_STORE_THREAD_RANGE.start(),
+                *DEFAULT_STORE_THREAD_RANGE.end(),
+            ),
+    }
 }
 
 fn pool() -> Result<&'static Runtime, String> {
