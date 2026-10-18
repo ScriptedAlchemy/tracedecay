@@ -108,7 +108,7 @@ mod tests {
         .expect("terminal fixture");
         let terminal = StreamEvent::<&str>::terminal(0, terminal).expect("terminal event");
         let stale = StreamEvent::item(1, "stale").expect("stale item");
-        let mut encoded = Box::pin(encode_events(stream::iter([terminal, stale])));
+        let mut encoded = std::pin::pin!(encode_events(stream::iter([terminal, stale])));
         let mut context = Context::from_waker(noop_waker_ref());
 
         assert!(matches!(
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn source_end_without_terminal_is_a_framing_error() {
         let item = StreamEvent::item(0, "item").expect("item");
-        let mut encoded = Box::pin(encode_events(stream::iter([item])));
+        let mut encoded = std::pin::pin!(encode_events(stream::iter([item])));
         let mut context = Context::from_waker(noop_waker_ref());
 
         assert!(matches!(

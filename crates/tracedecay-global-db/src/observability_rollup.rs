@@ -11,7 +11,7 @@ use tracedecay_domain::CoverageStateV1;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
-use crate::RegisteredGlobalDb;
+use crate::{RegisteredGlobalDb, RegisteredGlobalDbWriteTx};
 mod compaction;
 mod dirty;
 mod frontier;
@@ -29,6 +29,35 @@ use types::{
     MAX_FRAGMENT_JSON_BYTES, MAX_FRAGMENT_QUERY_BYTES, OBSERVABILITY_ROLLUP_RETENTION_DAYS_V1,
     PublishedGeneration, SECONDS_PER_DAY, validate_day, validate_identifier,
 };
+
+/// Runs `body` as one write job. A refused or failed job becomes
+/// `failed to {context}: {cause}`; the body's own error is returned as is.
+async fn transact_rollup<R, E>(
+    db: &RegisteredGlobalDb,
+    context: &'static str,
+    body: impl AsyncFn(RegisteredGlobalDbWriteTx<'_, '_>) -> Result<R, E> + Send + Sync + 'static,
+) -> Result<R, E>
+where
+    R: Send + 'static,
+    E: From<String> + Send + 'static,
+{
+    db.transact(body)
+        .await
+        .map_err(|error| E::from(format!("failed to {context}: {error}")))?
+}
+
+/// A rebuild job that ends without publishing. A replayed receipt rolls the
+/// job back, like any other early exit, but is returned as success.
+enum RebuildAbort {
+    Replayed(ObservabilityRollupRebuildReceiptV1),
+    Failed(String),
+}
+
+impl From<String> for RebuildAbort {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
 
 impl RegisteredGlobalDb {
     #[tracing::instrument(
@@ -53,145 +82,146 @@ impl RegisteredGlobalDb {
             coverage_name(request.coverage),
             content_digest.as_str(),
         ))?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin observability rollup rebuild: {error}"))?;
-
-        if let Some((stored_digest, receipt)) = read_journal_receipt(
-            &transaction,
-            &request.authorized_scope_ref,
-            request.day_start_seconds,
-            &request.idempotency_key,
-        )
-        .await?
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| format!("failed to close rollup replay transaction: {error}"))?;
-            if stored_digest == request_digest {
-                return Ok(receipt);
-            }
-            return Err("observability rollup idempotency conflict".to_owned());
-        }
-
-        if let Some(claim) = &request.dirty_claim
-            && !dirty_claim_is_current(&transaction, claim).await?
-        {
-            transaction.rollback().await.map_err(|error| {
-                format!("failed to close superseded dirty-day rebuild: {error}")
-            })?;
-            return Err("observability rollup dirty-day claim was superseded".to_owned());
-        }
-        if let Some(claim) = &request.empty_day_claim
-            && !empty_day_claim_is_current(&transaction, claim).await?
-        {
-            transaction.rollback().await.map_err(|error| {
-                format!("failed to close superseded empty-day rebuild: {error}")
-            })?;
-            return Err("observability rollup empty-day claim was superseded".to_owned());
-        }
-
-        let current = read_published_generation(
-            &transaction,
-            &request.authorized_scope_ref,
-            request.day_start_seconds,
-        )
-        .await?;
-        if current
-            .as_ref()
-            .is_some_and(|value| request.source_watermark < value.source_watermark)
-        {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| format!("failed to close stale rollup transaction: {error}"))?;
-            return Err("observability rollup stale source watermark".to_owned());
-        }
-        if let Some(current) = &current
-            && request.source_watermark == current.source_watermark
-            && request.projector_revision == current.projector_revision
-            && (request.coverage != current.coverage || content_digest != current.content_digest)
-        {
-            transaction.rollback().await.map_err(|error| {
-                format!("failed to close conflicting rollup transaction: {error}")
-            })?;
-            return Err("observability rollup changed at the same projector watermark".to_owned());
-        }
-
-        let unchanged = current.as_ref().is_some_and(|value| {
-            request.source_watermark == value.source_watermark
-                && request.projector_revision == value.projector_revision
-                && request.coverage == value.coverage
-                && content_digest == value.content_digest
-        });
-        let generation = current.as_ref().map_or(1, |value| {
-            value.generation.saturating_add(u64::from(!unchanged))
-        });
-        let late_correction = current
-            .as_ref()
-            .is_some_and(|value| request.source_watermark > value.source_watermark);
-
-        if !unchanged {
-            replace_published_fragment(&transaction, &request, generation, &content_digest).await?;
-        }
-        let receipt = ObservabilityRollupRebuildReceiptV1 {
-            authorized_scope_ref: request.authorized_scope_ref.clone(),
-            day_start_seconds: request.day_start_seconds,
-            generation,
-            projector_revision: request.projector_revision.clone(),
-            source_watermark: request.source_watermark,
-            coverage: request.coverage,
-            content_digest,
-            late_correction,
-        };
-        insert_journal_receipt(
-            &transaction,
-            &request.idempotency_key,
-            &request_digest,
-            &receipt,
-        )
-        .await?;
-        if let Some(claim) = &request.dirty_claim {
-            let changed = transaction
-                .execute(
-                    "DELETE FROM observability_rollup_dirty_days
-                     WHERE scope_ref = ?1 AND day_start_seconds = ?2
-                       AND source_watermark = ?3 AND claimant_id = ?4
-                       AND lease_until_seconds = ?5",
-                    tracedecay_runtime_core::db::engine::params![
-                        claim.authorized_scope_ref.as_str(),
-                        claim.day_start_seconds,
-                        claim.source_watermark,
-                        claim.claimant_id.as_str(),
-                        claim.lease_until_seconds
-                    ],
+        let outcome = transact_rollup(
+            self,
+            "publish observability rollup",
+            async move |transaction| {
+                if let Some((stored_digest, receipt)) = read_journal_receipt(
+                    &transaction,
+                    &request.authorized_scope_ref,
+                    request.day_start_seconds,
+                    &request.idempotency_key,
                 )
-                .await
-                .map_err(|error| format!("failed to settle observability dirty day: {error}"))?;
-            if changed != 1 {
-                transaction.rollback().await.map_err(|error| {
-                    format!("failed to close unsettled dirty-day rebuild: {error}")
-                })?;
-                return Err(
-                    "observability rollup dirty-day claim changed during rebuild".to_owned(),
-                );
-            }
+                .await?
+                {
+                    if stored_digest == request_digest {
+                        return Err(RebuildAbort::Replayed(receipt));
+                    }
+                    return Err("observability rollup idempotency conflict"
+                        .to_owned()
+                        .into());
+                }
+
+                if let Some(claim) = &request.dirty_claim
+                    && !dirty_claim_is_current(&transaction, claim).await?
+                {
+                    return Err("observability rollup dirty-day claim was superseded"
+                        .to_owned()
+                        .into());
+                }
+                if let Some(claim) = &request.empty_day_claim
+                    && !empty_day_claim_is_current(&transaction, claim).await?
+                {
+                    return Err("observability rollup empty-day claim was superseded"
+                        .to_owned()
+                        .into());
+                }
+
+                let current = read_published_generation(
+                    &transaction,
+                    &request.authorized_scope_ref,
+                    request.day_start_seconds,
+                )
+                .await?;
+                if current
+                    .as_ref()
+                    .is_some_and(|value| request.source_watermark < value.source_watermark)
+                {
+                    return Err("observability rollup stale source watermark"
+                        .to_owned()
+                        .into());
+                }
+                if let Some(current) = &current
+                    && request.source_watermark == current.source_watermark
+                    && request.projector_revision == current.projector_revision
+                    && (request.coverage != current.coverage
+                        || content_digest != current.content_digest)
+                {
+                    return Err(
+                        "observability rollup changed at the same projector watermark"
+                            .to_owned()
+                            .into(),
+                    );
+                }
+
+                let unchanged = current.as_ref().is_some_and(|value| {
+                    request.source_watermark == value.source_watermark
+                        && request.projector_revision == value.projector_revision
+                        && request.coverage == value.coverage
+                        && content_digest == value.content_digest
+                });
+                let generation = current.as_ref().map_or(1, |value| {
+                    value.generation.saturating_add(u64::from(!unchanged))
+                });
+                let late_correction = current
+                    .as_ref()
+                    .is_some_and(|value| request.source_watermark > value.source_watermark);
+
+                if !unchanged {
+                    replace_published_fragment(&transaction, &request, generation, &content_digest)
+                        .await?;
+                }
+                let receipt = ObservabilityRollupRebuildReceiptV1 {
+                    authorized_scope_ref: request.authorized_scope_ref.clone(),
+                    day_start_seconds: request.day_start_seconds,
+                    generation,
+                    projector_revision: request.projector_revision.clone(),
+                    source_watermark: request.source_watermark,
+                    coverage: request.coverage,
+                    content_digest: content_digest.clone(),
+                    late_correction,
+                };
+                insert_journal_receipt(
+                    &transaction,
+                    &request.idempotency_key,
+                    &request_digest,
+                    &receipt,
+                )
+                .await?;
+                if let Some(claim) = &request.dirty_claim {
+                    let changed = transaction
+                        .execute(
+                            "DELETE FROM observability_rollup_dirty_days
+                         WHERE scope_ref = ?1 AND day_start_seconds = ?2
+                           AND source_watermark = ?3 AND claimant_id = ?4
+                           AND lease_until_seconds = ?5",
+                            tracedecay_runtime_core::db::engine::params![
+                                claim.authorized_scope_ref.as_str(),
+                                claim.day_start_seconds,
+                                claim.source_watermark,
+                                claim.claimant_id.as_str(),
+                                claim.lease_until_seconds
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("failed to settle observability dirty day: {error}")
+                        })?;
+                    if changed != 1 {
+                        return Err(
+                            "observability rollup dirty-day claim changed during rebuild"
+                                .to_owned()
+                                .into(),
+                        );
+                    }
+                }
+                if let Some(claim) = &request.empty_day_claim
+                    && !settle_empty_day_claim(&transaction, claim).await?
+                {
+                    return Err(
+                        "observability rollup empty-day claim changed during rebuild"
+                            .to_owned()
+                            .into(),
+                    );
+                }
+                Ok(receipt)
+            },
+        )
+        .await;
+        match outcome {
+            Ok(receipt) | Err(RebuildAbort::Replayed(receipt)) => Ok(receipt),
+            Err(RebuildAbort::Failed(message)) => Err(message),
         }
-        if let Some(claim) = &request.empty_day_claim
-            && !settle_empty_day_claim(&transaction, claim).await?
-        {
-            transaction.rollback().await.map_err(|error| {
-                format!("failed to close unadvanced empty-day rebuild: {error}")
-            })?;
-            return Err("observability rollup empty-day claim changed during rebuild".to_owned());
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to publish observability rollup: {error}"))?;
-        Ok(receipt)
     }
 
     /// Reads only bounded, projector-owned merge fragments. This internal

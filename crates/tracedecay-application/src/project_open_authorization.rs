@@ -16,6 +16,33 @@ use crate::source_authorization::{ProjectSourceAccessSnapshot, ProjectSourceAcce
 
 const POLICY_REVISION_V1: u64 = 1;
 
+pub const GRANT_HORIZON: Duration = Duration::from_hours(24);
+
+/// The grant expiry of one request observed at `observed_at` under a mounted
+/// project-open owner. Project open snapshots its access once and nothing
+/// renews it, so the owner's authority lasts as long as it is mounted and the
+/// expiry is measured from each request. One fixed at project open refused
+/// every request from one horizon after the project opened.
+pub fn mounted_grant_expires_at(observed_at: UtcMicros) -> UtcMicros {
+    UtcMicros(
+        observed_at
+            .0
+            .saturating_add(i64::try_from(GRANT_HORIZON.as_micros()).unwrap_or(i64::MAX)),
+    )
+}
+
+/// `grant`, minted by a mounted owner, bounded to one request observed at
+/// `observed_at`.
+pub fn mounted_grant_at(
+    grant: &CapabilityGrantSnapshot,
+    observed_at: UtcMicros,
+) -> CapabilityGrantSnapshot {
+    CapabilityGrantSnapshot {
+        expires_at: mounted_grant_expires_at(observed_at),
+        ..grant.clone()
+    }
+}
+
 #[derive(Clone)]
 pub struct ProjectOpenSourceAccessAuthorityV1 {
     requester: ActorId,
@@ -41,7 +68,7 @@ impl ProjectSourceAccessSnapshotPort for ProjectOpenSourceAccessAuthorityV1 {
     fn source_access_at(
         &self,
         scope: &ResolvedScope,
-        project_root: &Path,
+        _project_root: &Path,
         configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
         observed_at: UtcMicros,
     ) -> Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
@@ -52,7 +79,6 @@ impl ProjectSourceAccessSnapshotPort for ProjectOpenSourceAccessAuthorityV1 {
         );
         project_open_source_access_at(
             scope,
-            project_root,
             configuration,
             self.requester.clone(),
             self.granted_capabilities.clone(),
@@ -64,7 +90,6 @@ impl ProjectSourceAccessSnapshotPort for ProjectOpenSourceAccessAuthorityV1 {
 
 fn project_open_source_access_at(
     scope: &ResolvedScope,
-    project_root: &Path,
     configuration: &tracedecay_configuration::config::PinnedRuntimeConfiguration,
     requester: ActorId,
     granted_capabilities: BTreeSet<CapabilityId>,
@@ -90,7 +115,6 @@ fn project_open_source_access_at(
     let expected_binding =
         tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
             &scope.project_id,
-            project_root,
         )
         .map_err(|_| ApplicationContractError::Inconsistent {
             field: "project-open source binding",

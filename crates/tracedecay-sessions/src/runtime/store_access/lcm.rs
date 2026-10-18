@@ -565,8 +565,8 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             expected_raw_revision_generation,
         )
         .await?;
-        SessionWriteTxn::commit(transaction).await?;
-        payload_rollback.disarm();
+        SessionWriteTxn::commit_with_on_commit(transaction, move || payload_rollback.disarm())
+            .await?;
         Ok(tracedecay_lcm::summary_convergence::LcmRawProtectionPage {
             rows_scanned,
             rows_protected: unprotected.len(),
@@ -594,8 +594,8 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
         raw::commit_staged_raw_message(&transaction, message, staged).await?;
-        SessionWriteTxn::commit(transaction).await?;
-        payload_rollback.disarm();
+        SessionWriteTxn::commit_with_on_commit(transaction, move || payload_rollback.disarm())
+            .await?;
         Ok(())
     }
 }

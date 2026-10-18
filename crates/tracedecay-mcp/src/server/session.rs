@@ -64,6 +64,12 @@ impl McpRequestContext {
     }
 }
 
+/// Requests one session holds: those executing plus those queued for an
+/// execution permit. At the bound the session stops reading, so further
+/// frames wait in the peer's socket instead of being refused or retained;
+/// a cancellation sent at the bound is read once one request settles.
+pub const MAX_PENDING_REQUESTS: usize = 64;
+
 type InFlight<'a> = Pin<Box<dyn Future<Output = Option<RequestId>> + Send + 'a>>;
 
 struct Session<'a, C: McpConnectionContext> {
@@ -120,7 +126,7 @@ where
             Some(answered) = session.in_flight.next(), if !session.in_flight.is_empty() => {
                 session.answered(answered);
             }
-            message = messages.next() => match message {
+            message = messages.next(), if session.in_flight.len() < MAX_PENDING_REQUESTS => match message {
                 None => {
                     session.cancel_all();
                     break;

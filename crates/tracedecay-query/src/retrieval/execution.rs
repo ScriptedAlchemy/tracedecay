@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkId, CompactCandidate, ExactTechnicalTermKindV1,
-    FileOccurrenceId, RetrievalBudgetUsage, RetrievalFailure, RetrieverBatch, RetrieverCoverage,
-    RetrieverOutcome, SourceFreshness, SourceSpan, SymbolOccurrenceId,
+    FileOccurrenceId, RetrieverBatch, RetrieverCoverage, RetrieverOutcome, SourceSpan,
+    SymbolOccurrenceId,
 };
 
 use super::exact::{ExactLaneEvidence, ExactLiteralV1};
@@ -92,24 +92,6 @@ pub struct NativeLanePageV1<T> {
     pub coverage: RetrieverCoverage,
 }
 
-/// Truthful query-layer lane outcome. It preserves denial, stale source,
-/// cancellation and budget states instead of collapsing them into an empty
-/// page or transport-specific omission.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NativeLaneOutcomeV1<T> {
-    Complete(NativeLanePageV1<T>),
-    Partial {
-        page: NativeLanePageV1<T>,
-        reason: RetrievalFailure,
-    },
-    Unavailable(RetrievalFailure),
-    Denied,
-    Stale(SourceFreshness),
-    BudgetExceeded(RetrievalBudgetUsage),
-    TimedOut(RetrievalBudgetUsage),
-    Cancelled,
-}
-
 /// Immutable source authority required for canonical result translation.
 ///
 /// Implementations may borrow code-index projections, but this crate depends
@@ -180,7 +162,10 @@ where
         requested_literals: &[ExactLiteralV1],
         expected_kind: Option<ExactTechnicalTermKindV1>,
         path_admitted: impl Fn(&str) -> bool,
-    ) -> Result<NativeLaneOutcomeV1<NativeExactRecordV1>, QueryExecutionContractErrorV1> {
+    ) -> Result<
+        RetrieverOutcome<NativeLanePageV1<NativeExactRecordV1>>,
+        QueryExecutionContractErrorV1,
+    > {
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
@@ -224,7 +209,10 @@ where
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<LexicalLaneEvidence>>,
         path_admitted: impl Fn(&str) -> bool,
-    ) -> Result<NativeLaneOutcomeV1<NativeLexicalRecordV1>, QueryExecutionContractErrorV1> {
+    ) -> Result<
+        RetrieverOutcome<NativeLanePageV1<NativeLexicalRecordV1>>,
+        QueryExecutionContractErrorV1,
+    > {
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
@@ -254,7 +242,10 @@ where
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>,
         path_admitted: impl Fn(&str) -> bool,
-    ) -> Result<NativeLaneOutcomeV1<NativeGraphRecordV1>, QueryExecutionContractErrorV1> {
+    ) -> Result<
+        RetrieverOutcome<NativeLanePageV1<NativeGraphRecordV1>>,
+        QueryExecutionContractErrorV1,
+    > {
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
@@ -286,35 +277,14 @@ where
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<E>>,
         translate_batch: impl Fn(&RetrieverBatch<E>) -> Result<Vec<T>, QueryExecutionContractErrorV1>,
-    ) -> Result<NativeLaneOutcomeV1<T>, QueryExecutionContractErrorV1> {
-        let translated = match outcome {
-            RetrieverOutcome::Complete(batch) => {
-                batch
-                    .validate()
-                    .map_err(|_| QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
-                Ok(NativeLaneOutcomeV1::Complete(
-                    self.page(&batch, translate_batch(&batch)?),
-                ))
-            }
-            RetrieverOutcome::Partial { value, reason } => {
-                value
-                    .validate()
-                    .map_err(|_| QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
-                Ok(NativeLaneOutcomeV1::Partial {
-                    page: self.page(&value, translate_batch(&value)?),
-                    reason,
-                })
-            }
-            RetrieverOutcome::Unavailable(reason) => Ok(NativeLaneOutcomeV1::Unavailable(reason)),
-            RetrieverOutcome::Denied => Ok(NativeLaneOutcomeV1::Denied),
-            RetrieverOutcome::Stale(freshness) => Ok(NativeLaneOutcomeV1::Stale(freshness)),
-            RetrieverOutcome::BudgetExceeded(usage) => {
-                Ok(NativeLaneOutcomeV1::BudgetExceeded(usage))
-            }
-            RetrieverOutcome::TimedOut(usage) => Ok(NativeLaneOutcomeV1::TimedOut(usage)),
-            RetrieverOutcome::Cancelled => Ok(NativeLaneOutcomeV1::Cancelled),
-        };
-        if let Ok(NativeLaneOutcomeV1::Stale(_)) = &translated {
+    ) -> Result<RetrieverOutcome<NativeLanePageV1<T>>, QueryExecutionContractErrorV1> {
+        let translated = outcome.try_map(|batch| {
+            batch
+                .validate()
+                .map_err(|_| QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+            Ok(self.page(&batch, translate_batch(&batch)?))
+        });
+        if let Ok(RetrieverOutcome::Stale(_)) = &translated {
             crate::observe::Residency::Rebuilding.record("query.stream.residency");
         }
         translated

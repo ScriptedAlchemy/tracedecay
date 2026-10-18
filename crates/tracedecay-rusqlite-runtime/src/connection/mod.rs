@@ -6,6 +6,7 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
@@ -16,7 +17,7 @@ use rusqlite::{
     limits::Limit,
 };
 use sha2::{Digest, Sha256};
-use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
+use tracedecay_store::{StoreShardScopeV1, WAL_SOFT_LIMIT_BYTES};
 
 const PROGRESS_INTERVAL_OPS: i32 = 1_000;
 
@@ -64,7 +65,8 @@ const RETAINED_WAL_BYTES: i64 = WAL_SOFT_LIMIT_BYTES as i64;
 /// pathname stat.
 #[derive(Debug)]
 pub(crate) struct OpenedDatabaseFile {
-    file: File,
+    /// `None` once [`Self::release`] closed the descriptor of a lost file.
+    file: Mutex<Option<File>>,
     identity: u64,
 }
 
@@ -88,19 +90,42 @@ impl OpenedDatabaseFile {
             return Err(OpenedDatabaseFileError::NotFile);
         }
         let identity = opened_file_identity(&file)?;
-        Ok(Self { file, identity })
+        Ok(Self {
+            file: Mutex::new(Some(file)),
+            identity,
+        })
+    }
+
+    /// Closes the pinned descriptor of a file that was unlinked or replaced,
+    /// for every holder of this handle at once. The identity stays readable;
+    /// anything that needs the descriptor afterwards reports `Replaced`.
+    pub(crate) fn release(&self) {
+        self.file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
     }
 
+    fn with_file<T>(
+        &self,
+        use_file: impl FnOnce(&File) -> T,
+    ) -> Result<T, OpenedDatabaseFileError> {
+        self.file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(use_file)
+            .ok_or(OpenedDatabaseFileError::Replaced)
+    }
+
     pub(crate) fn try_clone(&self) -> Result<Self, OpenedDatabaseFileError> {
+        let file = self.with_file(|file| file.try_clone())?;
         Ok(Self {
-            file: self
-                .file
-                .try_clone()
-                .map_err(|_| OpenedDatabaseFileError::Open)?,
+            file: Mutex::new(Some(file.map_err(|_| OpenedDatabaseFileError::Open)?)),
             identity: self.identity,
         })
     }
@@ -112,10 +137,8 @@ impl OpenedDatabaseFile {
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
         use std::os::unix::io::AsRawFd;
 
-        Ok(PathBuf::from(format!(
-            "/proc/self/fd/{}",
-            self.file.as_raw_fd()
-        )))
+        let descriptor = self.with_file(|file| file.as_raw_fd())?;
+        Ok(PathBuf::from(format!("/proc/self/fd/{descriptor}")))
     }
 
     /// Selects the pathname used by a writer connection.
@@ -182,8 +205,34 @@ impl OpenedDatabaseFile {
         if opened_file_identity(&current)? != self.identity {
             return Err(OpenedDatabaseFileError::Replaced);
         }
-        let _ = &self.file;
         Ok(())
+    }
+
+    /// Whether this file was unlinked, or `path` now names another file.
+    /// A path that cannot be inspected for another reason is not lost.
+    #[cfg(unix)]
+    pub(crate) fn is_lost(&self, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        let unlinked = self
+            .with_file(|file| file.metadata().is_ok_and(|pinned| pinned.nlink() == 0))
+            .unwrap_or(true);
+        if unlinked {
+            return true;
+        }
+        match std::fs::metadata(path) {
+            Ok(current) => metadata_identity(&current) != self.identity,
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn is_lost(&self, path: &Path) -> bool {
+        !path.exists()
+            || matches!(
+                self.verify_current_path(path),
+                Err(OpenedDatabaseFileError::Replaced)
+            )
     }
 
     pub(crate) fn verify_connection(
@@ -310,18 +359,23 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 
 #[cfg(unix)]
 fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
-    use std::os::unix::fs::MetadataExt;
-
     let metadata = file
         .metadata()
         .map_err(|_| OpenedDatabaseFileError::Inspect)?;
+    Ok(metadata_identity(&metadata))
+}
+
+#[cfg(unix)]
+fn metadata_identity(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+
     let mut hasher = Sha256::new();
     hasher.update(metadata.dev().to_le_bytes());
     hasher.update(metadata.ino().to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_le_bytes(bytes).max(1))
+    u64::from_le_bytes(bytes).max(1)
 }
 
 #[cfg(unix)]
@@ -416,6 +470,39 @@ pub(crate) enum ConnectionMode {
     Maintenance,
 }
 
+/// How a writer commit reaches the disk. `Full` syncs the WAL on every
+/// commit, so a power loss cannot drop a commit the writer acknowledged;
+/// `Normal` syncs only at checkpoints and may lose the newest commits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Durability {
+    Full,
+    Normal,
+}
+
+impl Durability {
+    /// Durable memory (facts and the anchors they cite) lives in the project
+    /// and profile-memory stores and is never rebuilt, so those commit at
+    /// `Full`. The other stores keep `Normal` until their durable rows move
+    /// into classes of their own (docs/plans/storage).
+    pub(crate) const fn for_scope(scope: &StoreShardScopeV1) -> Self {
+        match scope {
+            StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileMemory => Self::Full,
+            StoreShardScopeV1::Profile
+            | StoreShardScopeV1::ProfileSessions
+            | StoreShardScopeV1::RemoteNode { .. }
+            | StoreShardScopeV1::ProjectSessions { .. }
+            | StoreShardScopeV1::Code { .. } => Self::Normal,
+        }
+    }
+
+    const fn pragma(self) -> (&'static str, i64) {
+        match self {
+            Self::Full => ("FULL", 2),
+            Self::Normal => ("NORMAL", 1),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum WriterOpenError {
     Policy(ConnectionPolicyError),
@@ -488,6 +575,14 @@ pub struct VerifiedReader {
     file_identity: u64,
 }
 
+pub fn default_vfs_max_pathname() -> Option<usize> {
+    // SAFETY: SQLite owns registered VFS values for process lifetime; this
+    // reads the immutable pathname limit from the default VFS.
+    let vfs = unsafe { rusqlite::ffi::sqlite3_vfs_find(std::ptr::null()) };
+    let max_pathname = unsafe { vfs.as_ref() }?.mxPathname;
+    usize::try_from(max_pathname).ok()
+}
+
 impl VerifiedReader {
     pub fn connection(&self) -> &Connection {
         &self.connection
@@ -504,13 +599,14 @@ impl VerifiedReader {
 
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
     let (connection, fresh_writer) = open_raw(path, mode)?;
-    finish_open(connection, mode, fresh_writer)
+    finish_open(connection, mode, fresh_writer, Durability::Normal)
 }
 
 pub(crate) fn open_writer(
     path: &Path,
     opened_database: Option<&OpenedDatabaseFile>,
     canonical_path: &Path,
+    durability: Durability,
 ) -> Result<Connection, WriterOpenError> {
     let (connection, fresh_writer) =
         open_raw(path, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
@@ -519,7 +615,7 @@ pub(crate) fn open_writer(
             .verify_connection(&connection, canonical_path)
             .map_err(WriterOpenError::Identity)?;
     }
-    let connection = finish_open(connection, ConnectionMode::Writer, fresh_writer)
+    let connection = finish_open(connection, ConnectionMode::Writer, fresh_writer, durability)
         .map_err(WriterOpenError::Policy)?;
     if let Some(opened_database) = opened_database {
         opened_database
@@ -645,11 +741,12 @@ fn finish_open(
     connection: Connection,
     mode: ConnectionMode,
     fresh_writer: bool,
+    durability: Durability,
 ) -> Result<Connection, ConnectionPolicyError> {
     {
         let _span = tracing::trace_span!("rusqlite.connection.configure").entered();
         {
-            apply_pragmas(&connection, mode, fresh_writer)?;
+            apply_pragmas(&connection, mode, fresh_writer, durability)?;
             assert_compile_options(&connection)?;
             apply_limits(&connection, mode)?;
             connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
@@ -697,7 +794,12 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
                 | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
             let connection =
                 Connection::open_with_flags(uri, flags).map_err(|source| policy("open", source))?;
-            apply_pragmas(&connection, ConnectionMode::Reader, false)?;
+            apply_pragmas(
+                &connection,
+                ConnectionMode::Reader,
+                false,
+                Durability::Normal,
+            )?;
             assert_compile_options(&connection)?;
             apply_limits(&connection, ConnectionMode::Reader)?;
             connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE_CAPACITY);
@@ -772,7 +874,9 @@ fn apply_pragmas(
     connection: &Connection,
     mode: ConnectionMode,
     fresh_writer: bool,
+    durability: Durability,
 ) -> Result<(), ConnectionPolicyError> {
+    let (synchronous, synchronous_value) = durability.pragma();
     // SQLite must never wait past the runtime's own queue/deadline authority.
     connection
         .busy_timeout(Duration::ZERO)
@@ -809,7 +913,7 @@ fn apply_pragmas(
             .pragma_update(None, "wal_autocheckpoint", 0_i64)
             .map_err(|source| policy("WAL auto-checkpoint", source))?;
         connection
-            .pragma_update(None, "synchronous", "NORMAL")
+            .pragma_update(None, "synchronous", synchronous)
             .map_err(|source| policy("synchronous mode", source))?;
     }
     // Applied after the journal mode is settled, on every lane that can reset
@@ -844,7 +948,7 @@ fn apply_pragmas(
         ConnectionMode::Writer => {
             verify_pragma_text(connection, "journal_mode", "wal")?;
             verify_pragma_i64(connection, "wal_autocheckpoint", 0)?;
-            verify_pragma_i64(connection, "synchronous", 1)?;
+            verify_pragma_i64(connection, "synchronous", synchronous_value)?;
             verify_pragma_i64(connection, "journal_size_limit", RETAINED_WAL_BYTES)?;
         }
         ConnectionMode::Reader => verify_pragma_i64(connection, "query_only", 1)?,

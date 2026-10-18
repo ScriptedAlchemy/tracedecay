@@ -34,7 +34,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "deferred scenario: no verifiable ground truth until its fixture gap is closed"
+  },
   "max_tool_calls": 5,
   "requires_fixture": "seeded-sessions",
   "notes": "DEFERRED: needs seeded transcript content mentioning a 'pricing rework' discussion for lcm_grep/message_search to find; the fixture currently has no ingested sessions."

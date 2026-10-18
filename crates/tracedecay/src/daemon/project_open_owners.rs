@@ -376,7 +376,6 @@ pub(super) async fn register_project_open_production_owners(
             .map_err(|error| TraceDecayError::Config {
             message: format!("project-open source access denied: {error}"),
         })?;
-    let grant_expires_at = access.grant_expires_at;
     let requester = access.requester.clone();
     let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
         server.project_session_application_retrieval_service(&access.scope)?,
@@ -437,7 +436,6 @@ pub(super) async fn register_project_open_production_owners(
             scope.clone(),
             configuration_profile_id,
             requester.clone(),
-            grant_expires_at,
             None,
             configuration_policy_digest.clone(),
         ), tracing::trace_span!("daemon.project.open.owners.configuration"))

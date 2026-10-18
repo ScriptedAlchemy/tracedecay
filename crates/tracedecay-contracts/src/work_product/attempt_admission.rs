@@ -6,10 +6,7 @@ use tracedecay_domain::{
     WorkProductEventPayloadV1, WorkflowRunEventKind, configuration::TopologyConcurrencyPolicyV1,
 };
 
-use crate::{
-    WorkRetryAttemptOutcomeV1, WorkRetryWriteV1, WorkSynthesisAdmissionRecordV1,
-    WorkSynthesisInsertOutcome, WorkflowRunAppendRequest,
-};
+use crate::{WorkRetryWriteV1, WorkSynthesisAdmissionRecordV1, WorkflowRunAppendRequest};
 
 use super::{WorkProductEventCommitV1, WorkProductEventDraftV1, WorkProductPortContextV1};
 
@@ -157,6 +154,8 @@ pub enum WorkProductAttemptAdmissionErrorV1 {
     PlacementRootConflict,
     #[error("Work product attempt authority is unavailable")]
     Unavailable,
+    #[error("Work product attempt storage failed: {0}")]
+    Storage(crate::WorkStorageFailureV1),
     #[error("Work product attempt admission was cancelled")]
     Cancelled,
     #[error("Work product attempt admission timed out")]
@@ -183,25 +182,9 @@ fn selection_covers_authority(
 }
 
 /// Canonical one-transaction authority for product linkage and runtime rows.
-pub trait WorkProductAttemptAdmissionPortV1: Send + Sync {
+pub trait WorkProductAttemptAdmissionPortV1 {
     fn admit_attempt(
         &self,
         admission: &WorkProductAttemptAdmissionV1,
     ) -> Result<WorkProductAttemptAdmissionOutcomeV1, WorkProductAttemptAdmissionErrorV1>;
-
-    fn admit_retry(
-        &self,
-        admission: &WorkProductRetryAdmissionV1,
-    ) -> Result<
-        (WorkProductEventCommitV1, WorkRetryAttemptOutcomeV1),
-        WorkProductAttemptAdmissionErrorV1,
-    >;
-
-    fn admit_synthesis(
-        &self,
-        admission: &WorkProductSynthesisAdmissionV1,
-    ) -> Result<
-        (WorkProductEventCommitV1, WorkSynthesisInsertOutcome),
-        WorkProductAttemptAdmissionErrorV1,
-    >;
 }

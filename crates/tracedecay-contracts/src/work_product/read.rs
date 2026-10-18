@@ -636,6 +636,8 @@ pub enum WorkGraphReadPortErrorV1 {
     Stale,
     #[error("Verified Work graph is unavailable")]
     Unavailable,
+    #[error("Work graph storage failed: {0}")]
+    Storage(crate::WorkStorageFailureV1),
     #[error("Work graph read was cancelled")]
     Cancelled,
     #[error("Work graph read timed out")]
@@ -650,6 +652,7 @@ impl From<WorkGraphReadPortErrorV1> for WorkProductApplicationErrorV1 {
             WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized => Self::NotFoundOrNotAuthorized,
             WorkGraphReadPortErrorV1::Stale => Self::VersionConflict,
             WorkGraphReadPortErrorV1::Unavailable => Self::GraphAuthorityUnavailable,
+            WorkGraphReadPortErrorV1::Storage(failure) => Self::Storage(failure),
             WorkGraphReadPortErrorV1::Cancelled => Self::Cancelled,
             WorkGraphReadPortErrorV1::TimedOut => Self::TimedOut,
             WorkGraphReadPortErrorV1::CursorRefused(mismatch) => Self::CursorRefused(mismatch),
@@ -657,7 +660,9 @@ impl From<WorkGraphReadPortErrorV1> for WorkProductApplicationErrorV1 {
     }
 }
 
-pub trait WorkGraphReadPortV1: Send + Sync {
+/// It carries no `Send + Sync` bound so a storage scoped to one writer
+/// transaction can implement it.
+pub trait WorkGraphReadPortV1 {
     fn read_graph(
         &self,
         context: &WorkProductPortContextV1,
@@ -675,6 +680,64 @@ where
         request: &WorkGraphReadRequestV1,
     ) -> Result<WorkGraphReadV1, WorkGraphReadPortErrorV1> {
         (**self).read_graph(context, request)
+    }
+}
+
+/// One current graph read made on a reader before a write job, answered to
+/// the job's service as an owned value, so the journal replay behind it never
+/// holds the writer. The job's event compare-and-swap on the graph version is
+/// its staleness fence.
+///
+/// It answers only the exact scope and request it was read for; any other
+/// read is refused as unavailable rather than answered from the wrong slice.
+#[derive(Clone, Debug, Default)]
+pub struct PrefetchedWorkGraphReadV1 {
+    read: Option<(
+        AuthorizedWorkProductScopeV1,
+        WorkGraphReadRequestV1,
+        Result<WorkGraphReadV1, WorkGraphReadPortErrorV1>,
+    )>,
+}
+
+impl PrefetchedWorkGraphReadV1 {
+    /// Reads the current graph under `selection` as `context` observed it at
+    /// `observed_at`. A selection the owner refuses prefetches nothing: the
+    /// service refuses it again inside the job.
+    pub fn current<S>(
+        storage: &S,
+        context: &RequestContext,
+        selection: &WorkProductSelectionScopeV1,
+        observed_at: UtcMicros,
+    ) -> Self
+    where
+        S: WorkGraphReadPortV1 + WorkProductOwnerAuthorizationPortV1,
+    {
+        let Ok(scope) = storage.authorize_scope(context, selection, observed_at) else {
+            return Self { read: None };
+        };
+        let port_context = WorkProductPortContextV1::from_request(context, scope, observed_at);
+        let request = WorkGraphReadRequestV1::current(selection.clone(), observed_at);
+        let read = storage.read_graph(&port_context, &request);
+        Self {
+            read: Some((port_context.authorized_scope().clone(), request, read)),
+        }
+    }
+}
+
+impl WorkGraphReadPortV1 for PrefetchedWorkGraphReadV1 {
+    fn read_graph(
+        &self,
+        context: &WorkProductPortContextV1,
+        request: &WorkGraphReadRequestV1,
+    ) -> Result<WorkGraphReadV1, WorkGraphReadPortErrorV1> {
+        match &self.read {
+            Some((scope, prefetched, read))
+                if scope == context.authorized_scope() && prefetched == request =>
+            {
+                read.clone()
+            }
+            _ => Err(WorkGraphReadPortErrorV1::Unavailable),
+        }
     }
 }
 
@@ -712,6 +775,9 @@ where
                 return Err(WorkProductApplicationErrorV1::Cancelled);
             }
             RequestAdmission::TimedOut => return Err(WorkProductApplicationErrorV1::TimedOut),
+            RequestAdmission::GrantExpired => {
+                return Err(WorkProductApplicationErrorV1::NotAuthorized);
+            }
         }
         request.validate()?;
         let authorized_scope = self

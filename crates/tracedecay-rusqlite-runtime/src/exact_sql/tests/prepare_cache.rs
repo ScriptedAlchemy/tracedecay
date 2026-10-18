@@ -172,3 +172,58 @@ fn execute_query_unchecked_reuses_the_cached_statement() {
     }
     assert_eq!(schema_version(&connection), version);
 }
+
+#[test]
+fn a_writer_query_rides_out_a_file_another_connection_briefly_locks() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("locked.sqlite3");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+        .unwrap();
+    let holder = Connection::open(&path).unwrap();
+    holder
+        .execute_batch("PRAGMA locking_mode=EXCLUSIVE")
+        .unwrap();
+    holder
+        .query_row("SELECT count(*) FROM t", [], |row| row.get::<_, i64>(0))
+        .unwrap();
+    let mut writer = Connection::open(&path).unwrap();
+    writer.busy_timeout(Duration::ZERO).unwrap();
+    assert!(
+        writer.prepare("SELECT x FROM t").is_err(),
+        "the holder locks the file against the writer's prepare"
+    );
+    let (reply, answer) = async_channel::bounded(1);
+    let (report, events) = std::sync::mpsc::channel();
+    crate::storage_pool::spawn(async move {
+        let _ = report.send("started");
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        command::run_writer_command(
+            &mut writer,
+            command::WriterCommand::Dispatch {
+                request: SqlRequest::Query(statement("SELECT x FROM t", vec![])),
+                reply,
+                authority: None,
+            },
+            &shutdown_requested,
+        )
+        .await
+        .send();
+        let _ = report.send("answered");
+    })
+    .unwrap_or_else(|_| panic!("the storage pool must start"));
+    assert_eq!(events.recv_timeout(Duration::from_secs(10)), Ok("started"));
+    std::thread::sleep(Duration::from_millis(60));
+    drop(holder);
+    assert_eq!(events.recv_timeout(Duration::from_secs(10)), Ok("answered"));
+    match answer.try_recv().unwrap() {
+        Ok(SqlResult::Queried(rows)) => assert_eq!(
+            rows.rows,
+            vec![ExactSqlRow {
+                values: vec![ExactSqlValue::Integer(1)]
+            }]
+        ),
+        other => panic!("the query must outlast the lock, got {other:?}"),
+    }
+}

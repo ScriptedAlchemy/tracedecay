@@ -28,9 +28,11 @@ use super::preview::{
 
 mod graph_evidence;
 mod lexical;
+mod scope;
 
 use graph_evidence::{RenameGraphEvidenceLoadV1, RenameGraphSiteV1, ensure_active, relation_kind};
 use lexical::{is_valid_identifier, string_literal_at};
+use scope::ScopeAnalysis;
 
 fn is_ident_byte(byte: u8) -> bool {
     byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric() || byte >= 0x80
@@ -65,6 +67,18 @@ fn source_lines(source: &str) -> Vec<(usize, &str)> {
             Some((start, segment.strip_suffix('\n').unwrap_or(segment)))
         })
         .collect()
+}
+
+/// Line of the first code (non-string, non-comment) spelling of `name`.
+fn first_code_occurrence(lines: &[(usize, &str)], name: &str, path: &str) -> Option<usize> {
+    lines
+        .iter()
+        .position(|(_, line)| {
+            identifier_ranges(line, name)
+                .into_iter()
+                .any(|(start, _)| !string_literal_at(line, start, path) && !comment_at(line, start))
+        })
+        .map(|index| index + 1)
 }
 
 fn is_generated_path(path: &str) -> bool {
@@ -489,29 +503,43 @@ pub(crate) async fn rename_symbol(
                         site_id: None,
                     });
                 }
-                if !exact_target.is_empty()
-                    && lines.iter().any(|(_, line)| {
-                        identifier_ranges(line, new_name)
-                            .into_iter()
-                            .any(|(start, _)| {
-                                !string_literal_at(line, start, &relative_path)
-                                    && !comment_at(line, start)
-                            })
-                    })
-                {
-                    for kind in [
-                        RenameHazardKindV1::NamespaceCollision,
-                        RenameHazardKindV1::Shadowing,
-                        RenameHazardKindV1::ChangedResolution,
-                    ] {
-                        hazards.push(RenameHazardV1 {
-                    kind,
-                    blocking: true,
-                    message: format!(
-                        "`{new_name}` already occurs in {relative_path}; collision, shadowing, or changed resolution is possible"
-                    ),
-                    site_id: None,
-                });
+                if !exact_target.is_empty() {
+                    let targets: Vec<_> = exact_target.keys().copied().collect();
+                    match scope::analyze(&relative_path, &source, new_name, &targets) {
+                        ScopeAnalysis::Findings(findings) => {
+                            for finding in findings {
+                                let affected = finding
+                                    .site
+                                    .and_then(|range| exact_target.get(&range))
+                                    .map(|site| {
+                                        site_id(&relative_path, site.start, site.end, site.kind)
+                                    })
+                                    .transpose()?;
+                                hazards.push(RenameHazardV1 {
+                                    kind: finding.kind,
+                                    blocking: true,
+                                    message: format!(
+                                        "{relative_path}:{}: {}",
+                                        finding.line, finding.detail
+                                    ),
+                                    site_id: affected,
+                                });
+                            }
+                        }
+                        ScopeAnalysis::Unavailable(limitation) => {
+                            if let Some(line) =
+                                first_code_occurrence(&lines, new_name, &relative_path)
+                            {
+                                hazards.push(RenameHazardV1 {
+                                    kind: RenameHazardKindV1::UnsupportedSyntax,
+                                    blocking: true,
+                                    message: format!(
+                                        "{relative_path}:{line}: `{new_name}` already occurs and {limitation}, so collision, shadowing, and changed resolution cannot be ruled out"
+                                    ),
+                                    site_id: None,
+                                });
+                            }
+                        }
                     }
                 }
 

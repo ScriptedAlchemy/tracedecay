@@ -9,11 +9,45 @@ use tracedecay_domain::{
     WorkProductEventSequenceV1, WorkProductEventV1, canonical_sha256,
 };
 
-use super::{WORK_PRODUCT_EVENT_ID_DOMAIN, load_journal_tail, owner_params, selection_covers};
+use super::{
+    FromStoreFault, StoreFault, WORK_PRODUCT_EVENT_ID_DOMAIN, insert_fault, load_journal_tail,
+    owner_params, selection_covers,
+};
 use crate::exact_sql::ExactSqlValue;
-use crate::work::{WorkSqliteStorage, exact_sql_statement, exact_sql_text, registered_work_query};
+use crate::work::{
+    RegisteredWorkQuery, RegisteredWorkWrite, WorkSqliteStorage, exact_sql_statement,
+    exact_sql_text, registered_work_query,
+};
+
+use crate::work_run_control::WorkSqliteJobStorage;
 
 type PortError = WorkProductEventPortErrorV1;
+
+/// The writer job commits the event and its verified version together, or
+/// rolls both back with any refusal the job returns.
+impl WorkProductEventPortV1 for WorkSqliteJobStorage<'_> {
+    fn replay(
+        &self,
+        context: &WorkProductPortContextV1,
+        command_id: &WorkCommandId,
+        canonical_input_digest: &ManifestDigest,
+    ) -> Result<Option<WorkProductEventCommitV1>, PortError> {
+        replay_from(
+            self.transaction,
+            context,
+            command_id,
+            canonical_input_digest,
+        )
+    }
+
+    fn append_atomically(
+        &self,
+        context: &WorkProductPortContextV1,
+        draft: &WorkProductEventDraftV1,
+    ) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
+        append_in_transaction(self.transaction, context, draft)
+    }
+}
 
 impl WorkProductEventPortV1 for WorkSqliteStorage {
     fn replay(
@@ -22,44 +56,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
         command_id: &WorkCommandId,
         canonical_input_digest: &ManifestDigest,
     ) -> Result<Option<WorkProductEventCommitV1>, PortError> {
-        let scope = context.authorized_scope();
-        let rows = registered_work_query(
-            self.handle(),
-            "SELECT canonical_input_digest, event_payload FROM work_product_events_v1
-             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND command_id = ?3",
-            owner_params(scope)
-                .into_iter()
-                .chain([ExactSqlValue::Text(command_id.as_str().to_owned())])
-                .collect(),
-        )
-        .map_err(|_| PortError::Unavailable)?;
-        let Some(row) = rows.rows.first() else {
-            return Ok(None);
-        };
-        let stored_digest = exact_sql_text(&row.values, 0).ok_or(PortError::Unavailable)?;
-        if stored_digest != canonical_input_digest.as_str() {
-            // The same command id with different canonical input is a reused
-            // idempotency key, never a replay of this request.
-            return Err(PortError::IdempotencyConflict);
-        }
-        let event: WorkProductEventV1 =
-            serde_json::from_str(exact_sql_text(&row.values, 1).ok_or(PortError::Unavailable)?)
-                .map_err(|_| PortError::Unavailable)?;
-        // A replayed event must still be one this selection is authorized to
-        // see; otherwise its existence would leak through the idempotency
-        // channel.
-        if !selection_covers(scope.selection(), &event) {
-            return Err(PortError::NotFoundOrNotAuthorized);
-        }
-        let published = super::load_published_versions(self.handle(), scope)
-            .ok_or(PortError::Unavailable)?
-            .into_iter()
-            .find(|published| published.event_sequence == event.sequence())
-            .ok_or(PortError::Unavailable)?;
-        let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
-        WorkProductEventCommitV1::new(event, verified)
-            .map(Some)
-            .map_err(|_| PortError::Unavailable)
+        replay_from(self.handle(), context, command_id, canonical_input_digest)
     }
 
     fn append_atomically(
@@ -70,27 +67,73 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
         let transaction = self
             .handle()
             .begin_immediate()
-            .map_err(|_| PortError::Unavailable)?;
+            .map_err(PortError::from_fault)?;
         let outcome = append_in_transaction(&transaction, context, draft);
         match outcome {
             Ok(WorkProductEventCommitOutcomeV1::Appended(commit)) => {
-                transaction.commit().map_err(|_| PortError::Unavailable)?;
+                transaction.commit().map_err(PortError::from_fault)?;
                 Ok(WorkProductEventCommitOutcomeV1::Appended(commit))
             }
             Ok(WorkProductEventCommitOutcomeV1::Replayed(commit)) => {
-                transaction.rollback().map_err(|_| PortError::Unavailable)?;
+                transaction.rollback().map_err(PortError::from_fault)?;
                 Ok(WorkProductEventCommitOutcomeV1::Replayed(commit))
             }
             Err(error) => {
-                transaction.rollback().map_err(|_| PortError::Unavailable)?;
+                transaction.rollback().map_err(PortError::from_fault)?;
                 Err(error)
             }
         }
     }
 }
 
+fn replay_from(
+    source: &impl RegisteredWorkQuery,
+    context: &WorkProductPortContextV1,
+    command_id: &WorkCommandId,
+    canonical_input_digest: &ManifestDigest,
+) -> Result<Option<WorkProductEventCommitV1>, PortError> {
+    let scope = context.authorized_scope();
+    let rows = registered_work_query(
+        source,
+        "SELECT canonical_input_digest, event_payload FROM work_product_events_v1
+         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND command_id = ?3",
+        owner_params(scope)
+            .into_iter()
+            .chain([ExactSqlValue::Text(command_id.as_str().to_owned())])
+            .collect(),
+    )
+    .map_err(PortError::from_fault)?;
+    let Some(row) = rows.rows.first() else {
+        return Ok(None);
+    };
+    let corrupt = || PortError::from_fault(StoreFault::Corrupt("replayed event row"));
+    let stored_digest = exact_sql_text(&row.values, 0).ok_or_else(corrupt)?;
+    if stored_digest != canonical_input_digest.as_str() {
+        // The same command id with different canonical input is a reused
+        // idempotency key, never a replay of this request.
+        return Err(PortError::IdempotencyConflict);
+    }
+    let event: WorkProductEventV1 =
+        serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
+            .map_err(|_| corrupt())?;
+    // A replayed event must still be one this selection is authorized to see;
+    // otherwise its existence would leak through the idempotency channel.
+    if !selection_covers(scope.selection(), &event) {
+        return Err(PortError::NotFoundOrNotAuthorized);
+    }
+    let published = super::load_published_versions(source, scope)
+        .map_err(PortError::from_fault)?
+        .into_iter()
+        .find(|published| published.event_sequence == event.sequence())
+        .ok_or(PortError::Unavailable)?;
+    let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
+    WorkProductEventCommitV1::new(event, verified)
+        .map(Some)
+        .map_err(|_| PortError::Unavailable)
+}
+
 pub(super) fn append_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     draft: &WorkProductEventDraftV1,
 ) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
@@ -102,7 +145,7 @@ pub(super) fn append_in_transaction(
     }
     if let Some(event) = replay_in_transaction(transaction, context, draft)? {
         let published = super::load_published_versions(transaction, scope)
-            .ok_or(PortError::Unavailable)?
+            .map_err(PortError::from_fault)?
             .into_iter()
             .find(|published| published.event_sequence == event.sequence())
             .ok_or(PortError::Unavailable)?;
@@ -111,7 +154,7 @@ pub(super) fn append_in_transaction(
             .map(WorkProductEventCommitOutcomeV1::Replayed)
             .map_err(|_| PortError::Unavailable);
     }
-    let tail = load_journal_tail(transaction, scope).ok_or(PortError::Unavailable)?;
+    let tail = load_journal_tail(transaction, scope).map_err(PortError::from_fault)?;
     let expected_matches = match (&tail, draft.expected_graph_version) {
         (None, None) => true,
         (Some((_, stored)), Some(expected)) => *stored == expected,
@@ -124,7 +167,9 @@ pub(super) fn append_in_transaction(
         .map_or(Some(1), |(sequence, _)| sequence.get().checked_add(1))
         .and_then(|next| WorkProductEventSequenceV1::new(next).ok())
         .ok_or(PortError::Unavailable)?;
-    let event = mint_event(draft, sequence).ok_or(PortError::VersionConflict)?;
+    // A draft that cannot become an event is not a stale revision: the head
+    // matched, so nothing another writer did could have caused this.
+    let event = mint_event(draft, sequence).ok_or(PortError::Unavailable)?;
     insert_event(transaction, context, &event, sequence)?;
     let verified = super::publication::publish_in_transaction(transaction, context, &event)?;
     WorkProductEventCommitV1::new(event, verified)
@@ -133,7 +178,7 @@ pub(super) fn append_in_transaction(
 }
 
 fn replay_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     draft: &WorkProductEventDraftV1,
 ) -> Result<Option<WorkProductEventV1>, PortError> {
@@ -147,17 +192,18 @@ fn replay_in_transaction(
             .chain([ExactSqlValue::Text(draft.command_id.as_str().to_owned())])
             .collect(),
     )
-    .map_err(|_| PortError::Unavailable)?;
+    .map_err(PortError::from_fault)?;
     let Some(row) = rows.rows.first() else {
         return Ok(None);
     };
-    let stored_digest = exact_sql_text(&row.values, 0).ok_or(PortError::Unavailable)?;
+    let corrupt = || PortError::from_fault(StoreFault::Corrupt("replayed event row"));
+    let stored_digest = exact_sql_text(&row.values, 0).ok_or_else(corrupt)?;
     if stored_digest != draft.canonical_input_digest.as_str() {
         return Err(PortError::IdempotencyConflict);
     }
-    serde_json::from_str(exact_sql_text(&row.values, 1).ok_or(PortError::Unavailable)?)
+    serde_json::from_str(exact_sql_text(&row.values, 1).ok_or_else(corrupt)?)
         .map(Some)
-        .map_err(|_| PortError::Unavailable)
+        .map_err(|_| corrupt())
 }
 
 /// Mint the canonical event this draft becomes at `sequence`.
@@ -202,7 +248,7 @@ fn mint_event(
 }
 
 fn insert_event(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     event: &WorkProductEventV1,
     sequence: WorkProductEventSequenceV1,
@@ -215,7 +261,7 @@ fn insert_event(
         None => ExactSqlValue::Null,
     };
     transaction
-        .execute(
+        .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_product_events_v1 (
                     owner_brain_id, owner_profile_id, sequence, event_id, command_id,
@@ -241,8 +287,8 @@ fn insert_event(
                     ])
                     .collect(),
             )
-            .map_err(|_| PortError::Unavailable)?,
+            .map_err(PortError::from_fault)?,
         )
-        .map_err(|_| PortError::VersionConflict)?;
+        .map_err(|error| insert_fault(error, PortError::VersionConflict))?;
     Ok(())
 }

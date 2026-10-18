@@ -24,16 +24,13 @@
 //! fields are `None` rather than guessed at, and the store still reports its
 //! size.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1, decode_bound_cursor,
     encode_bound_cursor,
-};
-use tracedecay_runtime_core::sqlite_read_snapshot::{
-    BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
 };
 
 use tracedecay_code_index_retention::code_index_generations::{
@@ -46,6 +43,10 @@ use tracedecay_runtime_core::config::GLOBAL_DB_FILENAME;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::storage::{SESSIONS_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
 
+use super::footprint::{
+    ProfileFootprintV1, ProjectRootStateV1, WalkedEntryV1, census_profile_footprint,
+    walk_regular_files,
+};
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
@@ -54,6 +55,8 @@ const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
 const CODE_INDEX_DIRECTORY: &str = "code-index-v1";
 const SEALED_GRAPH_DIRECTORY: &str = "tracedecay.sealed";
 const GRAPH_REPLAY_POOL_DIRECTORY: &str = "tracedecay.graph-replay";
+pub(crate) const GRAPH_CONTAINER_SUFFIX: &str = ".grafeo";
+pub(crate) const GRAPH_CONTAINER_WAL_SUFFIX: &str = ".grafeo.wal";
 /// Why a report without the daemon's scheduler authority cannot plan a
 /// retention dry run.
 pub const RETENTION_PROTECTION_UNRESOLVED: &str =
@@ -81,6 +84,9 @@ pub struct StoreSizeReportEntry {
     pub free_bytes: Option<u64>,
     /// Free pages as a fraction of total pages, or `None` when unsampled.
     pub free_page_ratio: Option<f64>,
+    /// Whether the registered canonical root still exists.
+    #[serde(default)]
+    pub root_state: Option<ProjectRootStateV1>,
 }
 
 /// On-disk bytes of one project store, by family.
@@ -92,10 +98,17 @@ pub struct StoreKindBytesV1 {
     pub sealed_graph: u64,
     /// Completed text artifacts and each scope's text-artifact staging.
     pub text_artifacts: u64,
-    /// The rest of `code-index-v1/` (generation manifests and segments,
-    /// publication pointers, retention evidence) and the
-    /// `tracedecay.graph-replay/` pool of retired generations.
+    /// The rest of `code-index-v1/`: generation manifests and segments,
+    /// publication pointers, retention evidence.
     pub generation_artifacts: u64,
+    /// Every `*.grafeo` container at the store root and its `*.grafeo.wal/`
+    /// segment directory. Opening a container replays its whole block log
+    /// into heap, so these bytes are resident memory at open.
+    #[serde(default)]
+    pub graph_container: u64,
+    /// `tracedecay.graph-replay/`: retired generations kept for replay.
+    #[serde(default)]
+    pub graph_replay_pool: u64,
     /// `sessions.db` with its sidecars and spools.
     pub sessions: u64,
     /// Everything else: hook spools, dashboard state, locks, manifests.
@@ -103,7 +116,7 @@ pub struct StoreKindBytesV1 {
 }
 
 impl StoreKindBytesV1 {
-    fn add(&mut self, relative: &Path, bytes: u64) {
+    pub(crate) fn add(&mut self, relative: &Path, bytes: u64) {
         let mut components = relative
             .components()
             .map(|component| component.as_os_str().to_string_lossy());
@@ -118,7 +131,11 @@ impl StoreKindBytesV1 {
         } else if first == SEALED_GRAPH_DIRECTORY {
             &mut self.sealed_graph
         } else if first == GRAPH_REPLAY_POOL_DIRECTORY {
-            &mut self.generation_artifacts
+            &mut self.graph_replay_pool
+        } else if first.ends_with(GRAPH_CONTAINER_WAL_SUFFIX)
+            || (first.ends_with(GRAPH_CONTAINER_SUFFIX) && components.next().is_none())
+        {
+            &mut self.graph_container
         } else if first == CODE_INDEX_DIRECTORY {
             let second = components.next().unwrap_or_default();
             let third = components.next().unwrap_or_default();
@@ -141,12 +158,14 @@ impl StoreKindBytesV1 {
         *family = family.saturating_add(bytes);
     }
 
-    fn total(self) -> u64 {
+    pub(crate) fn total(self) -> u64 {
         [
             self.graph_database,
             self.sealed_graph,
             self.text_artifacts,
             self.generation_artifacts,
+            self.graph_container,
+            self.graph_replay_pool,
             self.sessions,
             self.other,
         ]
@@ -178,6 +197,10 @@ pub struct StorageReport {
     /// explicit `storage report` command attaches it after paging completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_profile_size: Option<FullProfileSizeV1>,
+    /// Every profile entry against its bound, from the same walk as
+    /// `full_profile_size`. The daemon's paged response leaves it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footprint: Option<ProfileFootprintV1>,
     pub coverage: StorageReportCoverage,
 }
 
@@ -371,20 +394,24 @@ pub async fn build_storage_report(
     profile_root: &Path,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
-    // Capture the profile's physical footprint before opening any SQLite
-    // readers. A report must describe the profile supplied by its caller, not
-    // implementation-dependent SQLite sidecar churn caused while collecting
-    // the remaining diagnostic fields.
-    let full_profile_root = profile_root.to_path_buf();
-    let full_profile_size =
-        native_runtime::spawn_blocking(move || scan_full_profile_size(&full_profile_root))
-            .await
-            .map_err(|error| report_error("join full profile size scan", error))?;
+    // The registry rows come from an off-profile copy, so reading them first
+    // leaves the profile untouched.
     let registered_projects = if global_db_path.exists() {
         load_registered_project_rows(profile_root, &global_db_path).await?
     } else {
         Vec::new()
     };
+    // Capture the profile's physical footprint before opening any SQLite
+    // readers. A report must describe the profile supplied by its caller, not
+    // implementation-dependent SQLite sidecar churn caused while collecting
+    // the remaining diagnostic fields.
+    let full_profile_root = profile_root.to_path_buf();
+    let registered_roots: BTreeMap<String, String> = registered_projects.iter().cloned().collect();
+    let footprint = native_runtime::spawn_blocking(move || {
+        census_profile_footprint(&full_profile_root, &registered_roots, &BTreeMap::new())
+    })
+    .await
+    .map_err(|error| report_error("join profile footprint census", error))?;
     let profile_root_buf = profile_root.to_path_buf();
     let sampled = native_runtime::spawn_blocking(move || {
         sample_registered_storage(&profile_root_buf, &global_db_path, registered_projects)
@@ -401,7 +428,8 @@ pub async fn build_storage_report(
         unregistered_bytes: sampled.unregistered_bytes,
         global_db_bytes: sampled.global_db_bytes,
         user_sessions_db_bytes: sampled.user_sessions_db_bytes,
-        full_profile_size: Some(full_profile_size),
+        full_profile_size: Some(footprint.full_profile_size()),
+        footprint: Some(footprint),
         coverage: StorageReportCoverage::default(),
     })
 }
@@ -857,6 +885,7 @@ pub fn build_project_storage_report(
         global_db_bytes: database_family_bytes(&global_db_path),
         user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
         full_profile_size: None,
+        footprint: None,
         coverage: StorageReportCoverage::default(),
     })
 }
@@ -873,10 +902,14 @@ fn append_project_report(
     let data_root = profile_root.join("projects").join(project_id);
     if data_root.is_dir() {
         let mut kinds = StoreKindBytesV1::default();
-        let unavailable_entry_count = walk_regular_files(&data_root, &mut |path, bytes| {
-            if let Ok(relative) = path.strip_prefix(&data_root) {
-                kinds.add(relative, bytes);
+        let mut unavailable_entry_count = 0usize;
+        walk_regular_files(&data_root, usize::MAX, &mut |path, walked| match walked {
+            WalkedEntryV1::File { bytes } => {
+                if let Ok(relative) = path.strip_prefix(&data_root) {
+                    kinds.add(relative, bytes);
+                }
             }
+            WalkedEntryV1::Unavailable => unavailable_entry_count += 1,
         });
         let (free_bytes, free_page_ratio) =
             sample_free_pages(&data_root.join(tracedecay_runtime_core::config::DB_FILENAME))
@@ -891,6 +924,7 @@ fn append_project_report(
             unavailable_entry_count,
             free_bytes,
             free_page_ratio,
+            root_state: Some(ProjectRootStateV1::probe(Some(canonical_root))),
         });
     }
     let code_index_store_root =
@@ -1076,16 +1110,40 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
     }
 }
 
-/// Reads the free-page pragmas over the shared bounded read-only probe.
-/// Returns `None` on any failure, a store held by a busy writer, a corrupt
-/// file, or a WAL database whose `-shm` cannot be mapped read-only. A report
-/// must degrade, never block and never repair.
+/// Reads the free pages from the database file header with a plain file
+/// read. Opening a SQLite connection on a live store would make the report a
+/// reader the writer's checkpoint has to wait for; the header takes no lock
+/// and no WAL read slot. It reflects the last checkpoint, which is precise
+/// enough for a size report. `None` for a file that is not a SQLite database
+/// or whose header counts are stale.
 fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
-    let connection = open_read_only_probe(graph_db_path, BOUNDED_PROBE_BUSY_TIMEOUT).ok()?;
-    let page_size = pragma_u64(&connection, "page_size")?;
-    let page_count = pragma_u64(&connection, "page_count")?;
-    let freelist = pragma_u64(&connection, "freelist_count")?;
-    if page_size == 0 || page_count == 0 {
+    use std::io::Read as _;
+
+    let mut header = [0_u8; 100];
+    std::fs::File::open(graph_db_path)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    if &header[..16] != b"SQLite format 3\0" {
+        return None;
+    }
+    let field = |offset: usize| {
+        u32::from_be_bytes([
+            header[offset],
+            header[offset + 1],
+            header[offset + 2],
+            header[offset + 3],
+        ])
+    };
+    let page_size = match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65_536,
+        size => u64::from(size),
+    };
+    let page_count = u64::from(field(28));
+    let freelist = u64::from(field(36));
+    // The in-header page count is valid only when the version-valid-for
+    // number matches the change counter.
+    if field(92) != field(24) || page_size == 0 || page_count == 0 {
         return None;
     }
     let free_bytes = page_size.saturating_mul(freelist);
@@ -1124,73 +1182,6 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
     (count, bytes)
 }
 
-/// Visit every regular file under `root` with its byte length, without
-/// following symlinks, and return how many entries could not be read or were
-/// neither regular files nor directories. Those make any total built from the
-/// visits a lower bound instead of a successful zero-size family.
-fn walk_regular_files(root: &Path, visit: &mut dyn FnMut(&Path, u64)) -> usize {
-    let mut unavailable_entry_count = 0usize;
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-            continue;
-        };
-        for entry in entries {
-            let Ok(entry) = entry else {
-                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                continue;
-            };
-            let Ok(file_type) = entry.file_type() else {
-                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                continue;
-            };
-            // A socket (the running daemon's endpoint) holds no bytes.
-            #[cfg(unix)]
-            if std::os::unix::fs::FileTypeExt::is_socket(&file_type) {
-                continue;
-            }
-            if file_type.is_dir() {
-                pending.push(entry.path());
-            } else if file_type.is_file() {
-                match entry.metadata() {
-                    Ok(metadata) => visit(&entry.path(), metadata.len()),
-                    Err(_) => {
-                        unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                    }
-                }
-            } else {
-                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-            }
-        }
-    }
-    unavailable_entry_count
-}
-
-/// Count every regular file under a profile root without following symlinks.
-/// Failures remain visible as a partial lower bound instead of a successful
-/// zero-size family.
-#[tracing::instrument(
-    name = "maintenance.storage_report.scan_profile_size",
-    level = "trace",
-    skip_all
-)]
-pub fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
-    let mut total_bytes = 0u64;
-    let unavailable_entry_count = walk_regular_files(profile_root, &mut |_, bytes| {
-        total_bytes = total_bytes.saturating_add(bytes);
-    });
-    FullProfileSizeV1 {
-        state: if unavailable_entry_count == 0 {
-            ProfileTotalCoverageStateV1::Complete
-        } else {
-            ProfileTotalCoverageStateV1::Partial
-        },
-        total_bytes,
-        unavailable_entry_count,
-    }
-}
-
 fn report_error(
     operation: &'static str,
     error: impl std::fmt::Display,
@@ -1219,6 +1210,7 @@ mod tests {
             unavailable_entry_count: 0,
             free_bytes: None,
             free_page_ratio: None,
+            root_state: None,
         }
     }
 
@@ -1688,9 +1680,31 @@ mod tests {
         assert_eq!(report.stores.len(), 1);
         assert_eq!(report.stores[0].project_id, "proj_a");
         assert_eq!(report.stores[0].canonical_root, "/repos/a");
+        assert_eq!(
+            report.stores[0].root_state,
+            Some(ProjectRootStateV1::Missing)
+        );
         assert!(report.stores[0].total_bytes > 0);
         assert_eq!(report.unregistered_dir_count, 1);
         assert!(report.unregistered_bytes >= 2048);
+
+        let footprint = report.footprint.as_ref().expect("offline report footprint");
+        assert_eq!(
+            report.full_profile_size,
+            Some(footprint.full_profile_size())
+        );
+        let roots = footprint
+            .entries
+            .iter()
+            .filter_map(|entry| Some((entry.key.as_str(), entry.project.as_ref()?.state)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            roots,
+            BTreeMap::from([
+                ("projects/proj_a", ProjectRootStateV1::Missing),
+                ("projects/proj_ghost", ProjectRootStateV1::Unregistered),
+            ])
+        );
     }
 
     #[asupersync::test]
@@ -1859,6 +1873,41 @@ mod tests {
         );
     }
 
+    /// Step 6: the report reads free pages from the file header, so it never
+    /// opens a SQLite reader on a live store. A store whose writer holds it
+    /// exclusively, which a reader could not open, still reports them.
+    #[asupersync::test]
+    async fn a_store_held_exclusively_by_its_writer_still_reports_free_pages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
+        seed_graph_db(&profile_root, "proj_a");
+        let writer = rusqlite::Connection::open(
+            profile_root
+                .join("projects")
+                .join("proj_a")
+                .join(tracedecay_runtime_core::config::DB_FILENAME),
+        )
+        .unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA locking_mode = EXCLUSIVE;
+                 INSERT INTO fixture (id) VALUES (1);",
+            )
+            .unwrap();
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+
+        assert_eq!(report.stores.len(), 1);
+        assert!(
+            report.stores[0].free_page_ratio.is_some(),
+            "sizing reads the header and waits on no lock the writer holds"
+        );
+        drop(writer);
+    }
+
     /// A registered store whose graph database is unreadable still reports its
     /// on-disk size; only the free-page fields degrade to `None`. Reporting a
     /// zero ratio there would read as "no bloat".
@@ -1938,6 +1987,8 @@ mod tests {
                 300,
             ),
             ("tracedecay.graph-replay/generation.json", 40),
+            ("tracedecay.grafeo", 500),
+            ("tracedecay.grafeo.wal/wal_00000001.log", 60),
             ("sessions.db", 900),
             ("sessions.db-wal", 10),
             (".sessions.db.host-admission/claim", 5),
@@ -1975,12 +2026,14 @@ mod tests {
                 graph_database: 4_196,
                 sealed_graph: 3_000,
                 text_artifacts: 2_050,
-                generation_artifacts: 1_040,
+                generation_artifacts: 1_000,
+                graph_container: 560,
+                graph_replay_pool: 40,
                 sessions: 915,
                 other: 7,
             }
         );
-        assert_eq!(store.total_bytes, 11_208);
+        assert_eq!(store.total_bytes, 11_768);
         assert_eq!(store.total_bytes, walked_bytes);
         assert_eq!(store.unavailable_entry_count, 0);
     }
@@ -2108,7 +2161,8 @@ mod tests {
             std::os::unix::net::UnixListener::bind(profile_root.join("daemon.sock")).unwrap();
 
         assert_eq!(
-            scan_full_profile_size(&profile_root),
+            census_profile_footprint(&profile_root, &BTreeMap::new(), &BTreeMap::new())
+                .full_profile_size(),
             FullProfileSizeV1 {
                 state: ProfileTotalCoverageStateV1::Complete,
                 total_bytes: 1_000,

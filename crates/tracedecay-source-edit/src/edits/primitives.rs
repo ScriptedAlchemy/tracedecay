@@ -321,11 +321,10 @@ pub(crate) async fn insert_at(
         }
         line_num - 1
     } else {
-        let anchor_prefix = tracedecay_runtime_core::text::utf8_prefix_at_or_before(anchor, 100);
         let matching_lines: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| line.contains(anchor_prefix))
+            .filter(|(_, line)| line.contains(anchor))
             .map(|(i, _)| i)
             .collect();
 

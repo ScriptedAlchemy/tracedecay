@@ -103,6 +103,8 @@ pub enum WorkEvidenceReadPortErrorV1 {
     Stale,
     #[error("Work evidence authority is unavailable")]
     Unavailable,
+    #[error("Work evidence storage failed: {0}")]
+    Storage(crate::WorkStorageFailureV1),
     #[error("Work evidence read was cancelled")]
     Cancelled,
     #[error("Work evidence read timed out")]
@@ -398,6 +400,7 @@ fn authorize_port_context<A: WorkProductOwnerAuthorizationPortV1>(
         RequestAdmission::Admitted => {}
         RequestAdmission::Cancelled => return Err(WorkProductApplicationErrorV1::Cancelled),
         RequestAdmission::TimedOut => return Err(WorkProductApplicationErrorV1::TimedOut),
+        RequestAdmission::GrantExpired => return Err(WorkProductApplicationErrorV1::NotAuthorized),
     }
     selection
         .validate()
@@ -469,6 +472,9 @@ fn map_evidence_error(error: WorkEvidenceReadPortErrorV1) -> WorkProductApplicat
         WorkEvidenceReadPortErrorV1::Stale => WorkProductApplicationErrorV1::VersionConflict,
         WorkEvidenceReadPortErrorV1::Unavailable => {
             WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
+        }
+        WorkEvidenceReadPortErrorV1::Storage(failure) => {
+            WorkProductApplicationErrorV1::Storage(failure)
         }
         WorkEvidenceReadPortErrorV1::Cancelled => WorkProductApplicationErrorV1::Cancelled,
         WorkEvidenceReadPortErrorV1::TimedOut => WorkProductApplicationErrorV1::TimedOut,

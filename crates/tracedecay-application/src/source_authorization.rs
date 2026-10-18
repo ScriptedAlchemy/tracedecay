@@ -56,7 +56,10 @@ impl ProjectSourceAccessSnapshot {
         context.validate().is_ok()
             && context.scope() == &self.scope
             && context.actor() == &self.requester
-            && observed_at < self.grant_expires_at
+            // The request's own grant bounds it. A mounted owner holds the
+            // project-open snapshot, whose fixed expiry would refuse every
+            // request from one grant horizon after the project opened.
+            && !context.grant().is_expired_at(observed_at)
             && context.allows(operation.capability_id(), operation.use_case_id())
             && self
                 .effective_capabilities

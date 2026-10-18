@@ -1,10 +1,12 @@
 # Agent-adoption evals
 
 This harness launches real headless Claude Code and Codex agents against a
-small indexed fixture and records task outcomes, tool efficiency, skill routing,
-and discovery channels. Native reads can be the appropriate first action;
-invocation rate alone is not a measure of usefulness. Scenario-specific outcomes
-and transcript review distinguish helpful graph evidence from unnecessary calls.
+small indexed fixture and records four independent measures per run: task
+correctness, routing/adoption, tool success, and efficiency (tool budget, cost,
+latency). Native reads can be the appropriate first action; invocation rate
+alone is not a measure of usefulness, and no single blended number is published
+as effectiveness. Scenario-declared checks decide correctness; transcript review
+distinguishes helpful graph evidence from unnecessary calls.
 
 ## Layout
 
@@ -41,7 +43,9 @@ positive + negative cases.
 ## How to run
 
 Live agent runs cost tokens, so they are gated behind `TRACEDECAY_AGENT_EVALS=1`.
-Nothing here is wired into `cargo test` or CI.
+Live runs are not wired into CI. The offline grader self-tests are:
+`bazel test //evals/agent_adoption:selftest` (also run by the
+`hermetic-evals` workflow), or `evals/agent_adoption/selftest.py` directly.
 
 ```sh
 # Free dry run: builds + indexes the fixtures, seeds facts, prints the exact
@@ -202,7 +206,13 @@ Each `scenarios/<id>.json`:
     "forbidden_first":["Grep","Glob"],// raw search/read tools
     "forbidden_bash": ["grep","rg ","find ","cat "]  // Bash substrings that count as raw search
   },
-  "ground_truth": ["reserve_stock", "check_availability"], // fragments expected in the answer
+  "outcome": {                        // what a correct run establishes; see "Correctness"
+    "kind": "answer",
+    "answer": {
+      "required":  [{"id": "states reserve_stock", "pattern": "\\breserve_stock\\b"}],
+      "forbidden": []
+    }
+  },
   "max_tool_calls": 6,                // efficiency budget
   "expected_agent": "change-risk-reviewer", // optional specialist routing target
   "seeded_fact": "currency_fact_id",  // (optional) key in seeded_facts.json
@@ -210,26 +220,52 @@ Each `scenarios/<id>.json`:
 }
 ```
 
-### Scoring (per scenario, 0..1)
+### Correctness (the `outcome` block)
 
-Weighted, applicable-subscore-normalized:
+Every scenario declares an `outcome`; `grade.py --lint-only` (and the run
+itself) fails on a missing or malformed one, and on the retired bare
+`ground_truth` substring list. Correctness is graded from the scenario's own
+checks and is independent of which tools the agent chose: a correct answer
+obtained with native tools passes, and a TraceDecay call cannot make a wrong
+answer pass.
 
-| subscore | weight | pass condition |
-|----------|--------|----------------|
-| `first_tool_choice` | 0.30 | first meaningful tool belongs to the scenario's `required_first` choices |
-| `not_forbidden_first` | 0.25 | no scenario-forbidden tool before the first TraceDecay tool (legacy preference, not a universal native-tool ban) |
-| `outcome` | 0.25 | fraction of `ground_truth` fragments present in the final answer |
-| `efficiency` | 0.10 | meaningful tool-call count ≤ `max_tool_calls` |
-| `feedback` | 0.30 | (feedback scenarios) `tracedecay_fact_feedback` called `helpful` on the seeded fact |
-| `agent_selected` | 0.30 | (specialist scenarios) expected bundled agent was invoked |
+| `kind` | what is checked | evidence |
+|--------|-----------------|----------|
+| `answer` | the final answer states every `required` conclusion and none of the `forbidden` ones | regex per conclusion (case-insensitive) |
+| `effect` | the resulting state. `files` maps a glob over the post-run `src/**/*.rs` snapshot to required/forbidden checks; `tool_effects` requires a named tool to have executed successfully with matching input | file text; tool result |
+| `ungraded` | nothing: no verifiable ground truth (run-dependent output, deferred fixture gap, or a routing-only specialist scenario). It carries a `reason` | none |
 
-Specialist scenarios use `agent_selected` as a binary routing gate: the overall
-score is `1` only when the expected specialist is invoked, otherwise `0`.
-Generic efficiency or a plausible direct answer cannot compensate for missing
-the specialist.
+A check is `{"id": "<conclusion>", "pattern": "<regex>"}`. The score is the
+fraction of required checks met, forced to `0` when any forbidden check
+matches; the status is `pass` only at `1.0`. Declare a `forbidden` check for
+the plausible opposite conclusion (for example "do not run `pricing_test`" in
+the affected-tests scenarios), because a required keyword alone is satisfied by
+an answer that recommends the opposite. Regexes are inspectable evidence, not
+semantic judgment: a wrong answer phrased unexpectedly can still satisfy one,
+so review transcripts of surprising passes.
 
-Aggregated per host into `scoreboard.json` (mean score plus each rate) and a
-compact `report.md`.
+`effect` scenarios (`edit_*`, `mem_record_new_decision`) are graded on what
+changed, not on what the agent says. `run.sh` snapshots `src/**/*.rs` to
+`<transcript>.effects.json` right after each such run and restores `src/` from
+git, running them alone because the fixture is shared. Without a snapshot
+(a dry run, or an older run directory) the status is `unverified`, which is
+excluded from the pass rate. The file checks are structural; nothing compiles
+the edited crate.
+
+### Measures (per run, reported separately)
+
+| field | meaning |
+|-------|---------|
+| `correctness` | `status` (`pass`/`fail`/`ungraded`/`unverified`), `score`, `required_missing`, `forbidden_hit`, `evidence` |
+| `adoption_composite` | **routing only**, not effectiveness: weighted `first_tool_choice` 0.30, `not_forbidden_first` 0.25, `feedback` 0.30 (feedback scenarios), `agent_selected` 0.30 (specialist scenarios), renormalized to 0..1. Specialist scenarios use `agent_selected` alone |
+| `subscores` | the routing parts above. `first_tool_choice`: first meaningful tool is one of `required_first`. `not_forbidden_first`: no scenario-forbidden tool before the first TraceDecay tool (legacy preference, not a universal native-tool ban). `feedback`: `tracedecay_fact_feedback` called `helpful` on the seeded fact **and the call succeeded** |
+| `tool_success` | attempted / succeeded / failed / unconfirmed meaningful calls, overall and for TraceDecay tools. A failed call is an attempt (it still counts as adoption) but never a success; `unconfirmed` means the host reported no result |
+| `efficiency` | `within_tool_budget` (call count <= `max_tool_calls`, and <= `max_tracedecay_calls` when declared). Spend and latency (tokens, USD, turns, duration) are in `cost` and aggregated with the pass rate, including `$/pass` (total spend over verified passes) |
+
+Aggregated per host into `scoreboard.json` and a compact `report.md` with
+separate **Task correctness**, **Routing and adoption (not effectiveness)**, and
+**Tool success and efficiency** tables. Success is judged from the exact run's
+own transcript and snapshot.
 
 ## Channel attribution: which channel drove adoption
 
@@ -240,7 +276,7 @@ tracedecay call**:
 
 | channel | attributed when… |
 |---------|------------------|
-| `hint-driven` | a hook-injected tool hint appears before the first tracedecay call. Matched on distinctive hint phrasing mirrored from `crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs` `CATEGORY_SPECS` (e.g. "route by what you're matching", "before reading whole files, consider…"), not the bare word "tracedecay", so the system tool listing never false-positives. |
+| `hint-driven` | a hook-injected tool hint appears before the first tracedecay call. Matched on distinctive hint phrasing mirrored from `crates/tracedecay-policy/src/intent_catalog.rs` `INTENT_CATALOG` (e.g. "route by what you're matching", "before reading whole files, consider…"), not the bare word "tracedecay", so the system tool listing never false-positives. |
 | `skill-driven` | a `tracedecay:*` skill invocation (a `Skill` tool call) precedes the first tracedecay call. |
 | `steering-or-description` | nothing fired before the call: the session-start CLAUDE.md steering block or the MCP tool descriptions are the only prior mention that could have driven it. |
 | `unprompted` | the `bare` ablation adopted a tracedecay tool with hints + skills + steering all removed, pure tool-description pull. |
@@ -250,20 +286,21 @@ tracedecay call**:
 The run's ablation `condition` gates channels that were disabled: a stray hint
 signature under `no-hints` is **not** credited to hints. Per-scenario `channel`
 lands in `scoreboard.json`; the aggregate `report.md` gains a **Channel
-efficacy** table (count + mean score per channel per host) and a per-host
+efficacy** table (count, adoption composite, and correctness pass rate per
+channel per host) and a per-host
 `adoption_rate`.
 
 ### Hint-signature drift guard
 
 `hint-driven` attribution depends on `HINT_SIGNATURES` in `grade.py` staying in
-sync with the hook messages in `crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs` `CATEGORY_SPECS`. That
+sync with the hook messages in `crates/tracedecay-policy/src/intent_catalog.rs` `INTENT_CATALOG`. That
 mirror is load-bearing and silent when it breaks: if the source wording drifts
 and a signature stops matching, the hint text still fires in live transcripts
 but the grader no longer recognizes it, so genuinely **hint-driven** adoptions
 get misfiled as **steering-or-description** and the channel-efficacy table lies
 without any error.
 
-`grade.py --check-hints` enforces the mirror: it locates `tool_hints.rs`, lowers
+`grade.py --check-hints` enforces the mirror: it locates `intent_catalog.rs`, lowers
 it, and fails (non-zero, listing each offender) if any signature is no longer a
 substring. `run.sh` runs it right after the neutrality lint. **before building
 fixtures or spending a token**, so a drifted signature aborts the run. When the
@@ -391,17 +428,17 @@ Each scoreboard result carries `repeated_query_hints`, `repeated_query_class`,
 `cost` (Claude `total_cost_usd`, `num_turns`, and input/output/cache tokens;
 Codex tokens only; unreported fields stay `null`), and
 `repeated_query_hint_next_steps`: one entry per hint block, naming the next
-tool call or `answer`. `cost_and_hints` and the report's **Outcome, cost, and
-repeated-query hints** table put the `hints-on` and `hints-off` cells of each
+tool call or `answer`. `cost_and_hints` and the report's **Correctness, cost, latency,
+and repeated-query hints** table put the `hints-on` and `hints-off` cells of each
 host/model and condition side by side; `repeated_query_scenarios` and its
 **Per repeated-query scenario** table split them per scenario. `completed` is
-the share of runs that ended with an answer. Read outcome first, then cost and
-turns. A hint helped when hints-on keeps or raises outcome at lower cost on a
+the share of runs that ended with an answer. Read the correctness pass rate first, then cost and
+turns. A hint helped when hints-on keeps or raises the pass rate at lower cost on a
 `stuck_loop` scenario; on a class where it should not fire, any hint is a
-false positive, and a lower outcome or extra cost there is harm. `after hint`
+false positive, and a lower pass rate or extra cost there is harm. `after hint`
 shows whether agents changed course (a different tool or an answer) or
 repeated the same tool. At `REPS=3`, read differences as direction, not
-significance; the outcome column checks fragments, so review the final
+significance; the pass rate rests on regex checks, so review the final
 answers before claiming either way.
 
 Both hosts deliver the hint through `tracedecay serve`. Claude runs `serve`
@@ -431,9 +468,8 @@ Scenarios may declare `expected_skill` and `allowed_skills`. Omitted allowed
 skills defaults to the expected skill; explicit `[]` marks a no-skill case.
 Claude exposes plugin `commands/` as `tracedecay:*` skills alongside `skills/`,
 so a scenario whose task is exactly one workflow command's job (for example
-`check-health` for the health scorecard, `find-impact` for the impact case)
-lists that command in `allowed_skills`; routing to it is a correct workflow,
-not a false trigger.
+`draft-commit` for a commit message) lists that command in `allowed_skills`;
+routing to it is a correct workflow, not a false trigger.
 
 Claude Code (2.1.x) defers MCP tool schemas behind `ToolSearch` once a server's
 definitions exceed its context budget; only tools the server marks
@@ -448,7 +484,7 @@ deferred tool, not an unnecessary detour.
 `max_tracedecay_calls` bounds graph/CLI calls independently of `max_tool_calls`.
 The grader reports per-skill true positives, misses, false positives, and no-skill
 over-trigger counts. Explicit host invocation is evidence; prose naming a skill
-is not. Skill routing does not replace or increase the task-outcome subscore.
+is not. Skill routing does not replace or increase task correctness.
 
 Neighbor scenarios distinguish exploration, tracing, impact, review, structural
 editing, and health. Negative cases cover known files, supplied documentation,
@@ -479,7 +515,7 @@ verified artifact view. Export its `proposed_ops.skills[*].routing_validation`
 objects, or the original output's `skills[*].routing_validation`, as one scenario
 object per file in a fresh directory. Use fixed-index filenames such as
 `case-0001.json`; never derive filesystem paths from generated ids. Keep each
-case's neutral prompt, expected/allowed skills, ground truth, and call budgets
+case's neutral prompt, expected/allowed skills, outcome checks, and call budgets
 unchanged. Scenario ids must be unique safe basename identifiers because they
 identify transcript outputs.
 
@@ -535,8 +571,8 @@ with a notice. Transcripts end in `__v-<variant>`.
 
 The report's learned-skill table gives, per variant and model:
 
-* `outcome`, the ground-truth fragment check. It does not depend on the skill or
-  on the agent's claims.
+* `correctness`, the mean score of the scenario's outcome checks. It does not
+  depend on the skill or on the agent's claims.
 * Routing as tp/fn/fp/tn. A hit is a Skill call naming the variant's slug. A
   `none` variant, or a host without normalized Skill events (Codex), counts as
   `unknown` and stays out of those four counts. Invocation is a proxy for
@@ -555,5 +591,5 @@ Both live steps need current host credentials: a Claude setup-token (see
 "Store isolation & auth") and a Codex `auth.json` whose login is still valid.
 A Codex copy whose access token has expired and whose refresh token was
 already used fails every run with `401`; those runs land in the invalid count,
-not in the outcome columns. Generation stops with the backend's error when the
+not in the correctness columns. Generation stops with the backend's error when the
 codex account is over its usage limit.

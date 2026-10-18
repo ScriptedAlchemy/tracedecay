@@ -261,6 +261,24 @@ pub(crate) fn tool_refusal(response: &Value) -> Value {
     })
 }
 
+/// Asserts a refusal that names the missing `project_aliases` table. Which
+/// phase SQLite reports it in, prepare or advance, depends on whether the
+/// reader already cached that statement, so the phase is not part of the
+/// contract.
+pub(crate) fn assert_missing_alias_table_refusal(response: &Value) {
+    let refusal = tool_refusal(response);
+    assert_eq!(refusal["kind"], "execution_failed", "{refusal}");
+    assert_eq!(refusal["code"], "graph_tool.failed", "{refusal}");
+    let message = refusal["message"].as_str().expect("refusal message");
+    assert!(
+        ["prepare", "advance"].iter().any(|phase| message
+            == format!(
+                "database error: SQLite {phase} query failed: no such table: project_aliases (operation: resolve project identity alias)"
+            )),
+        "{message}"
+    );
+}
+
 /// Polls the daemon-owned code-index search authority until an exact
 /// generation is bound and its native code graph is serving.
 ///
@@ -378,12 +396,12 @@ pub(crate) async fn wait_for_current_graph(server: &McpServer) {
     wait_for_readiness(server, "ready", Duration::from_secs(20)).await;
 }
 
-/// One production tool result, re-asked while the owner answers a typed
-/// not-ready problem: `temporal_refresh_unavailable` (an ingest that committed
-/// but missed the fixed live-refresh join under host load; the retry re-joins)
-/// or `application.runtime.mounting` (the project server is still mounting).
-/// Any other result, error results included, is returned for the caller to
-/// judge.
+/// One production tool result, re-asked while the owner's problem directs
+/// `retry: after_delay`: the same request is expected to succeed once
+/// `retry_after_millis` passes, as when the project server is still mounting,
+/// an ingest missed the live-refresh join, or a post-admission projection
+/// drain was refused under host load. Any other result, error results
+/// included, is returned for the caller to judge.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn call_tool_when_ready(
     harness: &ProductionProjectCompositionHarnessV1,
@@ -422,13 +440,12 @@ fn not_ready_retry_delay(result: &Value) -> Option<Duration> {
             .get("problem")?
             .clone(),
     };
-    match problem["code"].as_str()? {
-        "temporal_refresh_unavailable" => Some(Duration::from_millis(
-            problem["retry_after_millis"].as_u64().unwrap_or(250),
-        )),
-        "application.runtime.mounting" => Some(Duration::from_millis(250)),
-        _ => None,
+    if problem["retry"] != "after_delay" {
+        return None;
     }
+    problem["retry_after_millis"]
+        .as_u64()
+        .map(Duration::from_millis)
 }
 
 #[cfg(feature = "test-transport")]

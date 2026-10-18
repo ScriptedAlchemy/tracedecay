@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use asupersync::runtime::{JoinError, RuntimeHandle};
 pub use asupersync::runtime::{Runtime, RuntimeBuilder};
 
-pub use crate::exact_sql::native_thread_writer_waits;
+pub use crate::exact_sql::{native_thread_reader_waits, native_thread_writer_waits};
 use asupersync::types::PanicPayload;
 use asupersync::{Budget, Cx};
 use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, abortable};
@@ -40,19 +40,32 @@ pub const NOT_INSTALLED: &str = "native execution runtime not installed";
 /// `None` when no runtime was installed or the installed one failed to start.
 #[must_use]
 pub fn handle() -> Option<RuntimeHandle> {
-    Runtime::current_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
+    native_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
+}
+
+fn native_handle() -> Option<RuntimeHandle> {
+    if crate::storage_pool::on_pool() {
+        return None;
+    }
+    Runtime::current_handle()
+}
+
+pub(crate) fn on_native_thread() -> bool {
+    native_handle().is_some()
 }
 
 /// The caller's task context, or a request context on the process runtime.
 #[must_use]
 pub fn cx() -> Option<Cx> {
-    Cx::current().or_else(|| {
-        process_runtime()
-            .ok()?
-            .handle()
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .ok()
-    })
+    Cx::current()
+        .filter(|_| !crate::storage_pool::on_pool())
+        .or_else(|| {
+            process_runtime()
+                .ok()?
+                .handle()
+                .try_request_cx_with_budget(Budget::INFINITE)
+                .ok()
+        })
 }
 
 /// Runs `future` to completion on the calling thread, with the tasks it
@@ -103,6 +116,29 @@ where
     })
 }
 
+tokio::task_local! {
+    /// Answers for the effects of blocking work its scope queues through
+    /// [`spawn_owned_blocking`]. Each such work holds a clone until it
+    /// returns, so an owner that signals on its last drop (a project open's
+    /// completion) settles after that work, not when its wait is abandoned.
+    pub static BLOCKING_WORK_OWNER: std::sync::Arc<dyn Send + Sync>;
+}
+
+/// [`spawn_blocking`] for work whose effects belong to the enclosing
+/// [`BLOCKING_WORK_OWNER`]: dropping the returned future still abandons only
+/// the wait, but the owner stays held until the work returns.
+pub fn spawn_owned_blocking<T, F>(work: F) -> BoxFuture<'static, Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let owner = BLOCKING_WORK_OWNER.try_with(std::sync::Arc::clone).ok();
+    spawn_blocking(move || {
+        let _owner = owner;
+        work()
+    })
+}
+
 /// Runs `future` where a thread may park: from a native runtime thread it
 /// moves the whole future to one blocking-pool thread and polls it there;
 /// anywhere else it polls in place.
@@ -120,6 +156,20 @@ where
     if Runtime::current_handle().is_none() {
         return Box::pin(future.map(Ok));
     }
+    spawn_blocking(move || poll_on_current_thread(future))
+}
+
+/// Polls `future` on one blocking-pool thread wherever the caller runs.
+///
+/// For futures that interleave awaits with synchronous work (native Git, a
+/// synchronous port) that must not hold any async worker: unlike
+/// [`off_native_thread`], a caller on a Tokio or other foreign executor does
+/// not poll in place. Dropping the returned future abandons only the wait.
+pub fn on_blocking_pool<F>(future: F) -> BoxFuture<'static, Result<F::Output, String>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     spawn_blocking(move || poll_on_current_thread(future))
 }
 
@@ -961,6 +1011,36 @@ mod tests {
         assert!(tokio_handle(SITE).is_some());
         assert_eq!(tokio_runtime_missing_count(SITE), before + 1);
         assert_eq!(tokio_runtime_missing_total(), before_total + 1);
+    }
+
+    #[tokio::test]
+    async fn on_blocking_pool_never_polls_on_a_tokio_caller_thread() {
+        let caller = std::thread::current().id();
+        let in_place = off_native_thread(async { std::thread::current().id() })
+            .await
+            .expect("in-place poll");
+        assert_eq!(
+            in_place, caller,
+            "off_native_thread polls a Tokio caller in place"
+        );
+
+        let polled_on = on_blocking_pool(async {
+            sleep_until(Instant::now() + Duration::from_millis(1))
+                .await
+                .expect("native timer");
+            (std::thread::current().id(), ON_BLOCKING_POOL.get())
+        })
+        .await
+        .expect("blocking-pool poll");
+
+        assert_ne!(
+            polled_on.0, caller,
+            "the future must leave the Tokio worker"
+        );
+        assert!(
+            polled_on.1,
+            "the future must be polled on the native blocking pool"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

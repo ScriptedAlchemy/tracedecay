@@ -28,6 +28,18 @@ pub(super) fn real_world_prompt_cases() -> Vec<HintEval> {
             &[],
         ),
         prompt_eval(
+            "memory-curator-docs-task-is-not-recall",
+            "document how the memory curator works in the README",
+            None,
+            &[],
+        ),
+        prompt_eval(
+            "transcript-cleanup-task-is-not-recall",
+            "delete transcript files older than 30 days in the cleanup job",
+            None,
+            &[],
+        ),
+        prompt_eval(
             "what-did-we-decide-before",
             "where did we decide how memory curation should work before?",
             Some(HintCategory::SessionRecall),
@@ -79,6 +91,18 @@ pub(super) fn real_world_prompt_cases() -> Vec<HintEval> {
         prompt_eval(
             "sibling-rsncc-repo",
             "look in the rsncc sibling repo and check the open PR status there",
+            Some(HintCategory::ProjectContext),
+            &["tracedecay_project_search"],
+        ),
+        prompt_eval(
+            "in-repo-absolute-path-is-not-cross-project",
+            "/fast/projects/tracedecay/crates/foo/src/lib.rs fails to compile, look at it",
+            None,
+            &[],
+        ),
+        prompt_eval(
+            "sibling-repo-absolute-path-is-cross-project",
+            "/fast/projects/rsncc/src/lib.rs in the sibling repo fails to compile, look at it",
             Some(HintCategory::ProjectContext),
             &["tracedecay_project_search"],
         ),

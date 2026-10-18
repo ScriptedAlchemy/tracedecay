@@ -11,8 +11,8 @@
 
 use tracedecay_contracts::{
     WorkAttemptStorageError, WorkRunAdmissionV1, WorkRunControlFrontierV1,
-    WorkRunControlStorageError, WorkRunControlStoragePort, WorkRunLiveAttemptV1,
-    WorkflowRunStorageError, WorkflowRunStoragePort,
+    WorkRunControlStorageError, WorkRunControlStoragePort, WorkRunControlTransitionPort,
+    WorkRunLiveAttemptV1, WorkflowRunStorageError,
 };
 use tracedecay_domain::{
     RunId, TaskId, UtcMicros, WorkAttemptV1, WorkAuthority, WorkBlockedIntervalClosureV1,
@@ -20,41 +20,148 @@ use tracedecay_domain::{
     WorkRunControlV1,
 };
 
-use crate::exact_sql::{ExactSqlTransaction, ExactSqlValue};
+use crate::exact_sql::{ExactSqlError, ExactSqlJobTransaction, ExactSqlValue};
 use crate::work::{
-    ACTIVE_ATTEMPT_PREDICATE, RegisteredWorkQuery, WorkSqliteStorage, authority_params_owned,
-    exact_sql_integer, exact_sql_statement, exact_sql_text, registered_work_query,
+    ACTIVE_ATTEMPT_PREDICATE, RegisteredWorkQuery, RegisteredWorkWrite, WorkSqliteStorage,
+    authority_params_owned, exact_sql_integer, exact_sql_statement, exact_sql_text,
+    registered_work_query,
 };
-use crate::workflow::WorkflowSqliteAuthority;
 
-impl WorkRunControlStoragePort for WorkSqliteStorage {
+/// Work storage scoped to one writer job. It holds the job's transaction and
+/// no handle, so none of its statements can wait on the writer thread that is
+/// running the job.
+#[derive(Clone, Copy)]
+pub struct WorkSqliteJobStorage<'job> {
+    pub(crate) transaction: &'job ExactSqlJobTransaction<'job>,
+    pub(crate) owner: &'job tracedecay_store::StoreShardIdV1,
+    /// The graph read made before the job. A job never replays the product
+    /// journal through the read port, so without one every graph read is
+    /// refused as unavailable.
+    pub(crate) graph: Option<&'job tracedecay_contracts::PrefetchedWorkGraphReadV1>,
+}
+
+impl WorkSqliteStorage {
+    /// Runs `job` over Work storage scoped to one writer transaction: it
+    /// commits when the job returns `Ok` and rolls back when it returns `Err`,
+    /// and the awaiting task parks no thread.
+    pub async fn transact<R, E, F>(&self, job: F) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(WorkSqliteJobStorage<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(None, job).await
+    }
+
+    /// [`Self::transact`] for a job whose service reads the current product
+    /// graph: the job's storage answers that read from `graph`, read before
+    /// the job on a reader.
+    pub async fn transact_with_graph<R, E, F>(
+        &self,
+        graph: tracedecay_contracts::PrefetchedWorkGraphReadV1,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(WorkSqliteJobStorage<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(Some(graph), job).await
+    }
+
+    async fn run_job<R, E, F>(
+        &self,
+        graph: Option<tracedecay_contracts::PrefetchedWorkGraphReadV1>,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(WorkSqliteJobStorage<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let owner = self.handle().binding().shard_id.clone();
+        self.handle()
+            .transact(move |transaction| {
+                job(WorkSqliteJobStorage {
+                    transaction,
+                    owner: &owner,
+                    graph: graph.as_ref(),
+                })
+            })
+            .await
+    }
+
+    /// Makes the current product graph read a writer job's service will ask
+    /// for, on the blocking pool, so the awaiting task parks no runtime thread
+    /// and the journal replay never holds the writer. A read that cannot run
+    /// prefetches nothing, and the job's service refuses its read.
+    pub async fn prefetch_graph(
+        &self,
+        read: impl FnOnce(&Self) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 + Send + 'static,
+    ) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 {
+        self.read(read).await.unwrap_or_default()
+    }
+
+    /// Runs the synchronous Work read `read` on the blocking pool, so the
+    /// awaiting task parks no runtime thread.
+    pub async fn read<R>(
+        &self,
+        read: impl FnOnce(&Self) -> R + Send + 'static,
+    ) -> Result<R, ExactSqlError>
+    where
+        R: Send + 'static,
+    {
+        let storage = self.clone();
+        crate::native_runtime::spawn_blocking(move || read(&storage))
+            .await
+            .map_err(ExactSqlError::ReaderUnavailable)
+    }
+}
+
+impl tracedecay_contracts::WorkRunReservationPort for WorkSqliteJobStorage<'_> {
+    fn load_run_control(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
+        load_run_control_from(self.transaction, authority, task_id, run_id)
+    }
+}
+
+impl tracedecay_contracts::WorkRunReservationPort for WorkSqliteStorage {
+    fn load_run_control(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
+        load_run_control_from(self.handle(), authority, task_id, run_id)
+    }
+}
+
+impl tracedecay_contracts::WorkGraphReadPortV1 for WorkSqliteJobStorage<'_> {
+    fn read_graph(
+        &self,
+        context: &tracedecay_contracts::WorkProductPortContextV1,
+        request: &tracedecay_contracts::WorkGraphReadRequestV1,
+    ) -> Result<tracedecay_contracts::WorkGraphReadV1, tracedecay_contracts::WorkGraphReadPortErrorV1>
+    {
+        self.graph.map_or(
+            Err(tracedecay_contracts::WorkGraphReadPortErrorV1::Unavailable),
+            |graph| graph.read_graph(context, request),
+        )
+    }
+}
+
+impl WorkRunControlTransitionPort for WorkSqliteJobStorage<'_> {
     fn run_control_frontier(
         &self,
         authority: &WorkAuthority,
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Option<WorkRunControlFrontierV1>, WorkRunControlStorageError> {
-        {
-            let _span = tracing::trace_span!("rusqlite.work_run_control.txn.frontier").entered();
-            {
-                let transaction = self
-                    .handle()
-                    .begin_immediate()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                let frontier = run_control_frontier_from(&transaction, authority, task_id, run_id);
-                let _ = transaction.rollback();
-                frontier
-            }
-        }
-    }
-
-    fn run_admission(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError> {
-        run_admission_from(self.handle(), authority, task_id, run_id)
+        run_control_frontier_from(self.transaction, authority, task_id, run_id)
     }
 
     fn workflow_bound_live_attempts(
@@ -63,93 +170,34 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Vec<WorkRunLiveAttemptV1>, WorkRunControlStorageError> {
-        let sql = format!(
-            "SELECT attempt.attempt_payload FROM work_attempts_v1 AS attempt
-             WHERE attempt.project_id = ?1 AND attempt.repository_id = ?2
-               AND attempt.worktree_id = ?3 AND attempt.actor_id = ?4
-               AND attempt.policy_digest = ?5 AND attempt.task_id = ?6
-               AND attempt.run_id = ?7 AND {ACTIVE_ATTEMPT_PREDICATE}
-             ORDER BY attempt.rowid"
-        );
-        let rows = registered_work_query(
-            self.handle(),
-            &sql,
-            authority_params_owned(authority)
-                .into_iter()
-                .chain(run_params(task_id, run_id))
-                .collect(),
-        )
-        .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let attempts = rows
-            .rows
-            .iter()
-            .map(|row| {
-                let payload = exact_sql_text(&row.values, 0)
-                    .ok_or(WorkRunControlStorageError::Unavailable)?;
-                attempt_from_payload(payload)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let workflow = WorkflowSqliteAuthority::from_retained_exact_sql(self.retained_exact_sql())
-            .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-        let projection = match WorkflowRunStoragePort::projection(&workflow, run_id) {
-            Ok(projection) if projection.run_id() == run_id => Some(projection),
-            Ok(_) => return Err(WorkRunControlStorageError::Unavailable),
-            Err(WorkflowRunStorageError::NotFound) => None,
-            Err(
-                WorkflowRunStorageError::VersionConflict
-                | WorkflowRunStorageError::IdempotencyConflict
-                | WorkflowRunStorageError::InvalidHistory
-                | WorkflowRunStorageError::Unavailable,
-            ) => return Err(WorkRunControlStorageError::Unavailable),
-        };
-        attempts
-            .into_iter()
-            .filter(|attempt| {
-                projection.as_ref().is_none_or(|projection| {
-                    projection
-                        .planned_fan_out_attempt(attempt.identity())
-                        .is_none_or(|planned| {
-                            projection.active_fan_out_attempt(planned) == attempt.identity()
-                        })
-                })
-            })
-            .map(|attempt| {
-                let step_id = match projection.as_ref() {
-                    None => None,
-                    Some(projection) => {
-                        let planned_attempt =
-                            projection.planned_fan_out_attempt(attempt.identity());
-                        let mut matching_steps = projection
-                            .fan_out_plans()
-                            .values()
-                            .filter(|plan| {
-                                plan.children
-                                    .iter()
-                                    .any(|child| Some(&child.attempt_identity) == planned_attempt)
-                            })
-                            .map(|plan| plan.step_id.clone());
-                        let step = matching_steps.next();
-                        if matching_steps.next().is_some() {
-                            return Err(WorkRunControlStorageError::Unavailable);
-                        }
-                        step
-                    }
-                };
-                Ok(WorkRunLiveAttemptV1 {
-                    attempt_id: attempt.identity().attempt_id().clone(),
-                    step_id,
-                })
-            })
-            .collect()
+        workflow_bound_live_attempts_from(self.transaction, authority, task_id, run_id)
     }
 
-    fn load_run_control(
+    fn publish_run_control_at_frontier(
+        &self,
+        authority: &WorkAuthority,
+        expected: &WorkRunControlFrontierV1,
+        next: &WorkRunControlV1,
+        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
+    ) -> Result<(), WorkRunControlStorageError> {
+        publish_run_control_at_frontier_tx(
+            self.transaction,
+            authority,
+            expected,
+            next,
+            blocked_intervals,
+        )
+    }
+}
+
+impl WorkRunControlStoragePort for WorkSqliteStorage {
+    fn run_admission(
         &self,
         authority: &WorkAuthority,
         task_id: &TaskId,
         run_id: &RunId,
-    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
-        load_run_control_from(self.handle(), authority, task_id, run_id)
+    ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError> {
+        run_admission_from(self.handle(), authority, task_id, run_id)
     }
 
     fn publish_run_control(
@@ -170,55 +218,6 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
                     &transaction,
                     authority,
                     expected,
-                    next,
-                    blocked_intervals,
-                ) {
-                    let _ = transaction.rollback();
-                    return Err(error);
-                }
-                transaction
-                    .commit()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                Ok(())
-            }
-        }
-    }
-
-    fn publish_run_control_at_frontier(
-        &self,
-        authority: &WorkAuthority,
-        expected: &WorkRunControlFrontierV1,
-        next: &WorkRunControlV1,
-        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
-    ) -> Result<(), WorkRunControlStorageError> {
-        {
-            let _span =
-                tracing::trace_span!("rusqlite.work_run_control.txn.publish_at_frontier").entered();
-            {
-                let transaction = self
-                    .handle()
-                    .begin_immediate()
-                    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-                let current = {
-                    let _span =
-                        tracing::trace_span!("rusqlite.work_run_control.cas.frontier").entered();
-                    {
-                        run_control_frontier_from(
-                            &transaction,
-                            authority,
-                            next.task_id(),
-                            next.run_id(),
-                        )
-                    }
-                }?;
-                if current.as_ref() != Some(expected) {
-                    let _ = transaction.rollback();
-                    return Err(WorkRunControlStorageError::AuthorityConflict);
-                }
-                if let Err(error) = publish_run_control_tx(
-                    &transaction,
-                    authority,
-                    expected.control.as_ref().map(WorkRunControlV1::authority),
                     next,
                     blocked_intervals,
                 ) {
@@ -304,7 +303,7 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
                             .entered();
                     {
                         transaction
-                            .execute(
+                            .work_execute(
                                 exact_sql_statement(
                                     "UPDATE work_blocked_intervals_v1
                      SET observability_durable = 1
@@ -346,6 +345,114 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
             }
         }
     }
+}
+
+fn workflow_bound_live_attempts_from(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+    task_id: &TaskId,
+    run_id: &RunId,
+) -> Result<Vec<WorkRunLiveAttemptV1>, WorkRunControlStorageError> {
+    let sql = format!(
+        "SELECT attempt.attempt_payload FROM work_attempts_v1 AS attempt
+         WHERE attempt.project_id = ?1 AND attempt.repository_id = ?2
+           AND attempt.worktree_id = ?3 AND attempt.actor_id = ?4
+           AND attempt.policy_digest = ?5 AND attempt.task_id = ?6
+           AND attempt.run_id = ?7 AND {ACTIVE_ATTEMPT_PREDICATE}
+         ORDER BY attempt.rowid"
+    );
+    let rows = registered_work_query(
+        source,
+        &sql,
+        authority_params_owned(authority)
+            .into_iter()
+            .chain(run_params(task_id, run_id))
+            .collect(),
+    )
+    .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+    let attempts = rows
+        .rows
+        .iter()
+        .map(|row| {
+            let payload =
+                exact_sql_text(&row.values, 0).ok_or(WorkRunControlStorageError::Unavailable)?;
+            attempt_from_payload(payload)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::workflow::require_workflow_schema(source)
+        .map_err(|_| WorkRunControlStorageError::Unavailable)?;
+    let projection = match crate::workflow::run_journal::projection_from(source, run_id) {
+        Ok(projection) if projection.run_id() == run_id => Some(projection),
+        Ok(_) => return Err(WorkRunControlStorageError::Unavailable),
+        Err(WorkflowRunStorageError::NotFound) => None,
+        Err(
+            WorkflowRunStorageError::VersionConflict
+            | WorkflowRunStorageError::IdempotencyConflict
+            | WorkflowRunStorageError::InvalidHistory
+            | WorkflowRunStorageError::Unavailable,
+        ) => return Err(WorkRunControlStorageError::Unavailable),
+    };
+    attempts
+        .into_iter()
+        .filter(|attempt| {
+            projection.as_ref().is_none_or(|projection| {
+                projection
+                    .planned_fan_out_attempt(attempt.identity())
+                    .is_none_or(|planned| {
+                        projection.active_fan_out_attempt(planned) == attempt.identity()
+                    })
+            })
+        })
+        .map(|attempt| {
+            let step_id = match projection.as_ref() {
+                None => None,
+                Some(projection) => {
+                    let planned_attempt = projection.planned_fan_out_attempt(attempt.identity());
+                    let mut matching_steps = projection
+                        .fan_out_plans()
+                        .values()
+                        .filter(|plan| {
+                            plan.children
+                                .iter()
+                                .any(|child| Some(&child.attempt_identity) == planned_attempt)
+                        })
+                        .map(|plan| plan.step_id.clone());
+                    let step = matching_steps.next();
+                    if matching_steps.next().is_some() {
+                        return Err(WorkRunControlStorageError::Unavailable);
+                    }
+                    step
+                }
+            };
+            Ok(WorkRunLiveAttemptV1 {
+                attempt_id: attempt.identity().attempt_id().clone(),
+                step_id,
+            })
+        })
+        .collect()
+}
+
+fn publish_run_control_at_frontier_tx(
+    transaction: &impl RegisteredWorkWrite,
+    authority: &WorkAuthority,
+    expected: &WorkRunControlFrontierV1,
+    next: &WorkRunControlV1,
+    blocked_intervals: &[WorkBlockedIntervalReceiptV1],
+) -> Result<(), WorkRunControlStorageError> {
+    let current = {
+        let _span = tracing::trace_span!("rusqlite.work_run_control.cas.frontier").entered();
+        run_control_frontier_from(transaction, authority, next.task_id(), next.run_id())
+    }?;
+    if current.as_ref() != Some(expected) {
+        return Err(WorkRunControlStorageError::AuthorityConflict);
+    }
+    publish_run_control_tx(
+        transaction,
+        authority,
+        expected.control.as_ref().map(WorkRunControlV1::authority),
+        next,
+        blocked_intervals,
+    )
 }
 
 fn run_control_frontier_from(
@@ -486,7 +593,7 @@ fn open_blocked_intervals_from(
 }
 
 fn publish_run_control_tx(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     expected: Option<WorkRunControlAuthorityV1>,
     next: &WorkRunControlV1,
@@ -501,7 +608,7 @@ fn publish_run_control_tx(
         {
             match expected {
                 None => transaction
-                    .execute(
+                    .work_execute(
                         exact_sql_statement(
                             "INSERT OR IGNORE INTO work_run_controls_v1 (
                         project_id, repository_id, worktree_id, actor_id, policy_digest,
@@ -524,7 +631,7 @@ fn publish_run_control_tx(
                     let expected_version = i64::try_from(expected.get())
                         .map_err(|_| WorkRunControlStorageError::Unavailable)?;
                     transaction
-                        .execute(
+                        .work_execute(
                             exact_sql_statement(
                                 "UPDATE work_run_controls_v1 SET
                             state = ?8, authority_version = ?9, control_payload = ?10
@@ -563,7 +670,7 @@ fn publish_run_control_tx(
 }
 
 fn load_blocked_interval_observation_cursor(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
 ) -> Result<Option<BlockedIntervalObservationCursor>, WorkRunControlStorageError> {
     let rows = registered_work_query(
@@ -584,7 +691,7 @@ fn load_blocked_interval_observation_cursor(
 }
 
 fn settled_blocked_interval_observation_page(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     after: Option<&BlockedIntervalObservationCursor>,
     limit: u32,
@@ -629,13 +736,13 @@ fn settled_blocked_interval_observation_page(
 }
 
 fn persist_blocked_interval_observation_cursor(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     receipt: &WorkBlockedIntervalReceiptV1,
 ) -> Result<(), WorkRunControlStorageError> {
     let cursor = BlockedIntervalObservationCursor::from_receipt(receipt)?;
     transaction
-        .execute(
+        .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_blocked_interval_observation_cursors_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
@@ -710,7 +817,7 @@ impl BlockedIntervalObservationCursor {
 }
 
 fn persist_blocked_intervals(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     task_id: &TaskId,
     run_id: &RunId,
@@ -736,7 +843,7 @@ fn persist_blocked_intervals(
                         .checked_sub(1)
                         .ok_or(WorkRunControlStorageError::AuthorityConflict)?;
                     transaction
-                        .execute(
+                        .work_execute(
                             exact_sql_statement(
                                 "UPDATE work_blocked_intervals_v1 SET
                             interval_revision = ?12, settled = 1, observability_durable = 0,
@@ -768,7 +875,7 @@ fn persist_blocked_intervals(
                         return Err(WorkRunControlStorageError::AuthorityConflict);
                     }
                     transaction
-                        .execute(
+                        .work_execute(
                             exact_sql_statement(
                                 "INSERT INTO work_blocked_intervals_v1 (
                             project_id, repository_id, worktree_id, actor_id, policy_digest,
@@ -824,7 +931,7 @@ fn blocked_identity_params(receipt: &WorkBlockedIntervalReceiptV1) -> [ExactSqlV
 /// terminal CAS. The interval receipt cannot survive a terminal attempt with
 /// no end instant, and a crash can commit neither half independently.
 pub(crate) fn close_blocked_intervals_on_terminal_attempt(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     authority: &WorkAuthority,
     next: &WorkAttemptV1,
 ) -> Result<(), WorkAttemptStorageError> {

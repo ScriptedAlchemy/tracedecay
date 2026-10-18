@@ -1,0 +1,30 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+py_test(
+    name = "score_test",
+    srcs = ["score.py", "test_score.py"],
+    main = "test_score.py",
+    imports = ["."],
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "run_test",
+    srcs = ["scorecard.py", "test_run.py"],
+    imports = ["."],
+    data = ["run.sh", "score.py"],
+    main = "test_run.py",
+    legacy_create_init = 0,
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+)
+
+py_test(
+    name = "scorecard_test",
+    srcs = ["scorecard.py", "test_scorecard.py"],
+    main = "test_scorecard.py",
+    imports = ["."],
+    legacy_create_init = 0,
+)

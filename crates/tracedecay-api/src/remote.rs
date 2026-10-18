@@ -38,7 +38,8 @@ use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::remote::replay::{RemoteReplayPendingRequestV1, RemoteReplayRequestV1};
 use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
-    ApplicationContractError, CancellationSignal, RequestId, ResultContractRef,
+    ApplicationContractError, CancellationSignal, REMOTE_ENROLLMENT_CREDENTIAL_HEADER, RequestId,
+    ResultContractRef,
 };
 use tracedecay_domain::{
     CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1, UtcMicros,
@@ -50,7 +51,6 @@ const BEARER_PREFIX: &[u8] = b"Bearer ";
 // versioned wire and can occupy nearly four times their binary size. The
 // application contract still enforces the exact one-mebibyte binary bound.
 const MAX_REMOTE_HTTP_BODY_BYTES: usize = 5 * 1024 * 1024;
-pub const REMOTE_ENROLLMENT_CREDENTIAL_HEADER: &str = "x-tracedecay-enrollment-credential";
 
 /// Parsed HTTP credential header. It cannot be cloned, serialized, or logged.
 pub struct RemoteAuthorizationHeader {
@@ -404,12 +404,13 @@ where
         }
     };
     let execution = tracing::Instrument::instrument(
-        async move {
-            tracedecay_rusqlite_runtime::native_runtime::spawn_blocking(move || {
-                service.execute_controlled(request.request, credential, control)
-            })
-            .await
-        },
+        // The ports' persistence is synchronous exact SQL, so the operation
+        // runs on the blocking pool; its project-store effects await there.
+        tracedecay_rusqlite_runtime::native_runtime::on_blocking_pool(async move {
+            service
+                .execute_controlled(request.request, credential, control)
+                .await
+        }),
         tracing::trace_span!("api.http.handler"),
     )
     .await;

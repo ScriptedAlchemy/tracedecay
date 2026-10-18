@@ -375,3 +375,74 @@ fn a_corrupt_neighbouring_checkpoint_cannot_retire_its_receipts() {
          that incarnation's receipts"
     );
 }
+
+fn admitted(
+    mut metadata: tracedecay_store::StoreOperationMetadataV1,
+    at_micros: i64,
+) -> tracedecay_store::StoreOperationMetadataV1 {
+    metadata.admitted_at = tracedecay_domain::UtcMicros(at_micros);
+    metadata
+}
+
+/// Each daemon restart is a new incarnation, and no lookup by the new one can
+/// match the old one's records. Once the old incarnation has been quiet on the
+/// shard for longer than the retirement window, a commit retires its records.
+#[test]
+fn a_restarted_daemon_retires_the_previous_incarnations_records_after_a_quiet_week() {
+    let week = prune::RETIRED_INCARNATION_QUIET_MICROS;
+    let start = 1_000_000;
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    initialize_schema(&transaction).unwrap();
+    for index in 0..3 {
+        let previous = at_authority(
+            &format!("operation.old.{index}"),
+            &format!("key.old.{index}"),
+            'a',
+            1,
+            7,
+        );
+        commit(&transaction, &admitted(previous, start));
+    }
+    let restarted = at_authority("operation.new.0", "key.new.0", 'a', 2, 7);
+    commit(&transaction, &admitted(restarted, start + week));
+    assert_eq!(
+        idempotency_rows(&transaction),
+        vec![(1, 7), (1, 7), (1, 7), (2, 7)],
+        "an incarnation quiet for exactly the window keeps its records"
+    );
+
+    let later = at_authority("operation.new.1", "key.new.1", 'a', 2, 7);
+    commit(&transaction, &admitted(later, start + week + 1));
+    assert_eq!(
+        idempotency_rows(&transaction),
+        vec![(2, 7), (2, 7)],
+        "the previous incarnation's records are retired and the committing \
+         incarnation keeps its own"
+    );
+}
+
+/// A daemon that runs for longer than the retirement window keeps replaying
+/// its own receipts: age alone never retires the live incarnation's records.
+#[test]
+fn the_live_incarnation_keeps_replaying_its_own_receipts_past_the_window() {
+    let week = prune::RETIRED_INCARNATION_QUIET_MICROS;
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    initialize_schema(&transaction).unwrap();
+    let original = admitted(
+        at_authority("operation.first", "key.first", 'a', 1, 7),
+        1_000_000,
+    );
+    let receipt = commit(&transaction, &original);
+    let later = at_authority("operation.later", "key.later", 'a', 1, 7);
+    commit(&transaction, &admitted(later, 1_000_000 + 2 * week));
+
+    assert!(
+        matches!(
+            record_commit(&transaction, &original, &scope(&original)).unwrap(),
+            LedgerDisposition::Replay(found) if found == receipt
+        ),
+        "a two-week-old receipt of the live incarnation still replays"
+    );
+}

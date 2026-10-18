@@ -97,6 +97,9 @@ pub enum UnavailableReasonV1 {
     Draining,
     Maintenance,
     Faulted,
+    /// The store's file was unlinked or replaced under the runtime, which
+    /// closed every connection to it.
+    FileLost,
     SnapshotExpired,
     SnapshotNotRetained,
     WatermarkNotReached,

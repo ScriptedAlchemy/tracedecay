@@ -14,11 +14,11 @@ use tracedecay_contracts::{
     Deadline, DisclosureClass, ExecutionTopologyViewV1, GenerateProposalRequest, RequestContext,
     RequestId, ResolvedScope, StartWorkAttemptCommand, WorkAttemptListCoverageV1,
     WorkAttemptService, WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1,
-    WorkIntelligenceServiceV1, WorkPlacementReadingV1, WorkPlacementService,
-    WorkPlacementStorageError, WorkPlacementStoragePort, WorkProductAttemptServiceV1,
-    WorkProductAuthorizedRelationScopeV1, WorkProductSelectionScopeV1, WorkRoutingSnapshotErrorV1,
-    WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, WorkTopologyViewRequestV1,
-    execution_topology_view,
+    WorkIntelligenceServiceV1, WorkPlacementPublicationPort, WorkPlacementReadingV1,
+    WorkPlacementService, WorkPlacementStorageError, WorkPlacementStoragePort,
+    WorkProductAttemptServiceV1, WorkProductAuthorizedRelationScopeV1, WorkProductSelectionScopeV1,
+    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1,
+    WorkTopologyViewRequestV1, execution_topology_view,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
@@ -105,24 +105,25 @@ impl WorkPlacementStoragePort for PlacementStore {
             .cloned())
     }
 
-    fn target_holder(
+    fn target_held_by_other(
         &self,
         authority: &WorkAuthority,
+        identity: &WorkPlacementIdentityV1,
         root: &str,
-    ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError> {
-        Ok(self
-            .placements
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|((stored_authority, _), placement)| {
-                stored_authority == authority
+    ) -> Result<bool, WorkPlacementStorageError> {
+        Ok(self.placements.lock().unwrap().iter().any(
+            |((stored_authority, stored_identity), placement)| {
+                stored_authority.project_id() == authority.project_id()
+                    && stored_authority.repository_id() == authority.repository_id()
+                    && (stored_authority != authority || stored_identity != identity)
                     && placement.holds_target()
                     && placement.target().root() == Some(root)
-            })
-            .map(|((_, identity), _)| identity.clone()))
+            },
+        ))
     }
+}
 
+impl WorkPlacementPublicationPort for PlacementStore {
     fn publish_placement(
         &self,
         authority: &WorkAuthority,

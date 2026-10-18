@@ -955,19 +955,23 @@ impl CodeIndexSchedulerRegistryV1 {
                     tokio::pin!(notified);
                     // Parked only while registered with no banked permit: a
                     // banked permit resolves the wait at once, so the worker was
-                    // never idle.
-                    if !notified.as_mut().enable() {
+                    // never idle. Shutdown stores its flag before it notifies,
+                    // so checking the flag once registered also ends a worker
+                    // whose last pass drained shutdown's permit, as
+                    // `take_pending_arrival` does for a terminal park.
+                    if !notified.as_mut().enable() && !worker_shutting_down.load(Ordering::Acquire)
+                    {
                         worker_residency.release_decode_when_parked(&worker_resident_owners);
                         super::CodeIndexWorkerPhaseV1::enter(
                             &worker_phase_signal,
                             super::CodeIndexWorkerPhaseV1::Parked,
                         );
+                        tracing::Instrument::instrument(
+                            notified,
+                            tracing::trace_span!("daemon.code_index.wake_wait"),
+                        )
+                        .await;
                     }
-                    tracing::Instrument::instrument(
-                        notified,
-                        tracing::trace_span!("daemon.code_index.wake_wait"),
-                    )
-                    .await;
                 }
                 worker_owner_headroom_seen = worker_owner_headroom_seen.max(
                     worker_residency
@@ -996,6 +1000,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 // another actor and would reset if this loop state were lost
                 // while the slot remained.
                 if publication_authority_is_terminal(&worker_convergence_park) {
+                    #[cfg(test)]
+                    Self::wait_for_terminal_suppression_gate(&worker_project_root).await;
                     sealed_successor = None;
                     let _ = Self::take_pending_arrival(
                         &worker_pending_wake,

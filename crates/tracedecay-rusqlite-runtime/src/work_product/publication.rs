@@ -9,14 +9,19 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::WorkProductEventV1;
 
-use super::{fold_graph, load_journal, owner_params, recovered_graph_digest, selection_covers};
+use super::{
+    FromStoreFault, StoreFault, fold_graph, insert_fault, load_journal, owner_params,
+    recovered_graph_digest, selection_covers,
+};
 use crate::exact_sql::ExactSqlValue;
-use crate::work::{exact_sql_statement, exact_sql_text, registered_work_query};
+use crate::work::{
+    RegisteredWorkWrite, exact_sql_statement, exact_sql_text, registered_work_query,
+};
 
 type PortError = WorkProductEventPortErrorV1;
 
 pub(super) fn publish_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     event: &WorkProductEventV1,
 ) -> Result<VerifiedWorkGraphVersionV1, PortError> {
@@ -29,7 +34,7 @@ pub(super) fn publish_in_transaction(
     if context.observed_at() < event.occurred_at() {
         return Err(PortError::Unavailable);
     }
-    let journal = load_journal(transaction, scope).ok_or(PortError::Unavailable)?;
+    let journal = load_journal(transaction, scope).map_err(PortError::from_fault)?;
     let entry = journal
         .iter()
         .find(|entry| entry.event.event_id() == event.event_id())
@@ -57,17 +62,18 @@ pub(super) fn publish_in_transaction(
             )])
             .collect(),
     )
-    .map_err(|_| PortError::Unavailable)?;
+    .map_err(PortError::from_fault)?;
     if let Some(row) = existing.rows.first() {
         // Republishing is idempotent when it recovers the identical graph and
         // a conflict otherwise: two different graphs at one version is the
         // state this authority exists to make impossible.
-        let stored = exact_sql_text(&row.values, 0).ok_or(PortError::Unavailable)?;
+        let stored = exact_sql_text(&row.values, 0)
+            .ok_or_else(|| PortError::from_fault(StoreFault::Corrupt("published digest row")))?;
         if stored != digest.as_str() {
             return Err(PortError::VersionConflict);
         }
         let published = super::load_published_versions(transaction, scope)
-            .ok_or(PortError::Unavailable)?
+            .map_err(PortError::from_fault)?
             .into_iter()
             .find(|published| published.graph_version == event.result_graph_version())
             .ok_or(PortError::Unavailable)?;
@@ -75,7 +81,7 @@ pub(super) fn publish_in_transaction(
     }
 
     transaction
-        .execute(
+        .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_product_graph_versions_v1 (
                     owner_brain_id, owner_profile_id, graph_version, event_sequence,
@@ -102,9 +108,9 @@ pub(super) fn publish_in_transaction(
                     ])
                     .collect(),
             )
-            .map_err(|_| PortError::Unavailable)?,
+            .map_err(PortError::from_fault)?,
         )
-        .map_err(|_| PortError::VersionConflict)?;
+        .map_err(|error| insert_fault(error, PortError::VersionConflict))?;
 
     VerifiedWorkGraphVersionV1::new(
         event.result_graph_version(),

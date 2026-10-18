@@ -152,14 +152,14 @@ if ! python3 "$here/grade.py" --lint-only --scenarios "$EVAL_SCENARIOS_DIR"; the
 fi
 
 # Hint-signature drift guard: channel attribution mirrors distinctive fragments
-# of crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs. If that wording
+# of crates/tracedecay-policy/src/intent_catalog.rs. If that wording
 # drifted and the mirror did not, a live run would silently misclassify
 # hint-driven adoptions as steering, so fail fast here, before building
 # fixtures or spending a token. Skips cleanly when run from a published package
 # without the Rust source tree.
-echo "checking hint signatures against tool_hints.rs..."
+echo "checking hint signatures against intent_catalog.rs..."
 if ! python3 "$here/grade.py" --check-hints; then
-  echo "abort: hint signatures drifted from crates/tracedecay-agent-hosts/src/hooks/tool_hints.rs (see above)." >&2
+  echo "abort: hint signatures drifted from crates/tracedecay-policy/src/intent_catalog.rs (see above)." >&2
   exit 3
 fi
 
@@ -518,9 +518,10 @@ provision_variant() {
   [[ -d "$d" ]] && return 0
   mkdir -p "$work/plugins"
   cp -R "$plugin_src" "$d"
-  # Point the hook command at the resolved binary (install-time substitution).
+  # Point the hook command at the resolved binary and deploy it where Claude
+  # loads plugin hooks, as the Claude installer does.
   if [[ -f "$d/hooks/hooks-claude.json" ]]; then
-    sed -i "s#__TRACEDECAY_BIN__#$TD#g" "$d/hooks/hooks-claude.json"
+    sed "s#__TRACEDECAY_BIN__#$TD#g" "$d/hooks/hooks-claude.json" > "$d/hooks/hooks.json"
   fi
   # Plugin `commands/` are exposed to Claude as `tracedecay:*` skills too (the
   # Skill tool launches them and their bodies name tracedecay tools), so a
@@ -574,8 +575,9 @@ for fn in sorted(os.listdir(sdir)):
     if filt and s["id"] not in filt:
         continue
     for host in s.get("hosts", []):
-        # emit: id \t host \t fixture \t prompt
-        print("\t".join([s["id"], host, s.get("fixture", "main"), s["prompt"].replace("\t", " ").replace("\n", " ").replace("\r", " ")]))
+        # emit: id \t host \t fixture \t effect(0|1) \t prompt
+        effect = "1" if s.get("outcome", {}).get("files") else "0"
+        print("\t".join([s["id"], host, s.get("fixture", "main"), effect, s["prompt"].replace("\t", " ").replace("\n", " ").replace("\r", " ")]))
 PY
 
 # ---- run each scenario x host x condition ---------------------------------- #
@@ -585,7 +587,7 @@ run_claude() {
   local allowed="Read,Glob,Grep,Task,Agent,Skill,mcp__tracedecay__*,mcp__plugin_tracedecay_graph__*,Bash(tracedecay tool *),Bash($TD tool *)"
   ( cd "$fixture" && HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" PATH="$EVAL_PATH" \
       timeout "$SCENARIO_TIMEOUT" claude -p "$prompt" \
-      --output-format stream-json --verbose \
+      --output-format stream-json --verbose --include-hook-events \
       --model "$model" \
       --permission-mode dontAsk --allowedTools "$allowed" \
       --no-session-persistence \
@@ -609,10 +611,31 @@ out_base_for() {
   fi
 }
 
+# Mutation scenarios are graded on the resulting source, not on what the agent
+# says. Snapshot every src/**/*.rs file right after the run, then restore src/ to
+# the committed fixture so the next run starts clean. Effect scenarios run alone
+# (see the main loop) because the fixture directory is shared.
+snapshot_effects() {
+  python3 - "$1" "$2" <<'PY'
+import json, os, sys
+root, out = sys.argv[1:3]
+files = {}
+for d, _, names in os.walk(os.path.join(root, "src")):
+    for name in names:
+        if name.endswith(".rs"):
+            path = os.path.join(d, name)
+            with open(path, errors="replace") as f:
+                files[os.path.relpath(path, root)] = f.read()
+with open(out, "w") as f:
+    json.dump(files, f)
+PY
+  git -C "$1" checkout -q -- src && git -C "$1" clean -fdq -- src
+}
+
 # One live scenario x host x model x condition x repetition. Runs in a
 # background subshell when PARALLEL > 1, so it must not mutate shared state.
 run_one() {
-  local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7" variant="$8"
+  local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7" variant="$8" effect="${9:-0}"
   local fdir out err start end rc=0 timed_out=false home="$CLAUDE_EVAL_HOME" learned=""
   if [[ -n "$variant" ]]; then
     home="${VARIANT_HOME[$variant]}"
@@ -631,6 +654,7 @@ run_one() {
   fi
   end=$(date +%s)
   [[ $rc -eq 124 ]] && timed_out=true
+  [[ "$effect" == 1 ]] && snapshot_effects "$fdir" "$run_dir/${base}.effects.json"
   cat > "$run_dir/${base}.meta.json" <<JSON
 {"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","repeated_query_hints":"$REPEATED_QUERY_HINTS","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out$learned}
 JSON
@@ -640,7 +664,7 @@ JSON
 for cond in $CHANNELS; do
 # Provision each condition once, before any concurrent run could race on it.
 [[ "$have_plugin" == "1" ]] && provision_variant "$cond"
-while IFS=$'\t' read -r sid host fixture prompt; do
+while IFS=$'\t' read -r sid host fixture effect prompt; do
   [[ -z "$sid" ]] && continue
   case " $HOSTS " in *" $host "*) : ;; *) continue ;; esac
   # Ablation of hooks/skills is Claude-only (Codex hooks/skills live host-global
@@ -672,11 +696,14 @@ while IFS=$'\t' read -r sid host fixture prompt; do
     : >"$run_dir/${base}.stdout.jsonl"
     continue
   fi
-  if [[ "$PARALLEL" -gt 1 ]]; then
+  if [[ "$effect" == 1 ]]; then
+    wait  # nothing else may touch the shared fixture while it is mutated
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 1
+  elif [[ "$PARALLEL" -gt 1 ]]; then
     while (( $(jobs -rp | wc -l) >= PARALLEL )); do wait -n || true; done
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" &
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0 &
   else
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant"
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" 0
   fi
   done
   done

@@ -8,7 +8,6 @@ use parking_lot::{
     RawRwLock, RwLock as ParkingRwLock, RwLockUpgradableReadGuard,
     RwLockWriteGuard as ParkingRwLockWriteGuard,
 };
-use tracedecay_domain::process_heap::OwnerHeapV1;
 
 use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
@@ -90,10 +89,6 @@ pub(crate) struct Inner {
     serving_pins: AtomicUsize,
     pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
-    /// The heap a lazily opened engine was built in and the bytes of the
-    /// pages it occupied when the open returned. Declared after `database`,
-    /// so dropping the engine empties the heap before the heap is deleted.
-    engine_heap: Mutex<Option<(OwnerHeapV1, u64)>>,
     engine_usage_bytes: Mutex<Option<u64>>,
 }
 
@@ -217,23 +212,6 @@ impl Inner {
             + self.adjacency_ids.heap_bytes()
             + self.projection_approvals.heap_bytes()
     }
-
-    /// Bytes of the pages the engine's open left in its own heap.
-    fn engine_heap_bytes(&self) -> u64 {
-        self.engine_heap
-            .lock()
-            .map_or(0, |heap| heap.as_ref().map_or(0, |(_, bytes)| *bytes))
-    }
-
-    /// Delete the engine's heap once the engine itself is dropped, returning
-    /// every page it built on whichever thread freed it.
-    fn release_engine_heap(&self) {
-        let heap = self.engine_heap.lock().map_or_else(
-            |poisoned| poisoned.into_inner().take(),
-            |mut heap| heap.take(),
-        );
-        drop(heap);
-    }
 }
 
 pub struct GraphSnapshot {
@@ -248,6 +226,14 @@ pub enum GraphDbRuntimeState {
     Closed,
     DurabilityUncertain,
 }
+
+/// Least uncheckpointed WAL history at which a commit checkpoints.
+///
+/// A checkpoint rewrites the whole container, so the trigger is the larger of
+/// this floor and the container's size: the WAL stays within one container's
+/// worth of history and rewrites cost at most one container per container of
+/// writes.
+const GRAFEO_WAL_CHECKPOINT_BYTES: u64 = 128 * 1024 * 1024;
 
 impl std::fmt::Debug for GraphDb {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -316,7 +302,6 @@ impl GraphDb {
                 serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
-                engine_heap: Mutex::new(None),
                 engine_usage_bytes: Mutex::new(None),
             }),
         });
@@ -352,7 +337,6 @@ impl GraphDb {
                 serving_pins: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
-                engine_heap: Mutex::new(None),
                 engine_usage_bytes: Mutex::new(None),
             }),
         }))
@@ -1111,7 +1095,6 @@ impl GraphDb {
             ContainerIdentity::from_engine(&database)
         };
         drop(database);
-        self.inner.release_engine_heap();
         if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
@@ -1252,7 +1235,6 @@ impl GraphDb {
         test_seams::fire(test_seams::Seam::MarkerPublish);
         let closed = ContainerIdentity::from_engine(&database_to_close);
         drop(database_to_close);
-        self.inner.release_engine_heap();
         if let Err(error) = self.inner.markers.release(closed) {
             let _ = error;
         }
@@ -1370,16 +1352,66 @@ impl GraphDb {
         // would short-circuit as exact publication replay without ever
         // repairing it. Settlement failures instead poison the handle and
         // surface as typed DurabilityUncertain.
-        if self.inner.durability == GraphDurability::WalSync
-            && let Err(error) = {
+        if self.inner.durability == GraphDurability::WalSync {
+            if let Err(error) = {
                 let _span = tracing::trace_span!("graph_db.wal.sync").entered();
                 sync_wal(database)
+            } {
+                self.inner.poisoned.store(true, Ordering::Release);
+                return Err(error);
             }
-        {
-            self.inner.poisoned.store(true, Ordering::Release);
-            return Err(error);
+            self.checkpoint_wal_past_container(database)?;
         }
         Ok(commit)
+    }
+
+    /// Checkpoints the WAL once its uncheckpointed history passes the larger
+    /// of [`GRAFEO_WAL_CHECKPOINT_BYTES`] and the container's size. The
+    /// caller holds the exclusive snapshot claim and the database lock, as
+    /// every commit does.
+    fn checkpoint_wal_past_container(&self, database: &GrafeoDB) -> Result<(), GraphDbError> {
+        let status = database.wal_status();
+        let Some(file_manager) = database.file_manager().filter(|_| status.enabled) else {
+            return Ok(());
+        };
+        let wal_bytes = u64::try_from(status.size_bytes).unwrap_or(u64::MAX);
+        if wal_bytes <= GRAFEO_WAL_CHECKPOINT_BYTES {
+            return Ok(());
+        }
+        let sidecar = file_manager.sidecar_wal_path();
+        let threshold = file_manager
+            .file_size()
+            .map_or(GRAFEO_WAL_CHECKPOINT_BYTES, |container| {
+                container.max(GRAFEO_WAL_CHECKPOINT_BYTES)
+            });
+        if crate::recovery::uncheckpointed_wal_bytes(&sidecar) <= threshold {
+            return Ok(());
+        }
+        self.inner.markers.mark_container_mutated();
+        self.inner.invalidate_store_epoch_caches();
+        if let Err(error) = {
+            let _span = tracing::trace_span!("graph_db.wal.checkpoint").entered();
+            database.wal_checkpoint()
+        } {
+            // Grafeo persists the checkpoint record before it rewrites the
+            // container, so a failed rewrite can leave recovery skipping WAL
+            // history the container never received.
+            self.inner.poisoned.store(true, Ordering::Release);
+            return Err(GraphDbError::DurabilityUncertain {
+                message: format!(
+                    "Grafeo WAL checkpoint failed; durable outcome cannot be established: {error}"
+                ),
+            });
+        }
+        tracing::info!(
+            event = "graph_wal_checkpoint",
+            phase = "commit",
+            container = %self.container_label(),
+            wal_bytes,
+            wal_bytes_after = database.wal_status().size_bytes,
+            "checkpointed WAL history into the graph container"
+        );
+        Ok(())
     }
 
     /// Runs `read` against the open database and refuses its answer as
@@ -1519,8 +1551,7 @@ impl GraphDb {
                     let usage = *usage.get_or_insert_with(|| {
                         u64::try_from(database.memory_usage().total_bytes).unwrap_or(u64::MAX)
                     });
-                    let engine = usage.max(self.inner.engine_heap_bytes());
-                    engine.saturating_add(
+                    usage.saturating_add(
                         u64::try_from(self.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX),
                     )
                 })
@@ -1705,12 +1736,7 @@ impl GraphDb {
                 )
             })?;
         validated.preexisting_store = persistent_store_state == PersistentGraphStoreState::Existing;
-        // The engine's long-lived state is built in a heap of its own: its
-        // pages then hold nothing else, are charged as the engine's, and are
-        // returned whole when it hibernates.
-        let (opened, heap) =
-            OwnerHeapV1::build(|| open_lazy_engine(&validated, persistent_store_state));
-        let opened = opened?;
+        let opened = open_lazy_engine(&validated, persistent_store_state)?;
         if let Some(path) = validated.config.path.as_deref() {
             crate::sealed_store::sweep_abandoned_sealed_staging(path);
         }
@@ -1732,11 +1758,6 @@ impl GraphDb {
         self.inner.markers.bind(opened.identity);
         self.inner.invalidate_store_epoch_caches();
         *database = Some(opened.database);
-        *self
-            .inner
-            .engine_heap
-            .lock()
-            .map_err(|_| GraphDbError::unavailable("graph engine heap lock is poisoned"))? = heap;
         *self
             .inner
             .lazy_store_state

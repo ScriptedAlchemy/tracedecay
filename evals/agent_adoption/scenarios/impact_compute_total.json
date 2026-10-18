@@ -22,16 +22,33 @@
       "Read"
     ]
   },
-  "ground_truth": [
-    "place_order",
-    "pricing_test"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states place_order",
+          "pattern": "\\bplace_order\\b"
+        },
+        {
+          "id": "states pricing_test",
+          "pattern": "\\bpricing_test\\b"
+        }
+      ],
+      "forbidden": [
+        {
+          "id": "tells the user not to run pricing_test",
+          "pattern": "(?<!\\bnot )(?<!n't )\\b(?:do not|don't|dont|never|no need to|need not|skip|avoid|ignore)\\s+(?:(?:run|rerun|re-run|execute|use|bother|re-?test)\\w*\\s+)?(?:with\\s+)?(?:the\\s+|any\\s+)?pricing_test\\b"
+        },
+        {
+          "id": "calls pricing_test irrelevant",
+          "pattern": "\\bpricing_test\\b[^.\\n]{0,30}\\b(?:is|are)\\s+(?:irrelevant|unrelated|unnecessary|not (?:needed|relevant|required|useful))"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 6,
   "notes": "Blast radius: place_order (caller) and pricing_test (covering test).",
   "expected_skill": "assessing-impact",
-  "allowed_skills": [
-    "assessing-impact",
-    "find-impact"
-  ],
   "max_tracedecay_calls": 6
 }

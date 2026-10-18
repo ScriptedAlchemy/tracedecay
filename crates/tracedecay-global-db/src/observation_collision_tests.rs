@@ -4041,3 +4041,143 @@ async fn rescan_behind_a_retained_row_reports_the_ledger_disagreement() {
         CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::OutOfScope)
     ));
 }
+
+/// Output ownership is durable provenance, read fresh by every projection.
+///
+/// Retiring a quarantined projection removes the output the observation
+/// created and its provenance through the same writer connection that
+/// projects (`retire_quarantined_projection`). The next observation of that
+/// output must then create it, exactly as it would on a freshly opened store,
+/// instead of acting on ownership the writer remembered from before.
+#[asupersync::test]
+async fn retired_output_is_created_by_the_next_observation_of_it() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new("session.retired-output-owner").unwrap();
+    let record_id = "record.retired-output-owner";
+    let output_message_id = format!("message.{record_id}");
+    let (first, write) = collision_candidate(
+        &session_id,
+        record_id,
+        1,
+        "first rendering",
+        "receipt.retired-output-owner.first",
+        None,
+    );
+    store.persist_observation(write).await.unwrap();
+    assert!(matches!(
+        store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
+            params![COLLISION_PROVIDER, output_message_id.as_str()],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "DELETE FROM observation_projection_provenance
+             WHERE projector_version = ?1 AND observation_id = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                first.observation_id().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO observation_projection_dispositions
+                (projector_version, observation_id, receipt_id, reason)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                first.observation_id().as_str(),
+                first.receipt().receipt().receipt_id().as_str(),
+                ProjectionSkipReason::SanitizationRefused.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let cursor = store
+        .get_source_cursor(first.source(), first.scope())
+        .await
+        .unwrap();
+    let provider = ProviderId::new(COLLISION_PROVIDER).unwrap();
+    let next_record = ObservationId::new("record.retired-output-owner.next").unwrap();
+    let range = ObservationSourceRangeV1::new(1, 2).unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        provider.clone(),
+        "message",
+        next_record.clone(),
+        CanonicalObservationRelationsV1::new(session_id.clone())
+            .with_message_id(ObservationId::new(output_message_id.as_str()).unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": "second rendering"}),
+            model: None,
+            timestamp: Some(1_750_000_001),
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    let second = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::for_provider(provider, session_id.clone()).unwrap(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            next_record,
+        )
+        .unwrap(),
+        fixture_receipt("receipt.retired-output-owner.second", &payload),
+        RetentionClass::new("retention.collision-test").unwrap(),
+        payload,
+    )
+    .unwrap();
+    assert_ne!(second.observation_id(), first.observation_id());
+    store
+        .persist_observation(anchored_write_for(second.clone(), cursor))
+        .await
+        .unwrap();
+    let outcome = store
+        .project_observation(second.observation_id())
+        .await
+        .expect("the next observation of a retired output must project");
+    assert!(
+        matches!(outcome, ProjectionPersistOutcome::Projected(_)),
+        "{outcome:?}"
+    );
+
+    let owners = provenance_rows(&runtime)
+        .await
+        .into_iter()
+        .filter(|row| row.5 == output_message_id)
+        .map(|row| (row.1, row.7))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        vec![(second.observation_id().as_str().to_owned(), 1)],
+        "the retired output's next observation must own and create it"
+    );
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
+}

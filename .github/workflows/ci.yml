@@ -35,8 +35,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Drafts run cheap gates. Ready PRs and pushes run the Bazel Linux authority;
-  # dispatch can request additional OS and stock-host journeys.
+  # Drafts run repository and frontend checks. Ready PRs and pushes also run
+  # the Bazel Linux authority; dispatch can request OS and host journeys.
   scope-gate:
     name: Scope gate
     permissions:
@@ -124,6 +124,9 @@ jobs:
   # runner for a couple of minutes of work; on 20 free slots that is three
   # queue entries per push doing what one does.
   gates:
+    permissions:
+      contents: read
+      id-token: write
     name: Repository gates
     runs-on: ubuntu-latest
     # The rustfmt build's crate_universe splice clones git-pinned crates from
@@ -140,6 +143,18 @@ jobs:
           node-version: 26
 
       - uses: ./.github/actions/setup-pnpm
+
+      # Reject invalid commit messages before fetching toolchains or running
+      # repository-wide checks, without rejudging published history.
+      - name: Validate commit messages
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/lint-ci-commits.sh
 
       - name: Reject tracked ignored files
         run: scripts/check-release-pr-integrity.sh HEAD HEAD
@@ -164,6 +179,13 @@ jobs:
 
       - name: Test the unused tool-context matching rules
         run: python3 scripts/test-measure-unused-tool-context.py
+
+      # Configure the output base and restore caches before the first Bazel
+      # invocation so this job does not start two independent Bazel servers.
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: ci-format-linux
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
 
       - name: Test the ranked-tail trim replay against the Rust rule cases
         run: bazel run //scripts:test-measure-ranked-tail-trim.py
@@ -190,6 +212,7 @@ jobs:
           python3 scripts/test-package-release-archive.py
           python3 scripts/test-plan-release-recovery.py
           python3 scripts/test-check-release-artifacts.py
+          python3 scripts/test-update-release-checksums.py
           python3 scripts/test-neutralize-release-pr-closing-keywords.py
           bash scripts/test-check-distribution-clean-source.sh
           bash scripts/test-check-distribution-snapshot.sh
@@ -206,10 +229,6 @@ jobs:
           bash tests/release_pr_integrity_test.sh
           bash tests/dashboard_bundle_check_test.sh
           bash tests/dashboard_digests_check_test.sh
-
-      - uses: ./.github/actions/setup-bazel
-        with:
-          cache-key: ci-format-linux
 
       - name: Check formatting
         run: bazel build --config=ci //:rustfmt_check
@@ -238,16 +257,10 @@ jobs:
           python3 scripts/test-check-ambient-tokio.py
           python3 scripts/check-ambient-tokio.py
 
-      # Lint proposed commits without rejudging already-published history.
-      - name: Validate commit messages
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: scripts/lint-ci-commits.sh
+      - name: Test and check rusqlite stays inside storage owners
+        run: |
+          python3 scripts/test-check-rusqlite-storage-boundary.py
+          python3 scripts/check-rusqlite-storage-boundary.py
 
   # The macOS and Windows lanes run the same Bazel workspace the Linux
   # authority does, on demand: they exercise target-specific behavior the
@@ -295,7 +308,6 @@ jobs:
         id: bazel
         with:
           cache-key: ci-macos-test
-          test-tools: "true"
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
@@ -328,6 +340,9 @@ jobs:
   # family previously evicted the budget). root-b and workspace-c catch
   # unlisted targets in their groups.
   linux-test:
+    permissions:
+      contents: read
+      id-token: write
     name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -468,9 +483,11 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-test-v2
+          # Tailscale independently checks this repository and immutable actor
+          # ID. This condition avoids requesting credentials for fork PRs.
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
           # Prefer v2; keep legacy prefixes as restore fallbacks if still present.
           extra-restore-keys: ci-linux-test,ci-linux-workspace-test
-          test-tools: "true"
 
       # Root suites exercise latency-sensitive daemon journeys. Finish their
       # compilation before testing so compiler work cannot consume that budget.
@@ -479,7 +496,7 @@ jobs:
         run: bazel build --config=ci ${{ matrix.targets }}
 
       - name: Build and test this shard
-        run: bazel test --config=ci ${{ matrix.test_resources }} ${{ matrix.targets }}
+        run: bazel test --config=ci ${{ steps.bazel.outputs.fleet-enabled == 'true' && '--default_test_resources=cpu=HOST_CPUS' || matrix.test_resources }} ${{ matrix.targets }}
 
       - name: Upload failed test diagnostics
         if: failure()
@@ -534,7 +551,6 @@ jobs:
         id: bazel
         with:
           cache-key: ci-windows-test
-          test-tools: "true"
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
@@ -561,6 +577,9 @@ jobs:
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:
+    permissions:
+      contents: read
+      id-token: write
     name: Clippy
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -577,6 +596,9 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-clippy
+          # Tailscale independently checks this repository and immutable actor
+          # ID. This condition avoids requesting credentials for fork PRs.
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
           extra-restore-keys: ci-linux-test-v2
 
       - name: Run blocking Clippy policy
@@ -642,6 +664,9 @@ jobs:
   # mimalloc allocator, the embedded dashboard, opt-level 3) would otherwise
   # first appear while a release is being cut.
   shipped-cli:
+    permissions:
+      contents: read
+      id-token: write
     name: Shipped CLI build (x86_64-linux)
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -651,25 +676,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build the shipped binary
+        id: cli
         uses: ./.github/actions/build-cli
         with:
           config: release
           dest: target/x86_64-unknown-linux-gnu/release
           cache-key: release-x86_64-unknown-linux-gnu
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
 
-      - name: Smoke-run the shipped binary
+      - name: Read immutable packaging inputs
+        id: packaging
         shell: bash
         run: |
           set -euo pipefail
-          binary="target/x86_64-unknown-linux-gnu/release/tracedecay"
-          test -x "$binary"
-          "$binary" --version
-          "$binary" --help >/dev/null
+          echo "tag=v$(cat version.txt)" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Package and exercise the shipped artifacts
+        uses: ./.github/actions/package-release
+        with:
+          binary: ${{ steps.cli.outputs.path }}
+          tag: ${{ steps.packaging.outputs.tag }}
+          asset-prefix: tracedecay-${{ steps.packaging.outputs.tag }}
+          platform: x86_64-linux
+          archive: tar.gz
+          epoch: ${{ steps.packaging.outputs.epoch }}
+
+  # Frontend checks require no Rust compilation and must also validate drafts.
+  # Do not serialize them behind repository-wide Rust formatting and gates.
   dashboard:
     name: Dashboard
-    needs: [scope-gate, gates]
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -680,6 +716,18 @@ jobs:
           node-version: "26"
 
       - uses: ./.github/actions/setup-pnpm
+
+      - name: Typecheck dashboard consumers
+        working-directory: dashboard
+        run: pnpm run typecheck
+
+      - name: Typecheck TypeScript SDK
+        working-directory: sdks/typescript
+        run: pnpm run typecheck
+
+      - name: Run TypeScript SDK unit tests
+        working-directory: sdks/typescript
+        run: pnpm test
 
       - name: Build dashboard assets
         working-directory: dashboard

@@ -7,11 +7,11 @@
 //! for the next call. It runs on a corpus larger than one candidate batch and
 //! checks the result the caller sees.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, mpsc};
-use std::thread::ThreadId;
 use std::time::Duration;
 
 use rmcp::ServiceExt;
@@ -65,16 +65,21 @@ impl CodeIndexMcpReadGrantV1 for FixtureGrant {
     }
 }
 
+thread_local! {
+    /// Set while this thread polls the executor's own future.
+    static POLLING_EXECUTOR: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Pause the blocking candidate scan at one control observation so the
 /// transport can deliver `notifications/cancelled` while the permit is held.
 ///
-/// The runtime thread answers immediately. `spawn_blocking` is a different
-/// thread, which is the scan. This test stays on the current-thread runtime
-/// so that distinction is the thread id captured at construction.
+/// The executor future checks the route itself before it takes the permit and
+/// on each settlement poll. Those checks run on a native runtime worker at
+/// load-dependent points relative to the scan, so they answer immediately.
+/// Every other call is a scan checkpoint on the scan's blocking thread.
 #[derive(Clone)]
 struct PausingAdmission {
     authority: CodeIndexSearchAuthorityV1,
-    runtime_thread: ThreadId,
     scan_checkpoints: Arc<AtomicUsize>,
     pause_at: Arc<AtomicUsize>,
     scan_paused: Arc<tokio::sync::Notify>,
@@ -85,7 +90,7 @@ impl CodeIndexMcpReadAdmissionV1 for PausingAdmission {
     type Grant = FixtureGrant;
 
     fn route_is_registered(&self) -> bool {
-        if std::thread::current().id() == self.runtime_thread {
+        if POLLING_EXECUTOR.get() {
             return true;
         }
         let observation = self.scan_checkpoints.fetch_add(1, Ordering::SeqCst);
@@ -248,7 +253,6 @@ fn pausing_admission(
 ) -> PausingAdmission {
     PausingAdmission {
         authority,
-        runtime_thread: std::thread::current().id(),
         scan_checkpoints: Arc::new(AtomicUsize::new(0)),
         pause_at: Arc::new(AtomicUsize::new(usize::MAX)),
         scan_paused: Arc::new(tokio::sync::Notify::new()),
@@ -274,9 +278,15 @@ fn observed_executor(
             cancellation: request.cancellation.clone(),
             settled,
         });
-        let search = inner(request);
+        let mut search = inner(request);
         Box::pin(async move {
-            let outcome = search.await;
+            let outcome = std::future::poll_fn(|cx| {
+                POLLING_EXECUTOR.set(true);
+                let poll = search.as_mut().poll(cx);
+                POLLING_EXECUTOR.set(false);
+                poll
+            })
+            .await;
             let _ = settle.send(outcome.clone());
             outcome
         })

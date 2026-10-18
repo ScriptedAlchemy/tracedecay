@@ -189,6 +189,12 @@ fn native_dispatch_dispositions_remain_distinct_in_telemetry() {
     assert_eq!(spooled.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(spooled.reason_code.as_deref(), Some("hook_v2_spooled"));
     assert_eq!(catchup.status, HostAdmissionStatus::Degraded);
+    assert_eq!(spooled.retryable, Some(true), "the spool replays it");
+    assert_eq!(
+        catchup.retryable,
+        Some(false),
+        "nothing replays a dropped event"
+    );
     assert_eq!(
         catchup.reason_code.as_deref(),
         Some("hook_v2_catchup_required")

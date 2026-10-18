@@ -1,9 +1,11 @@
+use tracedecay_runtime_core::db::engine::Executor;
+
 use crate::RegisteredGlobalDb;
 
 use super::{
     ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,
-    ObservabilityRollupCompactionV1, SECONDS_PER_DAY, digest_json, encode_u64, validate_day,
-    validate_fragment_json, validate_identifier,
+    ObservabilityRollupCompactionV1, SECONDS_PER_DAY, digest_json, encode_u64, transact_rollup,
+    validate_day, validate_fragment_json, validate_identifier,
 };
 
 const DETAIL_RETENTION_SECONDS: i64 = 30 * SECONDS_PER_DAY;
@@ -105,13 +107,10 @@ impl RegisteredGlobalDb {
         } else {
             request.candidate.content_digest.clone()
         };
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin rollup fragment compaction: {error}"))?;
-        let changed = transaction
-            .execute(
-                "UPDATE observability_rollup_generations
+        transact_rollup(self, "compact rollup fragment", async move |transaction| {
+            let changed = transaction
+                .execute(
+                    "UPDATE observability_rollup_generations
                  SET generation = ?7, content_digest = ?8, fragment_json = ?9,
                      retention_checked_at_seconds = unixepoch(), published_at_seconds = unixepoch()
                  WHERE scope_ref = ?1 AND day_start_seconds = ?2
@@ -119,37 +118,32 @@ impl RegisteredGlobalDb {
                    AND source_watermark = ?5 AND content_digest = ?6
                    AND retention_checked_at_seconds IS NULL
                    AND day_start_seconds + 86400 <= unixepoch() - ?10",
-                tracedecay_runtime_core::db::engine::params![
-                    request.candidate.authorized_scope_ref.as_str(),
-                    request.candidate.day_start_seconds,
-                    encode_u64(request.candidate.generation, "compaction generation")?,
-                    request.candidate.projector_revision.as_str(),
-                    request.candidate.source_watermark,
-                    request.candidate.content_digest.as_str(),
-                    encode_u64(generation, "compacted generation")?,
-                    content_digest,
-                    request.fragment_json.as_str(),
-                    DETAIL_RETENTION_SECONDS
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to CAS compacted rollup fragment: {error}"))?;
-        if changed != 1 {
-            transaction.rollback().await.map_err(|error| {
-                format!("failed to close stale rollup compaction transaction: {error}")
-            })?;
-            return Err("observability rollup compaction candidate changed".to_owned());
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit rollup fragment compaction: {error}"))?;
-        Ok(ObservabilityRollupCompactionReceiptV1 {
-            day_start_seconds: request.candidate.day_start_seconds,
-            previous_generation: request.candidate.generation,
-            generation,
-            changed: changed_fragment,
+                    tracedecay_runtime_core::db::engine::params![
+                        request.candidate.authorized_scope_ref.as_str(),
+                        request.candidate.day_start_seconds,
+                        encode_u64(request.candidate.generation, "compaction generation")?,
+                        request.candidate.projector_revision.as_str(),
+                        request.candidate.source_watermark,
+                        request.candidate.content_digest.as_str(),
+                        encode_u64(generation, "compacted generation")?,
+                        content_digest.as_str(),
+                        request.fragment_json.as_str(),
+                        DETAIL_RETENTION_SECONDS
+                    ],
+                )
+                .await
+                .map_err(|error| format!("failed to CAS compacted rollup fragment: {error}"))?;
+            if changed != 1 {
+                return Err("observability rollup compaction candidate changed".to_owned());
+            }
+            Ok(ObservabilityRollupCompactionReceiptV1 {
+                day_start_seconds: request.candidate.day_start_seconds,
+                previous_generation: request.candidate.generation,
+                generation,
+                changed: changed_fragment,
+            })
         })
+        .await
     }
 }
 

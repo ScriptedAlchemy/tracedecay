@@ -133,15 +133,19 @@ fn system_path_dirs() -> Vec<PathBuf> {
     }
 }
 
-/// A child `PATH` of exactly `fake_bin_dirs`, then the system directories.
+/// A child `PATH` of `fake_bin_dirs`, Bazel's declared Node, then system directories.
 ///
 /// Never derived from the inherited `PATH`: that is where the operator's real
 /// host CLIs live (`~/.local/bin/kimi`, mise/asdf shims, Homebrew), and a
 /// test must not be one lookup away from launching them.
 pub fn hermetic_path<P: AsRef<Path>>(fake_bin_dirs: &[P]) -> OsString {
+    let node_bin = std::env::var_os("NODE")
+        .map(PathBuf::from)
+        .and_then(|node| node.parent().map(Path::to_owned));
     let dirs = fake_bin_dirs
         .iter()
         .map(|dir| dir.as_ref().to_path_buf())
+        .chain(node_bin)
         .chain(system_path_dirs());
     std::env::join_paths(dirs).expect("hermetic PATH entries must be joinable")
 }
@@ -174,6 +178,9 @@ pub fn apply_hermetic_child_env(command: &mut Command, home: &Path) {
         // Host discovery may invoke gh; its telemetry must not write a device
         // identity into the fixture home or send fixture activity upstream.
         .env("GH_TELEMETRY", "0")
+        // The advisory version check would otherwise call the GitHub API from
+        // every spawned daemon (tracedecay_dashboard_api::cloud).
+        .env("TRACEDECAY_NO_RELEASE_CHECK", "1")
         .env("PATH", hermetic_path::<&Path>(&[]));
 }
 

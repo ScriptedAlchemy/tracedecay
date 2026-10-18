@@ -165,7 +165,7 @@ fn candidate(evidence: ContextScoutEvidenceEnvelopeV1) -> ContextScoutCandidateV
         relevance_score: 900,
         suggestion_text: "Review the unresolved Git evidence before editing this symbol."
             .to_owned(),
-        evidence,
+        evidence: evidence.into(),
         expires_at: UtcMicros(1_000),
     }
 }
@@ -277,6 +277,7 @@ fn saved_code_diagnostic_publication_produces_anchored_scout_candidate() {
             mode: ContextScoutRuntimeModeV1::Deterministic,
             model_path: None,
             limits: ContextScoutLimitsV1::bounded_defaults(),
+            intent: None,
         },
         UtcMicros(110),
     );
@@ -284,11 +285,11 @@ fn saved_code_diagnostic_publication_produces_anchored_scout_candidate() {
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].category, ContextScoutCategoryV1::Diagnostic);
     assert_eq!(
-        candidates[0].evidence.sources[0].source,
+        candidates[0].evidence.as_code().unwrap().sources[0].source,
         ContextScoutEvidenceSourceKindV1::Code
     );
     assert_eq!(
-        candidates[0].evidence.sources[0].anchors,
+        candidates[0].evidence.as_code().unwrap().sources[0].anchors,
         vec![id::<RetrievalAnchorId>("anchor.scout.saved-diagnostic")]
     );
     assert_eq!(

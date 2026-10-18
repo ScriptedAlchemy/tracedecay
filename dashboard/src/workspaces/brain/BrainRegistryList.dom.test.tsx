@@ -70,6 +70,9 @@ describe('Brain exact registry list', () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect({ width: 384, height: 80 }));
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(640);
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(384);
+    // virtual-core 3.19.6 reads the scroll element's client size instead of offset size.
+    vi.spyOn(Element.prototype, 'clientHeight', 'get').mockReturnValue(640);
+    vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(384);
     mount(150);
     const list = await screen.findByLabelText('150 registered projects');
     const mounted = within(list).queryAllByRole('button');

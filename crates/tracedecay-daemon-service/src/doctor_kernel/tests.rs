@@ -8,16 +8,12 @@ use tracedecay_agent_hosts::agents::host_bundle::{
     HostBundleComponentDoctorResultV1, HostBundleComponentDoctorStateV1, HostBundleDoctorReportV1,
     HostBundleRegistrationStateV1, HostComponentV1, HostKindV1,
 };
+use tracedecay_contracts::ConfigurationAuthorityReadV1;
 use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, HostComponentDriftV1, HostConformanceV1, HostIntegrationReadV1,
     IngestRefusalV1, LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityReadV1, ObservabilityStateV1, host_integration_finding,
 };
-use tracedecay_contracts::{
-    ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
-    storage::StoreSizeSampleV1,
-};
-use tracedecay_domain::UtcMicros;
 
 use super::*;
 
@@ -228,31 +224,6 @@ fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
          --component context-mcp` (refreshes tracedecay-owned files)",
         "a drift finding names the drifted component and its remedy"
     );
-}
-
-#[test]
-fn synchronous_table_growth_is_bounded_by_observed_store_size() {
-    let sample = |bytes| StorageTelemetryReadV1::Observed {
-        sample: StoreSizeSampleV1 {
-            store: StoreKeyV1::new("sessions.db").unwrap(),
-            page_size_bytes: 4096,
-            page_count: bytes / 4096,
-            freelist_pages: 0,
-            observed_at: UtcMicros(1),
-        },
-    };
-
-    assert!(permits_synchronous_table_growth(&sample(
-        MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES
-    )));
-    assert!(!permits_synchronous_table_growth(&sample(
-        MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES + 4096
-    )));
-    assert!(!permits_synchronous_table_growth(
-        &StorageTelemetryReadV1::Unknown {
-            store: StoreKeyV1::new("sessions.db").unwrap(),
-        }
-    ));
 }
 
 fn engine_status(
@@ -656,5 +627,161 @@ fn verifying_seated_generation_reads_stale_like_status() {
     assert_eq!(
         code_index_mount_state(Some(CodeIndexStalenessStateV1::Indexing)),
         CodeIndexMountStateV1::Indexing
+    );
+}
+
+#[test]
+fn live_graph_container_bytes_sums_every_wal_segment() {
+    let temporary = tempfile::tempdir().unwrap();
+    let container = temporary.path().join("tracedecay.grafeo");
+    std::fs::write(&container, vec![0_u8; 1_000]).unwrap();
+    let wal = temporary.path().join("tracedecay.grafeo.wal");
+    std::fs::create_dir(&wal).unwrap();
+    std::fs::write(wal.join("wal_00000001.log"), vec![0_u8; 200]).unwrap();
+    std::fs::write(wal.join("wal_00000002.log"), vec![0_u8; 30]).unwrap();
+
+    assert_eq!(live_graph_container_bytes(&container), 1_230);
+}
+
+#[test]
+fn a_footprint_budget_is_not_reported_as_an_unmounted_store() {
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1;
+
+    let mut retention = tracedecay_configuration::RetentionConfig::default();
+    retention
+        .store_soft_budgets_bytes
+        .insert("projects/proj_a".to_owned(), 1);
+    assert_eq!(
+        soft_budget_findings(
+            std::collections::BTreeMap::new(),
+            &retention,
+            &BTreeSet::from(["projects/proj_a"]),
+        ),
+        DoctorStorageFamilyReadV1::Absent,
+        "the footprint owns this key"
+    );
+
+    retention
+        .store_soft_budgets_bytes
+        .insert("sessions.db".to_owned(), 1);
+    let DoctorStorageFamilyReadV1::Observed { findings } = soft_budget_findings(
+        std::collections::BTreeMap::new(),
+        &retention,
+        &BTreeSet::from(["projects/proj_a"]),
+    ) else {
+        panic!("an unmounted store budget is still reported");
+    };
+    assert_eq!(findings.len(), 1);
+    assert_eq!(
+        findings[0].finding().state(),
+        DoctorEvidenceStateV1::Unknown
+    );
+}
+
+/// #4097: a WAL whose checkpoint fence expired is a typed Doctor finding that
+/// names the process still holding its read slot.
+#[test]
+fn an_expired_wal_checkpoint_fence_is_a_finding_naming_its_holder() {
+    use tracedecay_runtime_core::shard_runtime::registry::{
+        CheckpointBlocker, CheckpointBlockers, CheckpointPressure, CheckpointWal,
+        PhysicalWriterRuntimeSnapshot,
+    };
+    use tracedecay_runtime_core::shard_runtime::telemetry::{
+        RuntimeTelemetryProjection, ShardRuntimeHealth, ShardRuntimeTelemetry,
+    };
+
+    let admission = tracedecay_store::AdmissionConfigV1::default();
+    let shard = |pressure| ShardRuntimeTelemetry {
+        binding: serde_json::from_value(serde_json::json!({
+            "shard_id": {
+                "brain_id": "brain.doctor-wal",
+                "profile_id": "profile.doctor-wal",
+                "scope": { "kind": "project", "project_id": "project.doctor-wal" }
+            },
+            "incarnation": 1,
+            "authority_epoch": 1
+        }))
+        .unwrap(),
+        state: tracedecay_store::RuntimeMaintenanceStateV1::Ready,
+        queue_budget: admission.per_shard_queue.clone(),
+        global_queue_budget_bytes: admission.global_queue_max_bytes,
+        queued_operations: 0,
+        queued_bytes: 0,
+        writer_present: true,
+        physical_reader_handles: 0,
+        general_reader_waiters: 0,
+        health_reader_waiters: 0,
+        client_leases: 0,
+        writer_busy_events: 0,
+        writer: Some(PhysicalWriterRuntimeSnapshot {
+            checkpoint_pressure: pressure,
+            ..PhysicalWriterRuntimeSnapshot::default()
+        }),
+        wal_bytes: None,
+        wal_budget: admission.wal.clone(),
+        memory_estimate_bytes: None,
+        health: ShardRuntimeHealth::Unknown,
+        pinned_profile: false,
+        idle_for_ms: 0,
+        eviction_eligible: false,
+        eviction_blocker_count: 0,
+    };
+    let wal = CheckpointWal {
+        frames: 1,
+        bytes: 300_000_000,
+    };
+    let projection = RuntimeTelemetryProjection {
+        per_shard_queue_budget: admission.per_shard_queue.clone(),
+        global_queue_budget_bytes: admission.global_queue_max_bytes,
+        wal_budget: admission.wal.clone(),
+        shards: vec![
+            shard(CheckpointPressure::FenceExpired {
+                wal,
+                holders: CheckpointBlockers {
+                    blockers: vec![CheckpointBlocker::ForeignConnection {
+                        pid: 4242,
+                        process: "sqlite3".to_owned(),
+                    }],
+                    omitted: 0,
+                },
+            }),
+            shard(CheckpointPressure::BlockGeneral {
+                wal,
+                blockers: CheckpointBlockers::default(),
+            }),
+            shard(CheckpointPressure::Open),
+        ],
+        aggregate:
+            tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryAggregate::default(),
+    };
+
+    let DoctorStorageFamilyReadV1::Observed { findings } = wal_checkpoint_pinned_read(&projection)
+    else {
+        panic!("an expired fence must be reported");
+    };
+    let [finding] = findings.as_slice() else {
+        panic!(
+            "only the expired fence is a finding, not the fence still inside its limit: {findings:?}"
+        );
+    };
+    assert_eq!(
+        finding.kind(),
+        tracedecay_contracts::doctor::DoctorStorageFindingKindV1::WalCheckpointPinned
+    );
+    assert_eq!(
+        finding.finding().state(),
+        tracedecay_contracts::doctor::DoctorEvidenceStateV1::Degraded
+    );
+    let evidence = format!("{:?}", finding.finding());
+    assert!(
+        evidence.contains("process:sqlite3[4242]") && evidence.contains("wal_bytes=300000000"),
+        "the finding names the holder and the WAL size: {evidence}"
+    );
+    assert_eq!(
+        wal_checkpoint_pinned_read(&RuntimeTelemetryProjection {
+            shards: Vec::new(),
+            ..projection
+        }),
+        DoctorStorageFamilyReadV1::Absent
     );
 }

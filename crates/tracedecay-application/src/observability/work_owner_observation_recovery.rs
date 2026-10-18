@@ -11,7 +11,7 @@ use tracedecay_contracts::{
     WorkOwnerObservationScanCursorV1, WorkOwnerObservationStoragePortV1,
 };
 use tracedecay_runtime_core::native_runtime::{
-    self, NativeTask, NativeTaskOutcome, sleep_until, timeout,
+    self, NativeTask, NativeTaskOutcome, sleep_until, timeout_at,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 
@@ -73,6 +73,17 @@ impl WorkOwnerObservationRecoveryV1 {
     pub async fn shutdown(
         &self,
     ) -> Result<WorkOwnerObservationRecoverySummaryV1, ApplicationContractError> {
+        self.shutdown_until(Instant::now() + RECOVERY_SHUTDOWN_DEADLINE)
+            .await
+    }
+
+    /// Shutdown bounded by the caller's deadline instead of the recovery's
+    /// own budget. The final pass bounds each owner fact by the producer's
+    /// persistence deadline, so a held writer can outlast that budget.
+    pub async fn shutdown_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<WorkOwnerObservationRecoverySummaryV1, ApplicationContractError> {
         {
             let _admission = self.admission.lock().map_err(|_| {
                 ApplicationContractError::Domain(
@@ -109,7 +120,7 @@ impl WorkOwnerObservationRecoveryV1 {
                 )
             })?
             .take();
-        let summary = match timeout(RECOVERY_SHUTDOWN_DEADLINE, result).await {
+        let summary = match timeout_at(deadline, result).await {
             Ok(Ok(summary)) => summary,
             Ok(Err(_)) => {
                 return Err(ApplicationContractError::Domain(
@@ -464,6 +475,39 @@ mod tests {
                 .len(),
             1,
             "shutdown must stop future recovery scans"
+        );
+        producer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_a_held_writer_joins_by_the_callers_deadline() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "owner-observation-shutdown-deadline",
+        )
+        .await;
+        for ordinal in 1..=3 {
+            insert_pending_duplicate(&harness.registered, ordinal).await;
+        }
+        let storage = harness.registered.work_storage().unwrap();
+        let producer = producer(harness.registered.clone());
+        let blocker = harness.registered.begin_write_transaction().await.unwrap();
+        let recovery =
+            WorkOwnerObservationRecoveryV1::start(storage.clone(), Arc::clone(&producer)).unwrap();
+
+        let summary = recovery
+            .shutdown_until(Instant::now() + Duration::from_secs(60))
+            .await
+            .expect("each owner fact misses its persistence deadline, past the 5 s budget");
+        assert_eq!(summary.marked_durable, 0);
+        assert!(summary.failed >= 3, "{summary:?}");
+        blocker.rollback().await.unwrap();
+        assert_eq!(
+            storage
+                .pending_owner_observations(None, NonZeroU16::new(8).unwrap())
+                .unwrap()
+                .len(),
+            3,
+            "unrecovered receipts stay pending for the next start"
         );
         producer.shutdown().await.unwrap();
     }

@@ -42,7 +42,7 @@ async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown
         .mount_session_holder_databases([session_database.clone()])
         .await;
     drop(session_database);
-    service.expire_all().await;
+    service.expire_all(None).await;
 
     registry.cancel_memory_graph_reconciliation_tasks();
     registry
@@ -50,7 +50,9 @@ async fn expire_all_releases_session_holder_graph_lease_before_registry_shutdown
         .await
         .expect("memory graph reconciliation joins");
     registry
-        .close_retained_graph_runtimes_for_shutdown()
+        .close_retained_graph_runtimes_for_shutdown(
+            std::time::Instant::now() + std::time::Duration::from_mins(1),
+        )
         .await
         .expect("session-holder lease is released before graph shutdown");
 }
@@ -95,7 +97,7 @@ async fn context_scout_registry_remounts_same_project_database_after_daemon_rest
             .await
             .unwrap()
     ));
-    first_service.expire_all().await;
+    first_service.expire_all(None).await;
     assert!(
         first_registrar
             .get(&profile_id, &project_id, &project_root)

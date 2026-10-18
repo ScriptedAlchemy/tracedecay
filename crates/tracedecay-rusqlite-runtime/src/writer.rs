@@ -16,7 +16,6 @@ use std::{
         atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc as std_mpsc,
     },
-    thread::{self, JoinHandle},
 };
 
 use asupersync::{
@@ -57,7 +56,9 @@ impl CheckpointBlockerSource for NoCheckpointBlockers {
         CheckpointBlockers::default()
     }
 
-    fn await_released_snapshots(&self) {}
+    fn await_released_snapshots(&self) -> futures_util::future::BoxFuture<'static, ()> {
+        Box::pin(std::future::ready(()))
+    }
 }
 
 impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
@@ -67,7 +68,10 @@ impl RuntimeWriteAuthority for UnrestrictedRuntimeWriteAuthority {
 }
 
 use request::{AcceptedRequest, CheckpointCommand, IncrementalVacuumCommand};
+pub use worker::FILE_PROBE_INTERVAL;
 use worker::Worker;
+
+pub(crate) type FileLossNotice = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone)]
 pub struct CheckpointHandle {
@@ -287,7 +291,6 @@ pub enum WriterStartError {
     LocatorPathIsNotAbsolute,
     LocatorPathMissing,
     LocatorPathIsNotFile,
-    ThreadSpawn(std::io::Error),
     StartupChannelClosed,
     OpenFailed,
     /// Carries the connection-policy stage that actually failed. Collapsing
@@ -318,9 +321,8 @@ impl fmt::Display for WriterStartError {
             }
             Self::LocatorPathMissing => f.write_str("verified SQLite path is missing"),
             Self::LocatorPathIsNotFile => f.write_str("verified SQLite path is not a regular file"),
-            Self::ThreadSpawn(error) => write!(f, "failed to start SQLite writer thread: {error}"),
             Self::StartupChannelClosed => {
-                f.write_str("SQLite writer thread exited before reporting startup")
+                f.write_str("SQLite writer task exited before reporting startup")
             }
             Self::OpenFailed => f.write_str("failed to open verified SQLite store"),
             Self::ConnectionPolicyFailed(detail) => {
@@ -354,7 +356,6 @@ impl Error for WriterStartError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidAdmission(error) => Some(error),
-            Self::ThreadSpawn(error) => Some(error),
             Self::OpenedDatabaseIdentity(error) => Some(error),
             _ => None,
         }
@@ -371,7 +372,7 @@ pub enum WriterActorError {
     StorageFailure(StorageRuntimeErrorV1),
     IncrementalVacuumFailed(String),
     InvalidWorkerOutcome(StorageRuntimeContractErrorV1),
-    ThreadPanicked,
+    TaskPanicked,
 }
 
 impl fmt::Display for WriterActorError {
@@ -385,7 +386,7 @@ impl fmt::Display for WriterActorError {
                 write!(f, "runtime write authority denied at {stage:?}")
             }
             Self::ReplyDropped => f.write_str("SQLite writer stopped before replying"),
-            Self::WaitCancelled => f.write_str("SQLite writer reply wait was cancelled"),
+            Self::WaitCancelled => f.write_str("SQLite writer wait was cancelled"),
             Self::StorageFailure(error) => write!(f, "SQLite writer failed: {error}"),
             Self::IncrementalVacuumFailed(message) => {
                 write!(f, "SQLite incremental vacuum failed: {message}")
@@ -393,7 +394,7 @@ impl fmt::Display for WriterActorError {
             Self::InvalidWorkerOutcome(error) => {
                 write!(f, "SQLite writer returned an invalid outcome: {error}")
             }
-            Self::ThreadPanicked => f.write_str("SQLite writer thread panicked"),
+            Self::TaskPanicked => f.write_str("SQLite writer task panicked"),
         }
     }
 }
@@ -415,6 +416,7 @@ pub enum WriterState {
     Draining = 2,
     Closed = 3,
     Faulted = 4,
+    Lost = 5,
 }
 
 impl WriterState {
@@ -423,6 +425,7 @@ impl WriterState {
             1 => Self::Ready,
             2 => Self::Draining,
             4 => Self::Faulted,
+            5 => Self::Lost,
             _ => Self::Closed,
         }
     }
@@ -433,6 +436,7 @@ impl WriterState {
             Self::Draining => UnavailableReasonV1::Draining,
             Self::Closed => UnavailableReasonV1::Closed,
             Self::Faulted => UnavailableReasonV1::Faulted,
+            Self::Lost => UnavailableReasonV1::FileLost,
         }
     }
 }
@@ -448,7 +452,7 @@ pub struct PersistentWriter {
     incremental_vacuum_sender: Mutex<Option<mpsc::Sender<IncrementalVacuumCommand>>>,
     checkpoint_sender: Mutex<Option<mpsc::Sender<CheckpointCommand>>>,
     shutdown_sender: Option<mpsc::UnboundedSender<()>>,
-    join: Option<JoinHandle<()>>,
+    join: Option<crate::storage_pool::PoolTask>,
     admission: Admission,
     telemetry: WriterTelemetry,
     checkpoint_status: watch::Receiver<CheckpointStatus>,
@@ -472,15 +476,20 @@ impl PersistentWriter {
             admission,
             executor,
             Arc::new(NoCheckpointBlockers),
+            None,
         )
     }
 
+    /// `on_file_lost` runs on the writer's pool task once the probe finds the
+    /// pinned file unlinked or replaced, after the writer stopped and failed
+    /// its queued work; it must not wait.
     pub(crate) fn start_with_checkpoint_blockers<E>(
         runtime: &RuntimeHandle,
         locator: ExistingWriterLocator,
         admission: AdmissionConfigV1,
         executor: E,
         checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
+        on_file_lost: Option<FileLossNotice>,
     ) -> Result<Self, WriterStartError>
     where
         E: StorageOperationExecutor + Send + 'static,
@@ -491,6 +500,7 @@ impl PersistentWriter {
             admission,
             RuntimeWriterPersistence::new(Box::new(executor)),
             checkpoint_blockers,
+            on_file_lost,
         )
     }
 
@@ -500,7 +510,11 @@ impl PersistentWriter {
         config: AdmissionConfigV1,
         persistence: RuntimeWriterPersistence<Box<dyn StorageOperationExecutor + Send>>,
         checkpoint_blockers: Arc<dyn CheckpointBlockerSource>,
+        on_file_lost: Option<FileLossNotice>,
     ) -> Result<Self, WriterStartError> {
+        if crate::storage_pool::on_pool() {
+            return Err(WriterStartError::RuntimeUnavailable);
+        }
         config
             .validate()
             .map_err(WriterStartError::InvalidAdmission)?;
@@ -558,12 +572,11 @@ impl PersistentWriter {
             checkpoint_status: checkpoint_status_tx,
             checkpoint_pressure: checkpoint_pressure_tx,
             checkpoint_blockers,
+            on_file_lost,
             started: started_tx,
         };
-        let join = thread::Builder::new()
-            .name("tracedecay-rusqlite-writer".to_owned())
-            .spawn(move || worker.run())
-            .map_err(WriterStartError::ThreadSpawn)?;
+        let join = crate::storage_pool::spawn(worker.run())
+            .map_err(|_| WriterStartError::RuntimeUnavailable)?;
         match started_rx.recv() {
             Ok(Ok(opened_file_identity)) => Ok(Self {
                 binding,
@@ -614,6 +627,13 @@ impl PersistentWriter {
     }
     pub fn opened_file_identity(&self) -> Option<u64> {
         self.opened_file_identity
+    }
+    /// Whether the worker task ended, which drops its SQLite connection.
+    /// Never waits, so a pool task may call it.
+    pub(crate) fn worker_exited(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_none_or(crate::storage_pool::PoolTask::is_finished)
     }
     pub fn state(&self) -> WriterState {
         WriterState::load(&self.state)
@@ -832,7 +852,10 @@ impl PersistentWriter {
 
     fn join_worker(&mut self) -> Result<(), WriterActorError> {
         if let Some(join) = self.join.take() {
-            join.join().map_err(|_| WriterActorError::ThreadPanicked)?;
+            if crate::storage_pool::on_pool() {
+                return Err(WriterActorError::WaitCancelled);
+            }
+            join.join().map_err(|_| WriterActorError::TaskPanicked)?;
         }
         Ok(())
     }

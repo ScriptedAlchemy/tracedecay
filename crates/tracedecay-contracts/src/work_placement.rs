@@ -47,20 +47,30 @@ pub enum WorkPlacementStorageError {
 }
 
 /// The durable placement relations, one per run.
-pub trait WorkPlacementStoragePort: Send + Sync {
+///
+/// It carries no `Send + Sync` bound so a storage scoped to one writer
+/// transaction can implement it.
+pub trait WorkPlacementStoragePort {
     fn load_placement(
         &self,
         authority: &WorkAuthority,
         identity: &WorkPlacementIdentityV1,
     ) -> Result<Option<WorkPlacementV1>, WorkPlacementStorageError>;
 
-    /// The placement that currently holds `root`, if any. A placement holds its
-    /// root while admitted or quarantined; a released one does not.
-    fn target_holder(
+    /// Whether a placement other than `identity` under `authority` holds
+    /// `root`. A placement holds its root while admitted or quarantined; a
+    /// released one does not.
+    ///
+    /// A root is a physical resource, so the answer spans every actor, policy
+    /// digest, and worktree route in the registered project and repository.
+    /// Holder identity is never returned: the caller learns only that the root
+    /// is occupied.
+    fn target_held_by_other(
         &self,
         authority: &WorkAuthority,
+        identity: &WorkPlacementIdentityV1,
         root: &str,
-    ) -> Result<Option<WorkPlacementIdentityV1>, WorkPlacementStorageError>;
+    ) -> Result<bool, WorkPlacementStorageError>;
 
     /// Whether an admitted or quarantined placement holds this exact root in
     /// this registered scope, regardless of its actor or policy lineage.
@@ -72,7 +82,10 @@ pub trait WorkPlacementStoragePort: Send + Sync {
     ) -> Result<bool, WorkPlacementStorageError> {
         Err(WorkPlacementStorageError::Unavailable)
     }
+}
 
+/// The publication an admission or a release makes.
+pub trait WorkPlacementPublicationPort: WorkPlacementStoragePort {
     /// Publishes `next` under a compare-and-swap on the authority version the
     /// caller read. `expected` is `None` only for the first admission.
     fn publish_placement(
@@ -141,14 +154,16 @@ pub struct WorkPlacementService<S> {
     storage: S,
 }
 
+impl<S> WorkPlacementService<S> {
+    pub const fn new(storage: S) -> Self {
+        Self { storage }
+    }
+}
+
 impl<S> WorkPlacementService<S>
 where
     S: WorkPlacementStoragePort,
 {
-    pub const fn new(storage: S) -> Self {
-        Self { storage }
-    }
-
     /// Cleanup-only exact-scope census, intentionally independent of the
     /// current caller's actor and policy lineage.
     pub fn has_target_holder_in_exact_repository_root(
@@ -159,7 +174,7 @@ where
     ) -> Result<bool, ApplicationProblem> {
         self.storage
             .has_target_holder_in_exact_repository_root(project_id, repository_id, root)
-            .map_err(storage_problem)
+            .map_err(ApplicationProblem::from)
     }
 
     /// Evaluates a placement without changing anything.
@@ -182,57 +197,6 @@ where
         self.evaluate(&authority, identity, request.target, observe)
     }
 
-    /// Admits a placement from a fresh, unblocked preflight.
-    ///
-    /// The preflight is re-run here rather than trusted from a prior call: an
-    /// admission that reused a caller-held preflight would admit against a
-    /// target that may have changed since it was read.
-    #[tracing::instrument(name = "application.work.placement.admit", level = "trace", skip_all)]
-    pub fn admit_placement(
-        &self,
-        context: &RequestContext,
-        command: AdmitWorkPlacementCommand,
-        observe: impl FnOnce(
-            &WorkPlacementTargetV1,
-        ) -> Result<WorkPlacementObservationV1, ApplicationProblem>,
-    ) -> Result<WorkPlacementV1, ApplicationProblem> {
-        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
-        let authority = work_authority(context)?;
-        let identity = WorkPlacementIdentityV1::new(command.task_id, command.run_id);
-        let existing = self
-            .storage
-            .load_placement(&authority, &identity)
-            .map_err(storage_problem)?;
-        if let Some(existing) = existing {
-            // Re-admitting the same target is an idempotent replay; a different
-            // target under the same run identity is a conflict, never a move.
-            return if existing.state() == WorkPlacementStateV1::Admitted
-                && existing.target() == &command.target
-            {
-                Ok(existing)
-            } else {
-                Err(ApplicationProblem::conflict(
-                    "application.work-placement.identity-conflict",
-                    "The Work run already holds a different placement.",
-                ))
-            };
-        }
-        let preflight = self.evaluate(&authority, identity, command.target, observe)?;
-        if !preflight.is_admissible() {
-            return Err(blocked_problem(&preflight.blockers));
-        }
-        let placement = WorkPlacementV1::admit(
-            &preflight,
-            command.retention_eligible_at,
-            command.occurred_at,
-        )
-        .map_err(contract_problem)?;
-        self.storage
-            .publish_placement(&authority, None, &placement)
-            .map_err(storage_problem)?;
-        Ok(placement)
-    }
-
     /// Reads the durable placement relation for one run.
     #[tracing::instrument(name = "application.work.placement.status", level = "trace", skip_all)]
     pub fn status(
@@ -247,50 +211,12 @@ where
             match self
                 .storage
                 .load_placement(&authority, &identity)
-                .map_err(storage_problem)?
+                .map_err(ApplicationProblem::from)?
             {
                 Some(placement) => WorkPlacementReadingV1::Placed { placement },
                 None => WorkPlacementReadingV1::Absent,
             },
         )
-    }
-
-    /// Gives the target up, or quarantines it when removal is blocked.
-    ///
-    /// This never deletes. It publishes what the fresh cleanup preflight found,
-    /// so a caller can tell "the bytes are gone" from "the bytes were kept, and
-    /// here is exactly why".
-    #[tracing::instrument(name = "application.work.placement.release", level = "trace", skip_all)]
-    pub fn release(
-        &self,
-        context: &RequestContext,
-        command: ReleaseWorkPlacementCommand,
-        observe: impl FnOnce(
-            &WorkPlacementTargetV1,
-        ) -> Result<WorkPlacementObservationV1, ApplicationProblem>,
-    ) -> Result<WorkPlacementV1, ApplicationProblem> {
-        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
-        let authority = work_authority(context)?;
-        let identity = WorkPlacementIdentityV1::new(command.task_id, command.run_id);
-        let current = self
-            .storage
-            .load_placement(&authority, &identity)
-            .map_err(storage_problem)?
-            .ok_or_else(not_found_problem)?;
-        if current.authority_version() != command.expected_authority_version {
-            return Err(authority_conflict_problem());
-        }
-        let observation = observe(current.target())?;
-        let next = current
-            .release(
-                observation.removal_blockers(current.target()),
-                command.occurred_at,
-            )
-            .map_err(contract_problem)?;
-        self.storage
-            .publish_placement(&authority, Some(current.authority_version()), &next)
-            .map_err(storage_problem)?;
-        Ok(next)
     }
 
     /// Observes the target and folds in the exclusivity fact only storage knows.
@@ -328,22 +254,118 @@ where
         let Some(root) = target.root() else {
             return Ok(false);
         };
-        Ok(self
-            .storage
-            .target_holder(authority, root)
-            .map_err(storage_problem)?
-            .is_some_and(|holder| &holder != identity))
+        self.storage
+            .target_held_by_other(authority, identity, root)
+            .map_err(ApplicationProblem::from)
     }
 }
 
-fn storage_problem(error: WorkPlacementStorageError) -> ApplicationProblem {
-    match error {
-        WorkPlacementStorageError::NotFoundOrNotAuthorized => not_found_problem(),
-        WorkPlacementStorageError::AuthorityConflict => authority_conflict_problem(),
-        WorkPlacementStorageError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "application.work-placement.storage-unavailable".to_owned(),
-            message: "The Work placement authority is unavailable.".to_owned(),
-        }),
+impl<S> WorkPlacementService<S>
+where
+    S: WorkPlacementPublicationPort,
+{
+    /// Admits a placement from a fresh, unblocked preflight.
+    ///
+    /// The preflight is re-run here rather than trusted from a prior call: an
+    /// admission that reused a caller-held preflight would admit against a
+    /// target that may have changed since it was read.
+    #[tracing::instrument(name = "application.work.placement.admit", level = "trace", skip_all)]
+    pub fn admit_placement(
+        &self,
+        context: &RequestContext,
+        command: AdmitWorkPlacementCommand,
+        observe: impl FnOnce(
+            &WorkPlacementTargetV1,
+        ) -> Result<WorkPlacementObservationV1, ApplicationProblem>,
+    ) -> Result<WorkPlacementV1, ApplicationProblem> {
+        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
+        let authority = work_authority(context)?;
+        let identity = WorkPlacementIdentityV1::new(command.task_id, command.run_id);
+        let existing = self
+            .storage
+            .load_placement(&authority, &identity)
+            .map_err(ApplicationProblem::from)?;
+        if let Some(existing) = existing {
+            // Re-admitting the same target is an idempotent replay; a different
+            // target under the same run identity is a conflict, never a move.
+            return if existing.state() == WorkPlacementStateV1::Admitted
+                && existing.target() == &command.target
+            {
+                Ok(existing)
+            } else {
+                Err(ApplicationProblem::conflict(
+                    "application.work-placement.identity-conflict",
+                    "The Work run already holds a different placement.",
+                ))
+            };
+        }
+        let preflight = self.evaluate(&authority, identity, command.target, observe)?;
+        if !preflight.is_admissible() {
+            return Err(blocked_problem(&preflight.blockers));
+        }
+        let placement = WorkPlacementV1::admit(
+            &preflight,
+            command.retention_eligible_at,
+            command.occurred_at,
+        )
+        .map_err(contract_problem)?;
+        self.storage
+            .publish_placement(&authority, None, &placement)
+            .map_err(ApplicationProblem::from)?;
+        Ok(placement)
+    }
+
+    /// Gives the target up, or quarantines it when removal is blocked.
+    ///
+    /// This never deletes. It publishes what the fresh cleanup preflight found,
+    /// so a caller can tell "the bytes are gone" from "the bytes were kept, and
+    /// here is exactly why".
+    #[tracing::instrument(name = "application.work.placement.release", level = "trace", skip_all)]
+    pub fn release(
+        &self,
+        context: &RequestContext,
+        command: ReleaseWorkPlacementCommand,
+        observe: impl FnOnce(
+            &WorkPlacementTargetV1,
+        ) -> Result<WorkPlacementObservationV1, ApplicationProblem>,
+    ) -> Result<WorkPlacementV1, ApplicationProblem> {
+        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
+        let authority = work_authority(context)?;
+        let identity = WorkPlacementIdentityV1::new(command.task_id, command.run_id);
+        let current = self
+            .storage
+            .load_placement(&authority, &identity)
+            .map_err(ApplicationProblem::from)?
+            .ok_or_else(not_found_problem)?;
+        if current.authority_version() != command.expected_authority_version {
+            return Err(authority_conflict_problem());
+        }
+        let observation = observe(current.target())?;
+        let next = current
+            .release(
+                observation.removal_blockers(current.target()),
+                command.occurred_at,
+            )
+            .map_err(contract_problem)?;
+        self.storage
+            .publish_placement(&authority, Some(current.authority_version()), &next)
+            .map_err(ApplicationProblem::from)?;
+        Ok(next)
+    }
+}
+
+impl From<WorkPlacementStorageError> for ApplicationProblem {
+    fn from(error: WorkPlacementStorageError) -> Self {
+        match error {
+            WorkPlacementStorageError::NotFoundOrNotAuthorized => not_found_problem(),
+            WorkPlacementStorageError::AuthorityConflict => authority_conflict_problem(),
+            WorkPlacementStorageError::Unavailable => {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "application.work-placement.storage-unavailable".to_owned(),
+                    message: "The Work placement authority is unavailable.".to_owned(),
+                })
+            }
+        }
     }
 }
 

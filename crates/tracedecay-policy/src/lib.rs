@@ -14,7 +14,11 @@ pub mod diagnostic_curation;
 pub mod git;
 pub mod hint_delivery;
 pub mod identity;
+pub mod intent_action_facts;
+pub mod intent_catalog;
+pub mod intent_decision;
 pub mod routing;
+pub mod shell;
 pub mod work_loop;
 
 pub use curation::{

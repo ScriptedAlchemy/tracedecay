@@ -1014,6 +1014,13 @@ configuration, and execution fencing remain in SQLite. The cutover is
 fresh-profile, embedded, in-process, and single-authority: no sidecar,
 `petgraph`, migration, backfill, dual-write, or compatibility reader.
 
+The storage redesign ([storage plan](../storage/README.md), decided 2026-10-16)
+is the authority for storage classes, the per-repository store set, the shared
+storage executor, checkpoint ownership, corruption containment, class budgets,
+repository identity and the storage cutover order. Where it conflicts with Plans
+02, 38, 39 or 40, or with the reset-only rule for durable and authoritative
+stores, it wins; its "What this supersedes" section lists each point.
+
 Storage retention, size, and efficiency
 ([Plan 38](38-storage-retention-size-and-efficiency.md)) threads through the
 remaining capabilities rather than owning a separate delivery stage. Durable

@@ -13,7 +13,9 @@ pub struct PayloadFileRollback {
 impl PayloadFileRollback {
     /// Arms synchronous file cleanup when the owning database transaction is
     /// dropped before commit. The caller must disarm this guard only after the
-    /// transaction has committed successfully.
+    /// transaction has committed successfully. Transfer the guard into the
+    /// writer's commit completion callback, so caller cancellation cannot
+    /// remove a file while SQLite is still committing its references.
     pub fn begin_cancellation_safe(_storage_root: &Path) -> Self {
         Self {
             created_files: Vec::new(),

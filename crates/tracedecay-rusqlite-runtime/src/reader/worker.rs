@@ -4,9 +4,8 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender},
+        mpsc::{self, Receiver, RecvTimeoutError, SyncSender},
     },
-    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -22,12 +21,65 @@ use tracedecay_store::{
 use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
 use crate::exact_sql::{
     ExactSqlError, ExactSqlRows, ExactSqlStatement, ExactSqlStatementBudget, execute_query,
+    read_across_wal_recovery,
 };
 use crate::telemetry::{ReaderAdmissionRecorder, take_observed_vm};
 
 use super::{ExistingReaderLocator, ReaderStartError};
 
 const REPLY_POLL_QUANTUM: Duration = Duration::from_millis(5);
+
+/// How often an idle snapshot checks whether the checkpoint fence revoked it.
+const REVOCATION_POLL: Duration = Duration::from_millis(20);
+
+/// The checkpoint fence's claim on one worker's snapshot.
+///
+/// A held snapshot keeps its WAL read slot, so the writer cannot restart the
+/// log behind it. When a hard-pressure drain outlives the read deadline, the
+/// writer revokes the snapshots older than it: any running statement is
+/// interrupted, the worker rolls the read back, and the snapshot's later reads
+/// fail as expired.
+#[derive(Default)]
+pub(crate) struct SnapshotRevocation {
+    requested: AtomicBool,
+    rolled_back: AtomicBool,
+}
+
+impl SnapshotRevocation {
+    fn reset(&self) {
+        self.requested.store(false, Ordering::Release);
+        self.rolled_back.store(false, Ordering::Release);
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    /// The worker rolled the revoked snapshot back, so it no longer holds the
+    /// WAL even while its lease is still out.
+    pub(crate) fn rolled_back(&self) -> bool {
+        self.rolled_back.load(Ordering::Acquire)
+    }
+}
+
+/// What the checkpoint blockers keep for each open snapshot to revoke it.
+#[derive(Clone)]
+pub(crate) struct SnapshotRevoker {
+    revocation: Arc<SnapshotRevocation>,
+    interrupt: Arc<InterruptHandle>,
+}
+
+impl SnapshotRevoker {
+    pub(crate) fn revoke(&self) {
+        if !self.revocation.requested.swap(true, Ordering::AcqRel) {
+            self.interrupt.interrupt();
+        }
+    }
+
+    pub(crate) fn rolled_back(&self) -> bool {
+        self.revocation.rolled_back()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreSizeTelemetrySample {
@@ -85,7 +137,7 @@ pub(crate) enum WorkerMemoryRelease {
     /// the queued command still shrinks the connection when the snapshot
     /// ends.
     SnapshotBusy,
-    /// The worker thread has terminated; its connection and cache are gone.
+    /// The worker task has ended; its connection and cache are gone.
     Closed,
 }
 
@@ -123,6 +175,7 @@ impl Error for ReaderWorkerError {
 
 enum WorkerCommand {
     Begin {
+        lifetime: Duration,
         reply: SyncSender<Result<(), ReaderWorkerError>>,
     },
     ReleaseMemory {
@@ -151,7 +204,7 @@ enum SnapshotCommand {
         reply: SyncSender<Result<Vec<TableSizeTelemetrySample>, ReaderWorkerError>>,
     },
     End {
-        reply: SyncSender<Result<(), ReaderWorkerError>>,
+        reply: async_channel::Sender<Result<(), ReaderWorkerError>>,
     },
     ReleaseMemory {
         reply: SyncSender<Result<(), ReaderWorkerError>>,
@@ -159,27 +212,42 @@ enum SnapshotCommand {
     Shutdown,
 }
 
+pub(crate) type SnapshotEndReply = async_channel::Receiver<Result<(), ReaderWorkerError>>;
+
 #[derive(Clone)]
 pub(crate) struct WorkerClient {
-    sender: Sender<WorkerCommand>,
-    snapshot_sender: Arc<Mutex<Option<Sender<SnapshotCommand>>>>,
+    sender: async_channel::Sender<WorkerCommand>,
+    snapshot_sender: Arc<Mutex<Option<async_channel::Sender<SnapshotCommand>>>>,
     /// Set while the worker runs its snapshot loop, from `Begin` until the
     /// loop returns, which can outlast the snapshot sender `begin_end` takes.
     in_snapshot: Arc<AtomicBool>,
     interrupt: Arc<InterruptHandle>,
+    revocation: Arc<SnapshotRevocation>,
 }
 
 pub(crate) struct SpawnedWorker {
     pub client: WorkerClient,
-    pub join: JoinHandle<()>,
+    pub join: crate::storage_pool::PoolTask,
     pub opened_file_identity: u64,
 }
 
 impl WorkerClient {
-    pub fn begin(&self) -> Result<(), ReaderWorkerError> {
+    pub(crate) fn revoker(&self) -> SnapshotRevoker {
+        SnapshotRevoker {
+            revocation: Arc::clone(&self.revocation),
+            interrupt: Arc::clone(&self.interrupt),
+        }
+    }
+
+    /// Opens a snapshot that ends itself `lifetime` after it began: the worker
+    /// rolls it back and its later reads fail as expired.
+    pub fn begin(&self, lifetime: Duration) -> Result<(), ReaderWorkerError> {
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderWorkerError::WorkerClosed);
+        }
         let (reply, receive) = mpsc::sync_channel(1);
         self.sender
-            .send(WorkerCommand::Begin { reply })
+            .try_send(WorkerCommand::Begin { lifetime, reply })
             .map_err(|_| ReaderWorkerError::WorkerClosed)?;
         receive
             .recv()
@@ -200,9 +268,11 @@ impl WorkerClient {
             .snapshot_sender()
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         let (reply, receive) = mpsc::sync_channel(1);
-        sender.send(SnapshotCommand::Pin { reply }).map_err(|_| {
-            ExactSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
-        })?;
+        sender
+            .try_send(SnapshotCommand::Pin { reply })
+            .map_err(|_| {
+                ExactSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+            })?;
         receive
             .recv()
             .map_err(|_| {
@@ -221,7 +291,7 @@ impl WorkerClient {
         let sender = self.snapshot_sender()?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender
-            .send(SnapshotCommand::Execute {
+            .try_send(SnapshotCommand::Execute {
                 request: Box::new(request),
                 reply,
             })
@@ -239,7 +309,7 @@ impl WorkerClient {
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender
-            .send(SnapshotCommand::ExactSqlQuery {
+            .try_send(SnapshotCommand::ExactSqlQuery {
                 request,
                 budget,
                 reply,
@@ -265,7 +335,7 @@ impl WorkerClient {
         let sender = self.snapshot_sender()?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender
-            .send(SnapshotCommand::StoreSize { reply })
+            .try_send(SnapshotCommand::StoreSize { reply })
             .map_err(|_| ReaderWorkerError::WorkerClosed)?;
         match receive.recv_timeout(reply_bound) {
             Ok(result) => result,
@@ -290,7 +360,7 @@ impl WorkerClient {
         let sender = self.snapshot_sender()?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender
-            .send(SnapshotCommand::TableSizes { reply })
+            .try_send(SnapshotCommand::TableSizes { reply })
             .map_err(|_| ReaderWorkerError::WorkerClosed)?;
         match receive.recv_timeout(reply_bound) {
             Ok(result) => result,
@@ -310,10 +380,13 @@ impl WorkerClient {
     /// inside its snapshot loop, so the command has to travel that channel;
     /// an idle worker is waiting on the outer command channel.
     pub fn release_memory(&self) -> Result<WorkerMemoryRelease, ReaderWorkerError> {
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderWorkerError::WorkerClosed);
+        }
         if let Ok(sender) = self.snapshot_sender() {
             let (reply, receive) = mpsc::sync_channel(1);
             if sender
-                .send(SnapshotCommand::ReleaseMemory { reply })
+                .try_send(SnapshotCommand::ReleaseMemory { reply })
                 .is_ok()
                 && let Ok(result) = receive.recv()
             {
@@ -328,7 +401,7 @@ impl WorkerClient {
         let (reply, receive) = mpsc::sync_channel(1);
         if self
             .sender
-            .send(WorkerCommand::ReleaseMemory { reply })
+            .try_send(WorkerCommand::ReleaseMemory { reply })
             .is_err()
         {
             return Ok(WorkerMemoryRelease::Closed);
@@ -349,16 +422,16 @@ impl WorkerClient {
         }
     }
 
-    pub fn begin_end(&self) -> Result<Receiver<Result<(), ReaderWorkerError>>, ReaderWorkerError> {
+    pub fn begin_end(&self) -> Result<SnapshotEndReply, ReaderWorkerError> {
         let sender = self
             .snapshot_sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
             .ok_or(ReaderWorkerError::SnapshotNotActive)?;
-        let (reply, receive) = mpsc::sync_channel(1);
+        let (reply, receive) = async_channel::bounded(1);
         sender
-            .send(SnapshotCommand::End { reply })
+            .try_send(SnapshotCommand::End { reply })
             .map_err(|_| ReaderWorkerError::WorkerClosed)?;
         Ok(receive)
     }
@@ -371,13 +444,16 @@ impl WorkerClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
-            let _ = sender.send(SnapshotCommand::Shutdown);
+            let _ = sender.try_send(SnapshotCommand::Shutdown);
         } else {
-            let _ = self.sender.send(WorkerCommand::Shutdown);
+            let _ = self.sender.try_send(WorkerCommand::Shutdown);
         }
     }
 
-    fn snapshot_sender(&self) -> Result<Sender<SnapshotCommand>, ReaderWorkerError> {
+    fn snapshot_sender(&self) -> Result<async_channel::Sender<SnapshotCommand>, ReaderWorkerError> {
+        if crate::storage_pool::on_pool() {
+            return Err(ReaderWorkerError::WorkerClosed);
+        }
         self.snapshot_sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -411,67 +487,73 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     mut executor: E,
     admission: Arc<ReaderAdmissionRecorder>,
 ) -> Result<SpawnedWorker, ReaderStartError> {
+    if crate::storage_pool::on_pool() {
+        return Err(ReaderStartError::RuntimeUnavailable);
+    }
     let worker_open_path = locator.worker_open_path()?;
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = async_channel::unbounded();
+    let receiver = crate::storage_pool::CommandReceiver::new(receiver);
     let snapshot_sender = Arc::new(Mutex::new(None));
     let worker_snapshot_sender = Arc::clone(&snapshot_sender);
     let in_snapshot = Arc::new(AtomicBool::new(false));
     let worker_in_snapshot = Arc::clone(&in_snapshot);
+    let revocation = Arc::new(SnapshotRevocation::default());
+    let worker_revocation = Arc::clone(&revocation);
     let (started, startup) = mpsc::sync_channel(1);
-    let join = thread::Builder::new()
-        .name("tracedecay-rusqlite-reader".to_owned())
-        .spawn(move || {
-            let connection = match connection::open(&worker_open_path, ConnectionMode::Reader) {
-                Ok(connection) => connection,
-                Err(error) if error.is_open_failure() => {
-                    let _ = started.send(Err(ReaderStartError::OpenFailed(error)));
-                    return;
-                }
-                Err(error) => {
-                    let _ = started.send(Err(ReaderStartError::ReadOnlySetupFailed(error)));
-                    return;
-                }
-            };
-            if let Err(error) = locator.verify_connection(&connection) {
-                let _ = started.send(Err(error));
+    let join = crate::storage_pool::spawn(async move {
+        let connection = match connection::open(&worker_open_path, ConnectionMode::Reader) {
+            Ok(connection) => connection,
+            Err(error) if error.is_open_failure() => {
+                let _ = started.send(Err(ReaderStartError::OpenFailed(error)));
                 return;
             }
-            let opened_file_identity = match OpenedDatabaseFile::pin(&worker_open_path) {
-                Ok(opened) => opened.identity(),
-                Err(error) => {
-                    let _ = started.send(Err(ReaderStartError::OpenedDatabaseIdentity(error)));
-                    return;
-                }
-            };
-            // Opening and policy verification do not enter the database schema.
-            // Complete WAL-index recovery before this worker can race admitted writes.
-            // Reading the header cookie opens that read transaction without
-            // parsing the schema, which an idle reader would never use: on a
-            // store with hundreds of schema objects the parse dominates startup.
-            if let Err(error) =
-                connection.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
-            {
-                let _ = started.send(Err(ReaderStartError::SchemaProbeFailed(error)));
+            Err(error) => {
+                let _ = started.send(Err(ReaderStartError::ReadOnlySetupFailed(error)));
                 return;
             }
-            let _keep_pinned_database_alive = locator;
-            let interrupt = Arc::new(connection.get_interrupt_handle());
-            if started
-                .send(Ok((Arc::clone(&interrupt), opened_file_identity)))
-                .is_err()
-            {
+        };
+        if let Err(error) = locator.verify_connection(&connection) {
+            let _ = started.send(Err(error));
+            return;
+        }
+        let opened_file_identity = match OpenedDatabaseFile::pin(&worker_open_path) {
+            Ok(opened) => opened.identity(),
+            Err(error) => {
+                let _ = started.send(Err(ReaderStartError::OpenedDatabaseIdentity(error)));
                 return;
             }
-            run(
-                connection,
-                receiver,
-                worker_snapshot_sender,
-                &worker_in_snapshot,
-                &mut executor,
-                admission,
-            );
-        })
-        .map_err(ReaderStartError::ThreadSpawn)?;
+        };
+        // Opening and policy verification do not enter the database schema.
+        // Complete WAL-index recovery before this worker can race admitted writes.
+        // Reading the header cookie opens that read transaction without
+        // parsing the schema, which an idle reader would never use: on a
+        // store with hundreds of schema objects the parse dominates startup.
+        if let Err(error) =
+            connection.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+        {
+            let _ = started.send(Err(ReaderStartError::SchemaProbeFailed(error)));
+            return;
+        }
+        let _keep_pinned_database_alive = locator;
+        let interrupt = Arc::new(connection.get_interrupt_handle());
+        if started
+            .send(Ok((Arc::clone(&interrupt), opened_file_identity)))
+            .is_err()
+        {
+            return;
+        }
+        run(
+            connection,
+            receiver,
+            worker_snapshot_sender,
+            &worker_in_snapshot,
+            &worker_revocation,
+            &mut executor,
+            admission,
+        )
+        .await;
+    })
+    .map_err(|_| ReaderStartError::RuntimeUnavailable)?;
     let (interrupt, opened_file_identity) = startup
         .recv()
         .map_err(|_| ReaderStartError::StartupChannelClosed)??;
@@ -481,37 +563,46 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             snapshot_sender,
             in_snapshot,
             interrupt,
+            revocation,
         },
         join,
         opened_file_identity,
     })
 }
 
-fn run<E: ReaderQueryExecutor>(
+async fn run<E: ReaderQueryExecutor>(
     mut connection: Connection,
-    receiver: Receiver<WorkerCommand>,
-    published: Arc<Mutex<Option<Sender<SnapshotCommand>>>>,
+    receiver: crate::storage_pool::CommandReceiver<WorkerCommand>,
+    published: Arc<Mutex<Option<async_channel::Sender<SnapshotCommand>>>>,
     in_snapshot: &AtomicBool,
+    revocation: &SnapshotRevocation,
     executor: &mut E,
     admission: Arc<ReaderAdmissionRecorder>,
 ) {
-    while let Some(command) = next_command(&receiver) {
+    while let Some(command) = next_command(&receiver).await {
         match command {
             WorkerCommand::Shutdown => break,
             WorkerCommand::ReleaseMemory { reply } => {
                 let _ = reply.send(shrink_connection_memory(&connection));
             }
-            WorkerCommand::Begin { reply } => {
+            WorkerCommand::Begin { lifetime, reply } => {
+                revocation.reset();
+                let expires = Instant::now() + lifetime;
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Deferred)
                     .map_err(|error| {
                         ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
                             operation: format!("begin deferred reader snapshot: {error}"),
                         })
+                    })
+                    // SAFETY: the transaction borrows `connection` by `&mut`,
+                    // and this task owns that connection.
+                    .map(|transaction| unsafe {
+                        crate::storage_pool::TaskTransaction::new(transaction)
                     });
                 match transaction {
                     Ok(transaction) => {
-                        let (sender, commands) = mpsc::channel();
+                        let (sender, commands) = async_channel::unbounded();
                         in_snapshot.store(true, Ordering::Release);
                         *published
                             .lock()
@@ -519,7 +610,21 @@ fn run<E: ReaderQueryExecutor>(
                         if reply.send(Ok(())).is_err() {
                             return;
                         }
-                        if run_snapshot(transaction, commands, executor, &admission) {
+                        let mut end = SnapshotEnd {
+                            revocation,
+                            expires,
+                            idle_limit: crate::reader::READ_SNAPSHOT_IDLE_LIMIT,
+                            last_active: std::cell::Cell::new(Instant::now()),
+                        };
+                        if run_snapshot(
+                            transaction,
+                            crate::storage_pool::CommandReceiver::new(commands),
+                            executor,
+                            &admission,
+                            &mut end,
+                        )
+                        .await
+                        {
                             return;
                         }
                         // Clear the flag before the sender: a release that
@@ -540,26 +645,56 @@ fn run<E: ReaderQueryExecutor>(
     }
 }
 
-/// Wait for the next command, returning this thread's heap whenever the
-/// sampler asked for it while the worker idles.
-fn next_command(receiver: &Receiver<WorkerCommand>) -> Option<WorkerCommand> {
+async fn next_command(
+    receiver: &crate::storage_pool::CommandReceiver<WorkerCommand>,
+) -> Option<WorkerCommand> {
     loop {
         collect_idle_thread_heap_v1();
-        match receiver.recv_timeout(IDLE_THREAD_COLLECTION_WAIT_V1) {
-            Ok(command) => return Some(command),
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return None,
+        match crate::storage_pool::timeout(IDLE_THREAD_COLLECTION_WAIT_V1, receiver.recv()).await {
+            Some(Ok(command)) => return Some(command),
+            Some(Err(_)) => return None,
+            None => {}
         }
     }
 }
 
-fn run_snapshot<E: ReaderQueryExecutor>(
-    transaction: Transaction<'_>,
-    commands: Receiver<SnapshotCommand>,
+async fn run_snapshot<E: ReaderQueryExecutor>(
+    transaction: crate::storage_pool::TaskTransaction<'_>,
+    commands: crate::storage_pool::CommandReceiver<SnapshotCommand>,
     executor: &mut E,
     admission: &ReaderAdmissionRecorder,
+    end: &mut SnapshotEnd<'_>,
 ) -> bool {
-    while let Ok(command) = commands.recv() {
+    let mut active = Some(transaction);
+    loop {
+        let command = match crate::storage_pool::timeout(REVOCATION_POLL, commands.recv()).await {
+            Some(Ok(command)) => command,
+            None => {
+                end.end_if_due(&mut active);
+                continue;
+            }
+            Some(Err(_)) => return false,
+        };
+        end.end_if_due(&mut active);
+        let command = match command {
+            SnapshotCommand::End { reply } => {
+                let result = active.take().map_or(Ok(()), |transaction| {
+                    transaction.into_inner().rollback().map_err(|error| {
+                        ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
+                            operation: format!("close reader snapshot: {error}"),
+                        })
+                    })
+                });
+                let _ = reply.try_send(result);
+                return false;
+            }
+            SnapshotCommand::Shutdown => return true,
+            command => command,
+        };
+        let Some(transaction) = active.as_ref() else {
+            reject_revoked(command);
+            continue;
+        };
         match command {
             SnapshotCommand::Pin { reply } => {
                 // Any read starts the snapshot; counting the schema would
@@ -581,7 +716,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                     let _span = tracing::trace_span!("rusqlite.reader.execute").entered();
                     {
                         executor
-                            .execute_read(&transaction, &request)
+                            .execute_read(transaction, &request)
                             .map_err(ReaderWorkerError::Storage)
                     }
                 };
@@ -594,10 +729,14 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 reply,
             } => {
                 let started = Instant::now();
-                let result = {
+                let budget = end.clamp(budget);
+                let active = &mut active;
+                let result = read_across_wal_recovery(move || {
+                    let transaction = active.as_ref().expect("only this task ends the snapshot");
                     let _span = tracing::trace_span!("rusqlite.reader.exact_sql").entered();
-                    execute_query(&transaction, request, budget)
-                };
+                    execute_query(transaction, request.clone(), budget)
+                })
+                .await;
                 admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);
             }
@@ -661,21 +800,88 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::ReleaseMemory { reply } => {
-                let _ = reply.send(shrink_connection_memory(&transaction));
+                let _ = reply.send(shrink_connection_memory(transaction));
             }
-            SnapshotCommand::End { reply } => {
-                let result = transaction.rollback().map_err(|error| {
-                    ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
-                        operation: format!("close reader snapshot: {error}"),
-                    })
-                });
-                let _ = reply.send(result);
-                return false;
-            }
-            SnapshotCommand::Shutdown => return true,
+            SnapshotCommand::End { .. } | SnapshotCommand::Shutdown => {}
+        }
+        end.touch();
+    }
+}
+
+/// When a held snapshot must end before its lease does: the checkpoint fence
+/// revoked it, it sat idle too long, or its lifetime ran out.
+struct SnapshotEnd<'a> {
+    revocation: &'a SnapshotRevocation,
+    expires: Instant,
+    idle_limit: Duration,
+    last_active: std::cell::Cell<Instant>,
+}
+
+impl SnapshotEnd<'_> {
+    /// Revoked, past its lifetime, or idle past the idle limit.
+    fn due(&self, now: Instant) -> bool {
+        self.revocation.requested()
+            || now >= self.expires
+            || now >= self.last_active.get() + self.idle_limit
+    }
+
+    /// A command finished: the snapshot is in use, so its idle clock restarts.
+    fn touch(&self) {
+        self.last_active.set(Instant::now());
+    }
+
+    /// Rolls the snapshot back once it is due, so its WAL read slot is free
+    /// while its lease is still out.
+    fn end_if_due(&self, active: &mut Option<crate::storage_pool::TaskTransaction<'_>>) {
+        if self.due(Instant::now())
+            && let Some(transaction) = active.take()
+        {
+            // A failed rollback drops the transaction, which rolls back again.
+            let _ = transaction.into_inner().rollback();
+            self.revocation.rolled_back.store(true, Ordering::Release);
         }
     }
-    false
+
+    /// A statement on this snapshot stops at the snapshot's end as well as at
+    /// its own budget.
+    fn clamp(&self, budget: ExactSqlStatementBudget) -> ExactSqlStatementBudget {
+        let until = match budget {
+            ExactSqlStatementBudget::Until(deadline) => deadline,
+            ExactSqlStatementBudget::Request => {
+                Instant::now() + crate::exact_sql::EXACT_SQL_EXECUTION_LIMIT
+            }
+            ExactSqlStatementBudget::Convergence => self.expires,
+        };
+        ExactSqlStatementBudget::Until(until.min(self.expires))
+    }
+}
+
+/// Answers a command that reached a revoked snapshot.
+fn reject_revoked(command: SnapshotCommand) {
+    let expired = || ReaderWorkerError::Interrupted {
+        reason: UnavailableReasonV1::SnapshotExpired,
+    };
+    match command {
+        SnapshotCommand::Pin { reply } => {
+            let _ = reply.send(Err(expired()));
+        }
+        SnapshotCommand::Execute { reply, .. } => {
+            let _ = reply.send(Err(expired()));
+        }
+        SnapshotCommand::ExactSqlQuery { reply, .. } => {
+            let _ = reply.send(Err(ExactSqlError::ReaderUnavailable(expired().to_string())));
+        }
+        SnapshotCommand::StoreSize { reply } => {
+            let _ = reply.send(Err(expired()));
+        }
+        SnapshotCommand::TableSizes { reply } => {
+            let _ = reply.send(Err(expired()));
+        }
+        SnapshotCommand::ReleaseMemory { reply } => {
+            let _ = reply.send(Ok(()));
+        }
+        SnapshotCommand::End { .. } | SnapshotCommand::Shutdown => {}
+    }
 }
 
 fn shrink_connection_memory(connection: &Connection) -> Result<(), ReaderWorkerError> {
@@ -696,7 +902,52 @@ fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1
 }
 
 #[cfg(test)]
+mod snapshot_end_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{SnapshotEnd, SnapshotRevocation};
+
+    /// A snapshot that keeps issuing statements stays open up to its
+    /// lifetime; one that sits idle past the idle limit ends, and so does a
+    /// revoked one.
+    #[test]
+    fn a_snapshot_ends_when_idle_too_long_revoked_or_past_its_lifetime() {
+        let start = Instant::now();
+        let revocation = SnapshotRevocation::default();
+        let end = SnapshotEnd {
+            revocation: &revocation,
+            expires: start + Duration::from_hours(1),
+            idle_limit: Duration::from_secs(30),
+            last_active: std::cell::Cell::new(start),
+        };
+        assert!(!end.due(start + Duration::from_secs(29)));
+        assert!(
+            end.due(start + Duration::from_secs(30)),
+            "idle past the limit"
+        );
+
+        end.last_active.set(start + Duration::from_mins(50));
+        assert!(
+            !end.due(start + Duration::from_mins(50) + Duration::from_secs(29)),
+            "a busy snapshot is not idle however long it has been open"
+        );
+        assert!(
+            end.due(start + Duration::from_hours(1)),
+            "past its lifetime"
+        );
+
+        end.last_active.set(start);
+        revocation
+            .requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(end.due(start), "revoked");
+    }
+}
+
+#[cfg(test)]
 mod release_memory_tests {
+    use std::sync::mpsc::Receiver;
+    use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
     use tracedecay_store::OperationPriorityV1;
@@ -722,7 +973,10 @@ mod release_memory_tests {
             Arc::new(ReaderAdmissionRecorder::default()),
         )
         .unwrap();
-        spawned.client.begin().unwrap();
+        spawned
+            .client
+            .begin(crate::reader::READ_SNAPSHOT_LIFETIME)
+            .unwrap();
         let reading = thread::spawn({
             let client = spawned.client.clone();
             let read = request(&store.binding, OperationPriorityV1::Foreground);
@@ -783,7 +1037,10 @@ mod release_memory_tests {
         spawned
             .client
             .sender
-            .send(WorkerCommand::Begin { reply: begin })
+            .try_send(WorkerCommand::Begin {
+                lifetime: crate::reader::READ_SNAPSHOT_LIFETIME,
+                reply: begin,
+            })
             .unwrap();
 
         let (released, releasing) = release_in_background(&spawned.client);

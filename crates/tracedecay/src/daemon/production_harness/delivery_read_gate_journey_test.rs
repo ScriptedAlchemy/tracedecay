@@ -126,5 +126,6 @@ async fn project_open_registers_the_typed_delivery_gate_without_a_github_remote(
         "the registered Delivery read must answer with the exact typed remote gate"
     );
 
+    drop(authority);
     harness.shutdown().await;
 }

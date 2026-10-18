@@ -140,8 +140,9 @@ async fn release_one_idle_project_server_before_open(
     let gate_for_release = Arc::clone(&capacity_gate);
     let completion =
         retirement_admission.spawn_and_track_fallible(retired_owner.clone(), async move {
-            // Teardown joins every owner-scoped store client, so the release
-            // below finds the owner's stores unleased on its only attempt.
+            // Teardown joins every owner-scoped store client and the release
+            // joins the maintenance tick's, so the release finds the owner's
+            // stores unleased on its only attempt.
             stores
                 .administration
                 .session_temporal_refresh_schedulers()
@@ -211,7 +212,7 @@ async fn release_capacity_unless_re_served(
         .keys()
         .any(|key| key.owner.project_id == stores.owner.project_id);
     if !re_served {
-        release_capacity_retired_stores(stores).await?;
+        Box::pin(release_capacity_retired_stores(stores)).await?;
     }
     drop(capacity_admission);
     Ok(())
@@ -231,6 +232,11 @@ async fn release_capacity_retired_stores(stores: CapacityRetirementStores) -> Re
         project_roots,
         profile_identity,
     } = stores;
+    // Wait out the maintenance tick's telemetry pass or store unit in flight
+    // and keep new ones off until the release ends.
+    // ponytail: daemon-wide, so this also waits out a unit or telemetry pass
+    // on another project; key it by store if that delays capacity reuse.
+    let _maintenance_clients = administration.maintenance_store_clients().lock().await;
     let project_id = owner
         .project_id
         .clone()
@@ -1577,10 +1583,7 @@ impl ProjectOpenInputs<'_> {
             })?;
         self.log_phase("source_edit_preview_ready", None, full_setup_started);
         project_open_cancellation_checkpoint(self.cancellation)?;
-        let http_registry = self.http_application_registry.clone();
-        let http_owner = self.store_administration.owner_profile()?.clone();
-        let http_project_id = core.project_id.clone();
-        let http_project_path = self.canonical_project_path.to_path_buf();
+        let http_owner = self.store_administration.owner_profile()?;
         join_independent_full_owner_mounts(
             async {
                 let state = project_open_owners::register_project_open_production_owners(
@@ -1609,20 +1612,15 @@ impl ProjectOpenInputs<'_> {
                 self.log_phase("production_owners_registered", None, full_setup_started);
                 Ok(())
             },
-            async move {
+            async {
                 mount_http_application_router(
-                    &http_registry,
-                    &http_owner,
-                    &http_project_id,
-                    &http_project_path,
+                    self.http_application_registry,
+                    http_owner,
+                    &core.project_id,
+                    self.canonical_project_path,
                 )
                 .await?;
-                log_project_open_phase(
-                    &http_project_path,
-                    "http_application_mounted",
-                    None,
-                    full_setup_started,
-                );
+                self.log_phase("http_application_mounted", None, full_setup_started);
                 Ok(())
             },
         )
@@ -1739,10 +1737,14 @@ impl ProjectOpenInputs<'_> {
             Arc::new(move || {
                 let unconverged = registry.unconverged_registered_schemas();
                 tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
-                    storage:
+                    storage: tracedecay_contracts::doctor::merge_storage_reads(
                         tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
                             &unconverged,
                         ),
+                        tracedecay_daemon_service::doctor_kernel::wal_checkpoint_pinned_read(
+                            &registry.runtime_telemetry(),
+                        ),
+                    ),
                     findings: registry.registered_schema_convergence_observations(),
                 }
             })

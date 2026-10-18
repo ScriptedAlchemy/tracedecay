@@ -5,6 +5,7 @@
 //! receipt suitable for validation and status reporting.
 
 use std::collections::BTreeSet;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,8 @@ use super::capture::{
 use super::protocol::RemoteProtocolBodyV1;
 use super::protocol::{
     REMOTE_PROTOCOL_VERSION_V1, REMOTE_REPLAY_USE_CASE_ID_V1, RemoteProtocolFailureV1,
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
-    remote_protocol_problem, remote_replay_result_contract_v1,
+    RemoteProtocolFutureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1, remote_protocol_problem, remote_replay_result_contract_v1,
 };
 use crate::clock::try_now_micros;
 use crate::{
@@ -539,7 +540,7 @@ impl RemoteReplayServiceV1 {
         }
     }
 
-    pub fn replay(
+    pub async fn replay(
         &self,
         request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         presented_credential: &OpaqueRemoteCredential,
@@ -601,7 +602,8 @@ impl RemoteReplayServiceV1 {
             &frame,
             &writer,
             self.clock.as_ref(),
-        )?;
+        )
+        .await?;
         Ok(RemoteReplayServiceOutcomeV1 {
             outcome,
             authority,
@@ -701,37 +703,40 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        match self.service.replay(&request, &credential) {
-            Ok(outcome) => {
-                let authority = outcome.authority.clone();
-                let result =
-                    match replay_effect_envelope(request, outcome, self.service.clock.as_ref()) {
-                        Ok(envelope) => Ok(envelope),
-                        Err(failure) => Err(remote_protocol_problem(
-                            remote_replay_result_contract_v1(),
-                            request_id.clone(),
-                            failure,
-                        )?),
-                    };
-                RemoteProtocolResponseV1::new_or_unavailable(
+    ) -> RemoteProtocolFutureV1<'_, Self::Output> {
+        Box::pin(async move {
+            let request_id = request.request_id.clone();
+            let observed_at = request.sent_at;
+            match self.service.replay(&request, &credential).await {
+                Ok(outcome) => {
+                    let authority = outcome.authority.clone();
+                    let result =
+                        match replay_effect_envelope(request, outcome, self.service.clock.as_ref())
+                        {
+                            Ok(envelope) => Ok(envelope),
+                            Err(failure) => Err(remote_protocol_problem(
+                                remote_replay_result_contract_v1(),
+                                request_id.clone(),
+                                failure,
+                            )?),
+                        };
+                    RemoteProtocolResponseV1::new_or_unavailable(
+                        request_id,
+                        authority,
+                        result,
+                        remote_replay_result_contract_v1(),
+                        observed_at,
+                    )
+                }
+                Err(error) => replay_failure_response(
                     request_id,
-                    authority,
-                    result,
-                    remote_replay_result_contract_v1(),
                     observed_at,
-                )
+                    request.expected_authority,
+                    remote_replay_result_contract_v1(),
+                    error,
+                ),
             }
-            Err(error) => replay_failure_response(
-                request_id,
-                observed_at,
-                request.expected_authority,
-                remote_replay_result_contract_v1(),
-                error,
-            ),
-        }
+        })
     }
 }
 
@@ -1018,12 +1023,21 @@ pub enum RemoteReplayTransactionOutcomeV1 {
 }
 
 pub trait RemoteReplayTransactionPortV1: Send + Sync {
-    fn commit(
-        &self,
-        frame: &RemoteReplayFrameV1,
-        current_writer: &RemoteWriterAuthorityV1,
-    ) -> Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>;
+    fn commit<'a>(
+        &'a self,
+        frame: &'a RemoteReplayFrameV1,
+        current_writer: &'a RemoteWriterAuthorityV1,
+    ) -> RemoteReplayTransactionFutureV1<'a>;
 }
+
+pub type RemoteReplayTransactionFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>,
+            > + Send
+            + 'a,
+    >,
+>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
@@ -1065,8 +1079,8 @@ impl RemoteReplayOutcomeV1 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn replay_remote_capture(
-    authentication: &dyn RemoteAuthorityAuthenticationPort,
+pub async fn replay_remote_capture(
+    authentication: &(dyn RemoteAuthorityAuthenticationPort + Sync),
     policy: &dyn RemoteReplayPolicyPortV1,
     transaction: &dyn RemoteReplayTransactionPortV1,
     spool: &dyn RemoteReplaySpoolPortV1,
@@ -1128,18 +1142,22 @@ pub fn replay_remote_capture(
             clock,
         )
     })
+    .await
 }
 
-fn with_replay_attempt<T>(
+async fn with_replay_attempt<T, F>(
     spool: &dyn RemoteReplaySpoolPortV1,
     event_id: &str,
     observed_at: UtcMicros,
-    operation: impl FnOnce(u64) -> Result<T, RemoteReplayApplicationErrorV1>,
-) -> Result<T, RemoteReplayApplicationErrorV1> {
+    operation: impl FnOnce(u64) -> F,
+) -> Result<T, RemoteReplayApplicationErrorV1>
+where
+    F: Future<Output = Result<T, RemoteReplayApplicationErrorV1>>,
+{
     let replay_attempt = spool
         .begin_replay_attempt(event_id, observed_at)
         .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
-    let operation_error = match operation(replay_attempt) {
+    let operation_error = match operation(replay_attempt).await {
         Ok(value) => return Ok(value),
         Err(error) => error,
     };
@@ -1158,8 +1176,8 @@ fn with_replay_attempt<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn replay_remote_capture_attempt(
-    authentication: &dyn RemoteAuthorityAuthenticationPort,
+async fn replay_remote_capture_attempt(
+    authentication: &(dyn RemoteAuthorityAuthenticationPort + Sync),
     policy: &dyn RemoteReplayPolicyPortV1,
     transaction: &dyn RemoteReplayTransactionPortV1,
     spool: &dyn RemoteReplaySpoolPortV1,
@@ -1286,6 +1304,7 @@ fn replay_remote_capture_attempt(
 
     let (disposition, receipt, finding) = match transaction
         .commit(frame, current_writer)
+        .await
         .map_err(RemoteReplayApplicationErrorV1::Transaction)?
     {
         RemoteReplayTransactionOutcomeV1::Admitted(receipt) => {
@@ -1627,15 +1646,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn failed_attempt_cleanup_reaches_the_caller_with_both_causes() {
+    #[asupersync::test]
+    async fn failed_attempt_cleanup_reaches_the_caller_with_both_causes() {
         let spool = AttemptSpool {
             abandon: Err(RemoteCapturePersistenceErrorV1::Unavailable),
         };
         let error = with_replay_attempt(&spool, "remote.event.cleanup", UtcMicros(11), |attempt| {
             assert_eq!(attempt, 7);
-            Err::<(), _>(RemoteReplayApplicationErrorV1::InvalidSpoolState)
+            std::future::ready(Err::<(), _>(
+                RemoteReplayApplicationErrorV1::InvalidSpoolState,
+            ))
         })
+        .await
         .expect_err("a failed cleanup must not be reported as success");
 
         assert_eq!(
@@ -1651,23 +1673,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn successful_attempt_cleanup_preserves_the_operation_error() {
+    #[asupersync::test]
+    async fn successful_attempt_cleanup_preserves_the_operation_error() {
         let spool = AttemptSpool { abandon: Ok(()) };
         let error = with_replay_attempt(&spool, "remote.event.cleanup", UtcMicros(11), |_| {
-            Err::<(), _>(RemoteReplayApplicationErrorV1::InvalidSpoolState)
+            std::future::ready(Err::<(), _>(
+                RemoteReplayApplicationErrorV1::InvalidSpoolState,
+            ))
         })
+        .await
         .expect_err("the operation error still surfaces");
 
         assert_eq!(error, RemoteReplayApplicationErrorV1::InvalidSpoolState);
     }
 
-    #[test]
-    fn successful_operation_never_abandons_the_attempt() {
+    #[asupersync::test]
+    async fn successful_operation_never_abandons_the_attempt() {
         let spool = AttemptSpool {
             abandon: Err(RemoteCapturePersistenceErrorV1::Unavailable),
         };
-        let attempt = with_replay_attempt(&spool, "remote.event.cleanup", UtcMicros(11), Ok)
+        let attempt =
+            with_replay_attempt(&spool, "remote.event.cleanup", UtcMicros(11), |attempt| {
+                std::future::ready(Ok(attempt))
+            })
+            .await
             .expect("a successful operation is unaffected by cleanup");
 
         assert_eq!(attempt, 7);

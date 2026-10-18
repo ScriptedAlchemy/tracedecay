@@ -138,7 +138,7 @@ async fn project_runtime_reuses_one_producer_and_shutdown_flushes_it() {
         ObservabilityEmissionOutcomeV1::Enqueued
     );
 
-    service.expire_all().await;
+    service.expire_all(None).await;
     assert_eq!(
         first
             .try_emit(envelope(&project_id, "mounted:after-shutdown"))
@@ -214,7 +214,7 @@ async fn a_same_root_remount_stamps_the_configuration_it_resolved() {
             .expect("configuration B emission"),
         ObservabilityEmissionOutcomeV1::Enqueued
     );
-    service.expire_all().await;
+    service.expire_all(None).await;
 
     let page = RegisteredObservabilityPortV1::new(&database)
         .query(ObservabilityQueryV1 {
@@ -271,7 +271,7 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
         )
         .await
         .expect("first daemon mount");
-    first_service.expire_all().await;
+    first_service.expire_all(None).await;
 
     let restarted_service = DaemonInvocationService::default();
     let restarted = restarted_service
@@ -291,7 +291,7 @@ async fn a_new_daemon_runtime_restarts_the_project_producer_after_clean_shutdown
             .expect("restarted enqueue"),
         ObservabilityEmissionOutcomeV1::Enqueued
     );
-    restarted_service.expire_all().await;
+    restarted_service.expire_all(None).await;
 }
 
 #[tokio::test]
@@ -560,7 +560,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
         .expect("remounted emission");
 
     // The last alias shuts the store producer down.
-    first_service.expire_all().await;
+    first_service.expire_all(None).await;
     assert_eq!(
         linked
             .try_emit(envelope(&project_id, "alias:after-shutdown"))
@@ -597,7 +597,7 @@ async fn linked_roots_alias_one_store_producer_until_the_last_alias_shuts_down()
     restarted
         .try_emit(envelope(&project_id, "alias:restarted"))
         .expect("restarted emission");
-    restarted_service.expire_all().await;
+    restarted_service.expire_all(None).await;
 
     let page = RegisteredObservabilityPortV1::new(&database)
         .query(ObservabilityQueryV1 {
@@ -811,7 +811,7 @@ async fn exact_store_routing_collapses_linked_roots_without_crossing_stores() {
             )
             .is_none()
     );
-    service.expire_all().await;
+    service.expire_all(None).await;
 }
 
 #[tokio::test]
@@ -923,7 +923,7 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
         .mount_observability_producer(linked_root, database, project_id, digest('3'), digest('5'))
         .await
         .expect("one replacement mounts after retirement");
-    service.expire_all().await;
+    service.expire_all(None).await;
 }
 
 /// A write that missed its persistence deadline is a gap in the stream, not
@@ -986,7 +986,7 @@ async fn quiescence_survives_a_producer_write_that_missed_its_deadline() {
         "observability_producer_closed"
     );
     drop(quiescence);
-    service.expire_all().await;
+    service.expire_all(None).await;
 }
 
 /// A daemon shutdown after a producer missed a write deadline joins every
@@ -1023,7 +1023,7 @@ async fn daemon_shutdown_stays_clean_after_a_producer_write_missed_its_deadline(
                 tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
                     "invocation",
                     || {},
-                    move |_| async move { service.expire_all().await },
+                    move |deadline| async move { service.expire_all(Some(deadline)).await },
                 ),
             ],
         )
@@ -1524,10 +1524,13 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
 
 #[tokio::test]
 async fn registered_blocked_writer_retries_settlement_only_on_mount_demand() {
+    // The shutdown budget must outlast scheduling delays before the worker's
+    // reply and the released writer's fence, so it keeps the production
+    // value. Only the persistence deadline is short, so held writes fail fast.
     assert_blocked_writer_retirement(
         ObservabilityProducerDeadlinesV1 {
             persistence: Duration::from_millis(50),
-            shutdown: Duration::from_millis(250),
+            ..ObservabilityProducerDeadlinesV1::default()
         },
         "observability_persistence_deadline",
         true,
@@ -1581,25 +1584,14 @@ async fn assert_blocked_writer_retirement(
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    if worker_settled {
-        // The worker must reply inside the shutdown budget, so the blocked
-        // batch fails before shutdown begins: a startup rollup pass may wait
-        // one deadline before the worker takes the event, whose write then
-        // waits another.
-        registered
-            .producer()
-            .try_emit(envelope(&project_id, "shutdown:blocked"))
-            .expect("enqueue blocked event");
-        tokio::time::sleep(deadlines.persistence * 6).await;
-    } else {
-        // The shutdown deadline must elapse first, so the blocked batch is
-        // still in flight when shutdown begins.
-        registered
-            .producer()
-            .try_emit(envelope(&project_id, "shutdown:blocked"))
-            .expect("enqueue blocked event");
-        tokio::task::yield_now().await;
-    }
+    registered
+        .producer()
+        .try_emit(envelope(&project_id, "shutdown:blocked"))
+        .expect("enqueue blocked event");
+    // The batch is still in flight when shutdown begins. A shutdown budget
+    // no longer than the persistence deadline therefore expires before the
+    // worker can reply.
+    tokio::task::yield_now().await;
 
     let retained = registered.producer();
     let error = registered

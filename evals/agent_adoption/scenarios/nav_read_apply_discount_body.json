@@ -36,10 +36,21 @@
       "ack "
     ]
   },
-  "ground_truth": [
-    "apply_discount",
-    "capped"
-  ],
+  "outcome": {
+    "kind": "answer",
+    "answer": {
+      "required": [
+        {
+          "id": "states apply_discount",
+          "pattern": "\\bapply_discount\\b"
+        },
+        {
+          "id": "states capped",
+          "pattern": "\\bcapped\\b"
+        }
+      ]
+    }
+  },
   "max_tool_calls": 3,
   "notes": "read-one-function; tracedecay_find_exact_symbol plus tracedecay_source_body should be preferred over opening the whole file."
 }

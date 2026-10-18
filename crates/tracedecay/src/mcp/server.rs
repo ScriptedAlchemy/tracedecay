@@ -23,9 +23,7 @@ use tracedecay_contracts::request_identity::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
-use tracedecay_mcp::response_handles::{
-    cleanup_expired_response_handles, response_handle_stats_json,
-};
+use tracedecay_mcp::response_handles::response_handle_stats_json;
 use tracedecay_mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
@@ -844,7 +842,6 @@ impl McpServer {
             host_admission_test_runtime,
         } = context;
         let file_token_map = HashMap::new();
-        let response_handle_root = cg.store_layout().response_handle_root.clone();
         let persisted_tokens_saved = match cg.get_tokens_saved().await {
             Ok(persisted) => Some(persisted),
             Err(error) => {
@@ -1091,15 +1088,6 @@ impl McpServer {
             dispatch_authority: RetainedDispatchAuthority::new(dispatch_server.clone()),
         });
 
-        // Detached: the sweep is best-effort and the server never waits on it.
-        drop(tracedecay_runtime_core::native_runtime::spawn_blocking(
-            move || {
-                let _ = cleanup_expired_response_handles(
-                    &response_handle_root,
-                    tracedecay_runtime_core::tracedecay::current_timestamp(),
-                );
-            },
-        ));
         if own_project_host_admission_replay
             && let Some(broker) = server.host_admission_broker.clone()
         {
@@ -1338,6 +1326,13 @@ impl McpServer {
     /// held only for the clone, never across an await on the instance.
     pub(crate) async fn cg_snapshot(&self) -> Arc<TraceDecay> {
         self.cg.read().await.clone()
+    }
+
+    /// The served-instance slot, for readers that must not keep the server
+    /// itself alive: a server handle counts as a client lease and blocks
+    /// bounded eviction.
+    pub(crate) fn graph_slot(&self) -> Arc<tokio::sync::RwLock<Arc<TraceDecay>>> {
+        Arc::clone(&self.cg)
     }
 
     #[tracing::instrument(name = "mcp.server.stats_snapshot", level = "trace", skip_all)]

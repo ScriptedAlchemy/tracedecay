@@ -36,7 +36,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "deferred scenario: no verifiable ground truth until its fixture gap is closed"
+  },
   "max_tool_calls": 6,
   "requires_tool": "ast_grep_rewrite",
   "notes": "PENDING: structural cross-file argument-order swap targeting tracedecay_ast_grep_rewrite. Deferred because the current fixture has a single reserve_stock(...) call site, so a true 'across the crate' multi-site swap is not yet gradable. Promote to active once the fixture grows additional call sites and live-run adoption is verified. Pair with tracedecay_ast_grep_search to locate the sites first."

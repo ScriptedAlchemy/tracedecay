@@ -16,7 +16,10 @@ use tracedecay_privacy::{
 };
 
 use super::PROVIDER;
-use super::cursor::{claude_cursor_key, claude_observation_source_id, claude_source_id};
+use super::cursor::{
+    claude_cursor_key, claude_observation_path_source_id, claude_source_id,
+    claude_stem_observation_source_id,
+};
 
 /// Stable identity available before the durable cursor lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +27,10 @@ pub struct ClaudeSourceScanIdentity {
     pub provider: &'static str,
     pub session_id: String,
     pub source_id: String,
+    /// Stem-derived key from before path keying. A transcript whose physical
+    /// file owns a cursor under it keeps it, so its observation ids never
+    /// change.
+    pub stem_source_id: String,
     pub source_path: PathBuf,
     pub cursor_key: TranscriptCursorKey,
 }
@@ -100,16 +107,21 @@ pub struct ClaudeSourceFrameScan {
 /// Session identities are privacy-protected here so scan, capture, and
 /// source-cursor lookup/persistence all reuse the same durable key. Public
 /// identifiers are preserved byte-for-byte; credential-shaped stems become
-/// stable `privacy.structural-id.v1.*` digests. The observation source ID is
-/// already an opaque path digest and remains unchanged.
-pub fn identify_claude_source(path: &Path) -> Option<ClaudeSourceScanIdentity> {
+/// stable `privacy.structural-id.v1.*` digests. Both source keys are opaque
+/// digests: `source_id` of the path relative to `projects_dir`, and
+/// `stem_source_id` of the stem alone.
+pub fn identify_claude_source(
+    projects_dir: &Path,
+    path: &Path,
+) -> Option<ClaudeSourceScanIdentity> {
     if !super::is_claude_session_transcript(path) {
         return None;
     }
     let session_id = protect_sensitive_structural_id(&claude_source_id(path)?).ok()?;
     Some(ClaudeSourceScanIdentity {
         provider: PROVIDER,
-        source_id: claude_observation_source_id(path),
+        source_id: claude_observation_path_source_id(projects_dir, path),
+        stem_source_id: claude_stem_observation_source_id(path),
         session_id,
         source_path: path.to_path_buf(),
         cursor_key: claude_cursor_key(path),
@@ -291,7 +303,7 @@ mod tests {
         });
         std::fs::write(&path, format!("{native}\n")).unwrap();
 
-        let identity = identify_claude_source(&path).unwrap();
+        let identity = identify_claude_source(temp.path(), &path).unwrap();
         let mut scan = try_scan_claude_source_frames_with_resume(
             identity,
             StoredCursor::default(),

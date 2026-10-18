@@ -135,12 +135,46 @@ CREATE TABLE IF NOT EXISTS work_placements_v1 (
     )
 ) STRICT;
 
--- A released placement no longer holds its root, so it is excluded: the index
--- constrains holders, not history.
-CREATE UNIQUE INDEX IF NOT EXISTS work_placements_v1_exclusive_root
-    ON work_placements_v1 (
-        project_id, repository_id, worktree_id, actor_id, policy_digest, target_root
-    )
+-- A root is a physical resource: at most one admitted or quarantined
+-- placement holds it per project and repository, whichever actor, policy
+-- digest, or worktree route admitted it. A released placement no longer holds
+-- its root, so it is excluded: the index constrains holders, not history.
+--
+-- Migration from `work_placements_v1_exclusive_root`, which also keyed on
+-- worktree, actor and policy digest and so let two authorities hold one root.
+-- Every statement is idempotent. Where a store already holds a root twice, the
+-- oldest holder (lowest rowid) keeps it and each later holder is demoted to
+-- `quarantined` (an admitted one gains the `active_holder` blocker; a
+-- quarantined one keeps its own blockers) and its `target_root` column is
+-- cleared so the new index admits it. Nothing is deleted and the payload still
+-- names the root; a later release publishes the row normally.
+DROP INDEX IF EXISTS work_placements_v1_exclusive_root;
+
+-- ponytail: correlated MIN scan is O(held rows) per open until the index below
+-- exists to serve it; placements are few, add an index if that ever changes.
+UPDATE work_placements_v1 SET
+    placement_payload = CASE WHEN state = 'admitted' THEN json_set(
+        placement_payload,
+        '$.state', 'quarantined',
+        '$.authority_version', authority_version + 1,
+        '$.blockers', json('[\"active_holder\"]')
+    ) ELSE placement_payload END,
+    authority_version = CASE WHEN state = 'admitted'
+        THEN authority_version + 1 ELSE authority_version END,
+    state = 'quarantined',
+    target_root = NULL
+WHERE target_root IS NOT NULL
+  AND state IN ('admitted', 'quarantined')
+  AND rowid > (
+      SELECT MIN(older.rowid) FROM work_placements_v1 AS older
+      WHERE older.project_id = work_placements_v1.project_id
+        AND older.repository_id = work_placements_v1.repository_id
+        AND older.target_root = work_placements_v1.target_root
+        AND older.state IN ('admitted', 'quarantined')
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS work_placements_v1_exclusive_target
+    ON work_placements_v1 (project_id, repository_id, target_root)
     WHERE target_root IS NOT NULL AND state IN ('admitted', 'quarantined');
 
 -- Explicit duplicate-effort adjudications are revisioned owner facts. They

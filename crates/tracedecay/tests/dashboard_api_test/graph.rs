@@ -97,6 +97,7 @@ impl CodeGraphProjectionReadPort for FixtureGraphProjectionV1 {
                 ),
                 RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
+                RequestAdmission::GrantExpired => Err(CodeGraphReadError::Denied),
             }
         })
     }

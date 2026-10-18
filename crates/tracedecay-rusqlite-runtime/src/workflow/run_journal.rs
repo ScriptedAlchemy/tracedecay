@@ -9,18 +9,18 @@ use tracedecay_contracts::{
     WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1, WorkflowActiveRunRecoveryCursorV1,
     WorkflowActiveRunRecoveryPageV1, WorkflowArtifactPayload, WorkflowArtifactPersistOutcome,
     WorkflowArtifactStoreError, WorkflowArtifactStorePort, WorkflowFanOutAttemptBindingV1,
-    WorkflowRunAppendOutcome, WorkflowRunAppendRequest, WorkflowRunStorageError,
-    WorkflowRunStoragePort,
+    WorkflowRunAppendOutcome, WorkflowRunAppendRequest, WorkflowRunReadPort,
+    WorkflowRunStorageError, WorkflowRunStoragePort,
 };
 use tracedecay_domain::{
     RunId, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAuthority, WorkflowRunEvent,
     WorkflowRunProjection, canonical_sha256,
 };
 
-use super::{
-    ExactSqlTransaction, ExactSqlValue, WorkflowSqliteAuthority, encode_json, execute_tx, query_tx,
-    sql_text,
-};
+use super::{ExactSqlValue, WorkflowSqliteAuthority, encode_json, execute_tx, query_tx, sql_text};
+use crate::exact_sql::ExactSqlTransaction;
+use crate::work::{RegisteredWorkQuery, registered_work_query};
+use crate::work_run_control::WorkSqliteJobStorage;
 
 fn run_journal_unavailable<E>(_: E) -> WorkflowRunStorageError {
     WorkflowRunStorageError::Unavailable
@@ -35,11 +35,11 @@ fn decode_event(
 }
 
 fn history_tx(
-    transaction: &ExactSqlTransaction,
+    source: &impl RegisteredWorkQuery,
     run_id: &RunId,
 ) -> Result<Vec<WorkflowRunEvent>, WorkflowRunStorageError> {
-    let rows = query_tx(
-        transaction,
+    let rows = registered_work_query(
+        source,
         "SELECT event_payload, event_digest FROM workflow_run_journal
          WHERE run_id = ?1 ORDER BY sequence",
         vec![ExactSqlValue::Text(run_id.as_str().to_owned())],
@@ -60,8 +60,21 @@ fn rebuild(history: &[WorkflowRunEvent]) -> Result<WorkflowRunProjection, Workfl
     WorkflowRunProjection::rebuild(history).map_err(|_| WorkflowRunStorageError::InvalidHistory)
 }
 
+/// Replays one run's journal from a single statement, so the projection is a
+/// consistent snapshot whatever `source` is.
+pub(crate) fn projection_from(
+    source: &impl RegisteredWorkQuery,
+    run_id: &RunId,
+) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
+    let history = history_tx(source, run_id)?;
+    if history.is_empty() {
+        return Err(WorkflowRunStorageError::NotFound);
+    }
+    rebuild(&history)
+}
+
 pub(crate) fn append_in_transaction(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl crate::work::RegisteredWorkWrite,
     request: &WorkflowRunAppendRequest,
 ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
     let payload = encode_json(&request.event).map_err(|_| WorkflowRunStorageError::Unavailable)?;
@@ -102,72 +115,27 @@ pub(crate) fn append_in_transaction(
     rebuild(&appended).map(WorkflowRunAppendOutcome::Appended)
 }
 
-impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
-    fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
-        let transaction = self
-            .handle()
-            .begin_deferred()
-            .map_err(run_journal_unavailable)?;
-        let history = history_tx(&transaction, run_id)?;
-        let _ = transaction.rollback();
-        if history.is_empty() {
-            return Err(WorkflowRunStorageError::NotFound);
-        }
-        rebuild(&history)
-    }
+fn deferred<R>(
+    authority: &WorkflowSqliteAuthority,
+    read: impl FnOnce(&ExactSqlTransaction) -> Result<R, WorkflowRunStorageError>,
+) -> Result<R, WorkflowRunStorageError> {
+    let transaction = authority
+        .handle()
+        .begin_deferred()
+        .map_err(run_journal_unavailable)?;
+    let result = read(&transaction);
+    let _ = transaction.rollback();
+    result
+}
 
-    fn append(
-        &self,
-        request: &WorkflowRunAppendRequest,
-    ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(run_journal_unavailable)?;
-        let outcome = append_in_transaction(&transaction, request);
-        match outcome {
-            Ok(appended @ WorkflowRunAppendOutcome::Appended(_)) => transaction
-                .commit()
-                .map(|_| appended)
-                .map_err(run_journal_unavailable),
-            Ok(replayed @ WorkflowRunAppendOutcome::Replayed(_)) => {
-                transaction.rollback().map_err(run_journal_unavailable)?;
-                Ok(replayed)
-            }
-            Err(error) => {
-                transaction.rollback().map_err(run_journal_unavailable)?;
-                Err(error)
-            }
-        }
+impl WorkflowRunReadPort for WorkflowSqliteAuthority {
+    fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
+        deferred(self, |transaction| projection_from(transaction, run_id))
     }
 
     #[tracing::instrument(name = "rusqlite.workflow.projections_scan", level = "trace", skip_all)]
     fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
-        let transaction = self
-            .handle()
-            .begin_deferred()
-            .map_err(run_journal_unavailable)?;
-        let rows = query_tx(
-            &transaction,
-            "SELECT DISTINCT run_id FROM workflow_run_journal ORDER BY run_id",
-            Vec::new(),
-        )
-        .map_err(run_journal_unavailable)?;
-        let projections = rows
-            .rows
-            .iter()
-            .map(|row| {
-                let run_id = sql_text(&row.values, 0)
-                    .ok_or(WorkflowRunStorageError::InvalidHistory)
-                    .and_then(|value| {
-                        RunId::new(value.to_owned())
-                            .map_err(|_| WorkflowRunStorageError::InvalidHistory)
-                    })?;
-                history_tx(&transaction, &run_id).and_then(|history| rebuild(&history))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let _ = transaction.rollback();
-        Ok(projections)
+        deferred(self, projections_from)
     }
 
     #[tracing::instrument(name = "rusqlite.workflow.recovery_page", level = "trace", skip_all)]
@@ -176,67 +144,8 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         authority: &WorkAuthority,
         after: Option<&WorkflowActiveRunRecoveryCursorV1>,
     ) -> Result<WorkflowActiveRunRecoveryPageV1, WorkflowRunStorageError> {
-        let transaction = self
-            .handle()
-            .begin_deferred()
-            .map_err(run_journal_unavailable)?;
-        let page_limit = i64::try_from(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 + 1)
-            .map_err(|_| WorkflowRunStorageError::Unavailable)?;
-        let rows = match after {
-            Some(cursor) => query_tx(
-                &transaction,
-                "SELECT DISTINCT run_id FROM workflow_run_journal
-                 WHERE run_id > ?1 ORDER BY run_id LIMIT ?2",
-                vec![
-                    ExactSqlValue::Text(cursor.after_run_id.as_str().to_owned()),
-                    ExactSqlValue::Integer(page_limit),
-                ],
-            ),
-            None => query_tx(
-                &transaction,
-                "SELECT DISTINCT run_id FROM workflow_run_journal
-                 ORDER BY run_id LIMIT ?1",
-                vec![ExactSqlValue::Integer(page_limit)],
-            ),
-        }
-        .map_err(run_journal_unavailable)?;
-        let run_ids = rows
-            .rows
-            .iter()
-            .map(|row| {
-                let value =
-                    sql_text(&row.values, 0).ok_or(WorkflowRunStorageError::InvalidHistory)?;
-                RunId::new(value.to_owned()).map_err(|_| WorkflowRunStorageError::InvalidHistory)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let page_run_ids = run_ids
-            .iter()
-            .take(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1)
-            .cloned()
-            .collect::<Vec<_>>();
-        let continuation = (run_ids.len() > WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1).then(|| {
-            WorkflowActiveRunRecoveryCursorV1 {
-                after_run_id: page_run_ids[WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 - 1].clone(),
-            }
-        });
-
-        let projections = page_run_ids
-            .iter()
-            .map(|run_id| history_tx(&transaction, run_id).and_then(|history| rebuild(&history)))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|projection| {
-                !projection.status().is_terminal()
-                    && projection
-                        .fan_out_plans()
-                        .values()
-                        .all(|plan| &plan.authority == authority)
-            })
-            .collect();
-        let _ = transaction.rollback();
-        Ok(WorkflowActiveRunRecoveryPageV1 {
-            projections,
-            continuation,
+        deferred(self, |transaction| {
+            active_projection_page_from(transaction, authority, after)
         })
     }
 
@@ -245,36 +154,157 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         &self,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<Option<WorkflowFanOutAttemptBindingV1>, WorkflowRunStorageError> {
-        // The attempt identity already carries its owning workflow run ID, so
-        // the journal primary key provides a bounded lookup. Do not use the
-        // trait's cross-run fallback scan on response-delivery paths.
-        let projection = match self.projection(identity.run_id()) {
-            Ok(projection) => projection,
-            Err(WorkflowRunStorageError::NotFound) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let mut binding = None;
-        for plan in projection.fan_out_plans().values() {
-            if !plan.children.iter().any(|child| {
-                projection.planned_fan_out_attempt(identity) == Some(&child.attempt_identity)
-            }) {
-                continue;
-            }
-            let candidate = WorkflowFanOutAttemptBindingV1 {
-                run_id: projection.run_id().clone(),
-                step_id: plan.step_id.clone(),
-                plan_digest: plan.plan_digest.clone(),
-            };
-            if binding
-                .as_ref()
-                .is_some_and(|existing| existing != &candidate)
-            {
-                return Err(WorkflowRunStorageError::InvalidHistory);
-            }
-            binding = Some(candidate);
-        }
-        Ok(binding)
+        deferred(self, |transaction| {
+            fan_out_binding_from(transaction, identity)
+        })
     }
+}
+
+impl WorkflowRunReadPort for WorkSqliteJobStorage<'_> {
+    fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
+        projection_from(self.transaction, run_id)
+    }
+
+    fn projections(&self) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
+        projections_from(self.transaction)
+    }
+
+    fn active_projection_page(
+        &self,
+        authority: &WorkAuthority,
+        after: Option<&WorkflowActiveRunRecoveryCursorV1>,
+    ) -> Result<WorkflowActiveRunRecoveryPageV1, WorkflowRunStorageError> {
+        active_projection_page_from(self.transaction, authority, after)
+    }
+
+    fn fan_out_binding(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+    ) -> Result<Option<WorkflowFanOutAttemptBindingV1>, WorkflowRunStorageError> {
+        fan_out_binding_from(self.transaction, identity)
+    }
+}
+
+impl WorkflowRunStoragePort for WorkSqliteJobStorage<'_> {
+    fn append(
+        &self,
+        request: &WorkflowRunAppendRequest,
+    ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
+        append_in_transaction(self.transaction, request)
+    }
+}
+
+fn run_ids(rows: &crate::exact_sql::ExactSqlRows) -> Result<Vec<RunId>, WorkflowRunStorageError> {
+    rows.rows
+        .iter()
+        .map(|row| {
+            let value = sql_text(&row.values, 0).ok_or(WorkflowRunStorageError::InvalidHistory)?;
+            RunId::new(value.to_owned()).map_err(|_| WorkflowRunStorageError::InvalidHistory)
+        })
+        .collect()
+}
+
+fn projections_from(
+    source: &impl RegisteredWorkQuery,
+) -> Result<Vec<WorkflowRunProjection>, WorkflowRunStorageError> {
+    let rows = query_tx(
+        source,
+        "SELECT DISTINCT run_id FROM workflow_run_journal ORDER BY run_id",
+        Vec::new(),
+    )
+    .map_err(run_journal_unavailable)?;
+    run_ids(&rows)?
+        .iter()
+        .map(|run_id| history_tx(source, run_id).and_then(|history| rebuild(&history)))
+        .collect()
+}
+
+fn active_projection_page_from(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+    after: Option<&WorkflowActiveRunRecoveryCursorV1>,
+) -> Result<WorkflowActiveRunRecoveryPageV1, WorkflowRunStorageError> {
+    let page_limit = i64::try_from(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 + 1)
+        .map_err(|_| WorkflowRunStorageError::Unavailable)?;
+    let rows = match after {
+        Some(cursor) => query_tx(
+            source,
+            "SELECT DISTINCT run_id FROM workflow_run_journal
+             WHERE run_id > ?1 ORDER BY run_id LIMIT ?2",
+            vec![
+                ExactSqlValue::Text(cursor.after_run_id.as_str().to_owned()),
+                ExactSqlValue::Integer(page_limit),
+            ],
+        ),
+        None => query_tx(
+            source,
+            "SELECT DISTINCT run_id FROM workflow_run_journal
+             ORDER BY run_id LIMIT ?1",
+            vec![ExactSqlValue::Integer(page_limit)],
+        ),
+    }
+    .map_err(run_journal_unavailable)?;
+    let run_ids = run_ids(&rows)?;
+    let page_run_ids = run_ids
+        .iter()
+        .take(WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1)
+        .cloned()
+        .collect::<Vec<_>>();
+    let continuation = (run_ids.len() > WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1).then(|| {
+        WorkflowActiveRunRecoveryCursorV1 {
+            after_run_id: page_run_ids[WORKFLOW_ACTIVE_RECOVERY_PAGE_SIZE_V1 - 1].clone(),
+        }
+    });
+
+    let projections = page_run_ids
+        .iter()
+        .map(|run_id| history_tx(source, run_id).and_then(|history| rebuild(&history)))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|projection| {
+            !projection.status().is_terminal()
+                && projection
+                    .fan_out_plans()
+                    .values()
+                    .all(|plan| &plan.authority == authority)
+        })
+        .collect();
+    Ok(WorkflowActiveRunRecoveryPageV1 {
+        projections,
+        continuation,
+    })
+}
+
+fn fan_out_binding_from(
+    source: &impl RegisteredWorkQuery,
+    identity: &WorkAttemptIdentityV1,
+) -> Result<Option<WorkflowFanOutAttemptBindingV1>, WorkflowRunStorageError> {
+    let projection = match projection_from(source, identity.run_id()) {
+        Ok(projection) => projection,
+        Err(WorkflowRunStorageError::NotFound) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut binding = None;
+    for plan in projection.fan_out_plans().values() {
+        if !plan.children.iter().any(|child| {
+            projection.planned_fan_out_attempt(identity) == Some(&child.attempt_identity)
+        }) {
+            continue;
+        }
+        let candidate = WorkflowFanOutAttemptBindingV1 {
+            run_id: projection.run_id().clone(),
+            step_id: plan.step_id.clone(),
+            plan_digest: plan.plan_digest.clone(),
+        };
+        if binding
+            .as_ref()
+            .is_some_and(|existing| existing != &candidate)
+        {
+            return Err(WorkflowRunStorageError::InvalidHistory);
+        }
+        binding = Some(candidate);
+    }
+    Ok(binding)
 }
 
 fn artifact_store_unavailable<E>(_: E) -> WorkflowArtifactStoreError {
@@ -282,7 +312,7 @@ fn artifact_store_unavailable<E>(_: E) -> WorkflowArtifactStoreError {
 }
 
 fn stored_payload_tx(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkQuery,
     digest: &str,
 ) -> Result<Option<Vec<u8>>, WorkflowArtifactStoreError> {
     let rows = query_tx(
@@ -300,7 +330,7 @@ fn stored_payload_tx(
     }
 }
 
-impl WorkflowArtifactStorePort for WorkflowSqliteAuthority {
+impl WorkflowArtifactStorePort for WorkSqliteJobStorage<'_> {
     fn persist(
         &self,
         payload: &WorkflowArtifactPayload,
@@ -308,27 +338,15 @@ impl WorkflowArtifactStorePort for WorkflowSqliteAuthority {
         let digest = payload.artifact().digest().as_str();
         let byte_length = i64::try_from(payload.artifact().byte_length())
             .map_err(|_| WorkflowArtifactStoreError::Oversized)?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(artifact_store_unavailable)?;
-        let existing = match stored_payload_tx(&transaction, digest) {
-            Ok(existing) => existing,
-            Err(error) => {
-                let _ = transaction.rollback();
-                return Err(error);
-            }
-        };
-        if let Some(stored) = existing {
-            let _ = transaction.rollback();
+        if let Some(stored) = stored_payload_tx(self.transaction, digest)? {
             return if stored.as_slice() == payload.bytes() {
                 Ok(WorkflowArtifactPersistOutcome::Replayed)
             } else {
                 Err(WorkflowArtifactStoreError::PayloadConflict)
             };
         }
-        if let Err(error) = execute_tx(
-            &transaction,
+        execute_tx(
+            self.transaction,
             "INSERT INTO workflow_artifact_payloads (
                  payload_digest, byte_length, payload
              ) VALUES (?1, ?2, ?3)",
@@ -337,27 +355,16 @@ impl WorkflowArtifactStorePort for WorkflowSqliteAuthority {
                 ExactSqlValue::Integer(byte_length),
                 ExactSqlValue::Blob(payload.bytes().to_vec()),
             ],
-        ) {
-            let _ = transaction.rollback();
-            return Err(artifact_store_unavailable(error));
-        }
-        transaction
-            .commit()
-            .map(|_| WorkflowArtifactPersistOutcome::Persisted)
-            .map_err(artifact_store_unavailable)
+        )
+        .map_err(artifact_store_unavailable)?;
+        Ok(WorkflowArtifactPersistOutcome::Persisted)
     }
 
     fn load(
         &self,
         artifact: &WorkArtifactRefV1,
     ) -> Result<WorkflowArtifactPayload, WorkflowArtifactStoreError> {
-        let transaction = self
-            .handle()
-            .begin_deferred()
-            .map_err(artifact_store_unavailable)?;
-        let stored = stored_payload_tx(&transaction, artifact.digest().as_str());
-        let _ = transaction.rollback();
-        let Some(bytes) = stored? else {
+        let Some(bytes) = stored_payload_tx(self.transaction, artifact.digest().as_str())? else {
             return Err(WorkflowArtifactStoreError::Missing);
         };
         // Construction re-verifies byte length and content digest, so a

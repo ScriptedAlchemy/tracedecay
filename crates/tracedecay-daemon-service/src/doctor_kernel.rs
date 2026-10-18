@@ -282,6 +282,58 @@ pub fn pending_schema_migration_read(
     storage_family_read(findings)
 }
 
+/// Report the shards whose WAL checkpoint fence expired with a read slot still
+/// held (#4097). Each finding names the holders the writer saw: a reader of
+/// this daemon by id, or another process by command name and pid.
+#[must_use]
+pub fn wal_checkpoint_pinned_read(
+    telemetry: &tracedecay_runtime_core::shard_runtime::telemetry::RuntimeTelemetryProjection,
+) -> DoctorStorageFamilyReadV1 {
+    use tracedecay_contracts::storage::{StoreKeyV1, wal_checkpoint_pinned_finding};
+    use tracedecay_runtime_core::shard_runtime::registry::{CheckpointBlocker, CheckpointPressure};
+
+    let mut findings = Vec::new();
+    for shard in &telemetry.shards {
+        let Some(CheckpointPressure::FenceExpired { wal, holders }) = shard
+            .writer
+            .as_ref()
+            .map(|writer| &writer.checkpoint_pressure)
+        else {
+            continue;
+        };
+        let mut named = holders
+            .blockers
+            .iter()
+            .map(|holder| match holder {
+                CheckpointBlocker::SnapshotLease { lease_id, .. } => {
+                    format!("lease:{}", lease_id.as_str())
+                }
+                CheckpointBlocker::PhysicalReader { reader_id, .. } => {
+                    format!("reader:{reader_id}")
+                }
+                CheckpointBlocker::ForeignConnection { pid, process } => {
+                    format!("process:{process}[{pid}]")
+                }
+            })
+            .collect::<Vec<_>>();
+        if holders.omitted > 0 {
+            named.push(format!("+{}", holders.omitted));
+        }
+        if named.is_empty() {
+            named.push("unnamed".to_owned());
+        }
+        let Ok(store) = StoreKeyV1::new(format!("{:?}", shard.binding.shard_id)) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let detail = format!("wal_bytes={}.held_by={}", wal.bytes, named.join(","));
+        let Ok(finding) = wal_checkpoint_pinned_finding(&store, &detail) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
 pub struct SchemaConvergenceDoctorReadV1 {
     pub storage: DoctorStorageFamilyReadV1,
     pub findings: Vec<SchemaConvergenceFindingV1>,
@@ -389,15 +441,13 @@ pub fn observability_read_from_model(
 
 // === Storage retention/size (Storage family) =================================
 
-/// Evaluate every owner-configured soft budget against the daemon's retained
-/// project, registry, and session stores. A configured key that is not mounted
-/// is emitted as typed unknown telemetry rather than silently omitted.
 struct CollectedStoreTelemetryV1 {
-    findings: DoctorStorageFamilyReadV1,
+    table_growth_findings: DoctorStorageFamilyReadV1,
     table_growth_evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
+    reads:
+        std::collections::BTreeMap<String, tracedecay_contracts::storage::StorageTelemetryReadV1>,
 }
 
-const MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES: u64 = 64 * 1024 * 1024;
 /// Entry ceiling for the code-index generation census.
 ///
 /// The census is metadata-only, a `stat` and a bounded manifest prefix per
@@ -434,16 +484,6 @@ fn permits_synchronous_generation_census(generations_root: &Path) -> bool {
     true
 }
 
-fn permits_synchronous_table_growth(
-    read: &tracedecay_contracts::storage::StorageTelemetryReadV1,
-) -> bool {
-    matches!(
-        read,
-        tracedecay_contracts::storage::StorageTelemetryReadV1::Observed { sample }
-            if sample.total_bytes().get() <= MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES
-    )
-}
-
 #[tracing::instrument(name = "daemon.doctor.over_budget", level = "trace", skip_all)]
 async fn collect_over_budget_store_findings(
     context: &RequestContext,
@@ -451,25 +491,18 @@ async fn collect_over_budget_store_findings(
         tracedecay_contracts::storage::StoreKeyV1,
         GuardedStoreTelemetryPort,
     )],
-    retention: &tracedecay_configuration::RetentionConfig,
 ) -> CollectedStoreTelemetryV1 {
     use std::collections::BTreeMap;
     use tracedecay_contracts::storage::{
-        StorageTelemetryReadV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
-        over_budget_finding, table_growth_doctor_evidence, table_growth_finding,
+        StoreSizeTelemetryPort, TableGrowthTelemetryReadV1, table_growth_doctor_evidence,
+        table_growth_finding,
     };
 
     let mut reads = BTreeMap::new();
     let mut table_growth_evidence = Vec::new();
     for (store, port) in telemetry_ports {
         let read = port.store_size(context, store).await;
-        let table_growth = if permits_synchronous_table_growth(&read) {
-            port.preview_table_growth(context, store).await
-        } else {
-            TableGrowthTelemetryReadV1::Unknown {
-                store: store.clone(),
-            }
-        };
+        let table_growth = port.latest_table_growth(context, store);
         if let TableGrowthTelemetryReadV1::Observed { samples, .. } = &table_growth {
             for sample in samples {
                 tracing::info!(
@@ -489,43 +522,84 @@ async fn collect_over_budget_store_findings(
         reads.entry(store.as_str().to_owned()).or_insert(read);
     }
 
-    let mut findings = Vec::new();
-    for evidence in &table_growth_evidence {
-        let Ok(finding) = table_growth_finding(evidence) else {
-            return CollectedStoreTelemetryV1 {
-                findings: DoctorStorageFamilyReadV1::Unknown,
-                table_growth_evidence,
-            };
-        };
-        findings.push(finding);
+    let table_growth_findings = table_growth_evidence
+        .iter()
+        .map(table_growth_finding)
+        .collect::<Result<Vec<_>, _>>()
+        .map_or(DoctorStorageFamilyReadV1::Unknown, storage_family_read);
+    CollectedStoreTelemetryV1 {
+        table_growth_findings,
+        table_growth_evidence,
+        reads,
     }
+}
+
+/// Evaluate every owner-configured soft budget against the daemon's retained
+/// project, registry, and session stores. A configured key the profile
+/// footprint sizes is evaluated there; any other key that is not mounted is
+/// emitted as typed unknown telemetry rather than silently omitted.
+fn soft_budget_findings(
+    mut reads: std::collections::BTreeMap<
+        String,
+        tracedecay_contracts::storage::StorageTelemetryReadV1,
+    >,
+    retention: &tracedecay_configuration::RetentionConfig,
+    footprint_keys: &BTreeSet<&str>,
+) -> DoctorStorageFamilyReadV1 {
+    use tracedecay_contracts::storage::{StorageTelemetryReadV1, over_budget_finding};
+
+    let mut findings = Vec::new();
     for configured_store in retention.store_soft_budgets_bytes.keys() {
+        let read = reads.remove(configured_store);
+        if read.is_none() && footprint_keys.contains(configured_store.as_str()) {
+            continue;
+        }
         let Ok(Some(budget)) = retention.store_soft_budget(configured_store) else {
-            return CollectedStoreTelemetryV1 {
-                findings: DoctorStorageFamilyReadV1::Unknown,
-                table_growth_evidence,
-            };
+            return DoctorStorageFamilyReadV1::Unknown;
         };
-        let read =
-            reads
-                .remove(configured_store)
-                .unwrap_or_else(|| StorageTelemetryReadV1::Unknown {
-                    store: budget.store.clone(),
-                });
+        let read = read.unwrap_or_else(|| StorageTelemetryReadV1::Unknown {
+            store: budget.store.clone(),
+        });
         let Ok(finding) =
             over_budget_finding(&budget, &read, DoctorCoverageCompletenessV1::Complete)
         else {
-            return CollectedStoreTelemetryV1 {
-                findings: DoctorStorageFamilyReadV1::Unknown,
-                table_growth_evidence,
-            };
+            return DoctorStorageFamilyReadV1::Unknown;
         };
         findings.push(finding);
     }
-    CollectedStoreTelemetryV1 {
-        findings: storage_family_read(findings),
-        table_growth_evidence,
-    }
+    storage_family_read(findings)
+}
+
+/// Size every store family under the profile against its bound. Registered
+/// project roots name each project store's root and whether it still exists.
+#[tracing::instrument(name = "daemon.doctor.profile_footprint", level = "trace", skip_all)]
+async fn profile_footprint_read(
+    registry: &RegisteredGlobalDb,
+    profile_root: &Path,
+    retention: &tracedecay_configuration::RetentionConfig,
+) -> Option<tracedecay_maintenance::retention::footprint::ProfileFootprintV1> {
+    let registered = registry
+        .list_code_projects(usize::MAX)
+        .await
+        .ok()?
+        .into_iter()
+        .map(|project| (project.project_id, project.canonical_root))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let overrides = retention.store_soft_budgets_bytes.clone();
+    let profile_root = profile_root.to_path_buf();
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        use tracedecay_maintenance::retention::footprint::{
+            census_profile_footprint, census_sqlite_temp_spill,
+        };
+        let mut footprint = census_profile_footprint(&profile_root, &registered, &overrides);
+        footprint.entries.extend(census_sqlite_temp_spill(
+            Path::new("/proc/self/fd"),
+            &overrides,
+        ));
+        footprint
+    })
+    .await
+    .ok()
 }
 
 /// The generations the retention pass protects: the one the mounted scheduler
@@ -760,15 +834,25 @@ async fn deferred_native_retirements(graph: &tracedecay_runtime_core::db::Databa
     u64::try_from(row.get::<i64>(0).ok()?).ok()
 }
 
-/// On-disk bytes of the live staging container and its WAL sidecar; a
-/// container that does not exist yet weighs nothing.
+/// The container file plus its Grafeo WAL, which is a directory of
+/// `wal_NNNNNNNN.log` segments rather than one file.
 fn live_graph_container_bytes(container: &Path) -> u64 {
+    use tracedecay_maintenance::retention::footprint::{
+        MAX_FOOTPRINT_ENTRIES, WalkedEntryV1, walk_regular_files,
+    };
+
+    let mut bytes = std::fs::metadata(container).map_or(0, |metadata| metadata.len());
     let wal = container.with_extension("grafeo.wal");
-    [container, wal.as_path()]
-        .into_iter()
-        .filter_map(|path| std::fs::metadata(path).ok())
-        .map(|metadata| metadata.len())
-        .sum()
+    if wal.is_dir() {
+        walk_regular_files(&wal, MAX_FOOTPRINT_ENTRIES, &mut |_, walked| {
+            if let WalkedEntryV1::File { bytes: segment } = walked {
+                bytes = bytes.saturating_add(segment);
+            }
+        });
+    } else if let Ok(metadata) = std::fs::metadata(&wal) {
+        bytes = bytes.saturating_add(metadata.len());
+    }
+    bytes
 }
 
 /// Resolved kernel reads wired into the Doctor composer for one report.
@@ -1149,6 +1233,7 @@ pub fn production_doctor_report_reader(
                 temporal_ok,
                 profile_storage,
                 store_telemetry,
+                profile_footprint,
                 profile_retention_backlog,
                 project_retention_backlog,
                 code_generation_retention,
@@ -1165,7 +1250,8 @@ pub fn production_doctor_report_reader(
                         observation_authority_audit_ok(registry.as_ref()),
                         project_temporal,
                         profile_storage_reads,
-                        collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
+                        collect_over_budget_store_findings(&context, &telemetry_ports),
+                        profile_footprint_read(registry.as_ref(), &profile_root, &retention),
                         session_retention_read(profile_sessions.as_deref(), &retention, now),
                         session_retention_read(project_sessions.as_deref(), &retention, now),
                         collect_code_generation_retention_findings(
@@ -1195,10 +1281,27 @@ pub fn production_doctor_report_reader(
             .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
             let schema_convergence = schema_convergence();
+            let footprint_keys = profile_footprint
+                .iter()
+                .flat_map(|footprint| footprint.entries.iter().map(|entry| entry.key.as_str()))
+                .chain(
+                    profile_footprint
+                        .is_some()
+                        .then_some(tracedecay_maintenance::retention::footprint::PROFILE_TOTAL_KEY),
+                )
+                .collect::<BTreeSet<_>>();
+            let soft_budgets =
+                soft_budget_findings(store_telemetry.reads, &retention, &footprint_keys);
+            let footprint = profile_footprint.as_ref().map_or(
+                DoctorStorageFamilyReadV1::Unknown,
+                tracedecay_maintenance::retention::footprint::footprint_findings,
+            );
             let storage = [
                 profile_storage.orphan_stores,
                 profile_storage.unregistered_stores,
-                store_telemetry.findings,
+                store_telemetry.table_growth_findings,
+                soft_budgets,
+                footprint,
                 profile_storage.incident_debris,
                 profile_retention_backlog,
                 project_retention_backlog,

@@ -2704,6 +2704,11 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     /// The refused store stays unmounted, so every open re-runs admission and
     /// a reset store serves on its next open without a daemon restart.
     reset_required_stores: StdMutex<BTreeMap<StoreShardIdV1, StoreResetRequiredV1>>,
+    /// Store files deleted or replaced while this daemon held them open,
+    /// keyed by path. The writer's file probe closes the store's connections,
+    /// but the mounted owners keep their lease on the closed runtime until a
+    /// restart remounts them, so an entry lives as long as the registry.
+    lost_store_files: StdMutex<BTreeMap<std::path::PathBuf, StoreResetRequiredV1>>,
     retained_hook_tasks: RetainedHookTasks,
     session_sync_service:
         Arc<OnceLock<Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>>>,
@@ -2749,6 +2754,7 @@ const _: fn(&DaemonSessionRuntimeRegistryV1) = |value| {
         code_graph_publication_gates,
         registered_schema_convergence,
         reset_required_stores,
+        lost_store_files,
         retained_hook_tasks,
         session_sync_service,
         remote_recovery_project_lifecycle,
@@ -2778,6 +2784,7 @@ const _: fn(&DaemonSessionRuntimeRegistryV1) = |value| {
     assert_send_sync(code_graph_publication_gates);
     assert_send_sync(registered_schema_convergence);
     assert_send_sync(reset_required_stores);
+    assert_send_sync(lost_store_files);
     assert_send_sync(retained_hook_tasks);
     assert_send_sync(session_sync_service);
     assert_send_sync(remote_recovery_project_lifecycle);

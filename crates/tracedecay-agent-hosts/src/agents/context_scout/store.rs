@@ -327,6 +327,9 @@ fn document_needs_provenance_reset(encoded: &str, project_id: [u8; 16]) -> bool 
     if stored_project != project_id {
         return false;
     }
+    if has_untagged_candidate_evidence(object) {
+        return true;
+    }
     if !object.contains_key("delivery_addresses")
         || !object.contains_key("delivery_provenance_complete")
     {
@@ -338,6 +341,25 @@ fn document_needs_provenance_reset(encoded: &str, project_id: [u8; 16]) -> bool 
         }
         Err(_) => false,
     }
+}
+
+/// A queued candidate written before candidate evidence became the tagged
+/// code/session union carries a bare evidence object with no `kind`. Such a
+/// document cannot decode into the current shape, so startup resets it
+/// instead of reporting the durable state unavailable forever.
+fn has_untagged_candidate_evidence(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let untagged = |stored: &serde_json::Value| {
+        stored
+            .pointer("/entry/envelope/candidate/evidence")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|evidence| !evidence.contains_key("kind"))
+    };
+    ["entries", "delivery_addresses"].into_iter().any(|field| {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|rows| rows.iter().any(untagged))
+    })
 }
 
 fn decode_mutation_settlement(encoded: &str) -> Option<ContextScoutMutationSettlementV1> {
@@ -1287,6 +1309,24 @@ impl ProjectContextScoutDurableStoreV1 {
             return ContextScoutDurableStoreOutcomeV1::Unavailable;
         }
         self.update_state("enqueue Context Scout suggestion", move |state| {
+            // A re-judged copy of a suggestion already claimed or delivered at
+            // this address never replaces it: the session would see it twice.
+            let same_suggestion = |other: &ContextScoutDurableQueueEntryV1| {
+                other.work.address == entry.work.address
+                    && other.envelope.candidate.dedupe_key == entry.envelope.candidate.dedupe_key
+            };
+            if state
+                .entries
+                .iter()
+                .any(|stored| stored.lease.is_some() && same_suggestion(&stored.entry))
+                || state
+                    .delivery_addresses
+                    .iter()
+                    .filter_map(|binding| binding.entry.as_ref())
+                    .any(same_suggestion)
+            {
+                return ContextScoutDurableStoreOutcomeV1::Duplicate;
+            }
             if state.tombstones.contains(&entry.work) {
                 return ContextScoutDurableStoreOutcomeV1::Superseded;
             }
@@ -1420,42 +1460,6 @@ impl ProjectContextScoutDurableStoreV1 {
         let receipt = receipt.clone();
         self.update_state("record Context Scout delivery", move |state| {
             state.record_delivery(&claim, &receipt)
-        })
-        .await
-        .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
-    }
-
-    /// Atomically resolves one public opaque claim proof and records its
-    /// delivery. Resolution and mutation share the store transaction so lease
-    /// takeover or supersession cannot race a transport round trip.
-    pub async fn record_delivery_by_lease(
-        &self,
-        work: ContextScoutWorkV1,
-        envelope_id: [u8; 16],
-        lease: ContextScoutLeaseV1,
-        configuration_revision: [u8; 32],
-        receipt: &ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutDurableStoreOutcomeV1 {
-        if work.generation == 0
-            || work.input_watermark == [0; 32]
-            || !self.in_scope(work.address)
-            || envelope_id == [0; 16]
-            || configuration_revision == [0; 32]
-            || receipt.envelope_id != envelope_id
-            || validate_receipt_shape(receipt).is_err()
-            || lease.validate(receipt.delivered_at).is_err()
-        {
-            return ContextScoutDurableStoreOutcomeV1::Unavailable;
-        }
-        let receipt = receipt.clone();
-        self.update_state("record Context Scout delivery by lease", move |state| {
-            state.record_delivery_by_lease(
-                work,
-                envelope_id,
-                lease,
-                configuration_revision,
-                &receipt,
-            )
         })
         .await
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)

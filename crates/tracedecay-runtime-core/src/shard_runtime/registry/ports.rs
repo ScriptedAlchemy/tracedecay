@@ -505,6 +505,14 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         ))
     }
 
+    fn file_lost(&self) -> bool {
+        RepositoryRuntimePhysicalAttachment::file_lost(self)
+    }
+
+    fn lost_file_closed(&self) -> bool {
+        RepositoryRuntimePhysicalAttachment::lost_file_closed(self)
+    }
+
     fn drain(&self) -> Result<(), String> {
         RepositoryRuntimePhysicalAttachment::drain(self)
     }
@@ -597,7 +605,7 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
     ) -> StoreRuntimeRegistryFuture<'_, Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure>>
     {
         Box::pin(async move {
-            RepositoryRuntimePhysicalAttachment::dispatch_read_async(self, request, probe)
+            RepositoryRuntimePhysicalAttachment::dispatch_read(self, request, probe)
                 .await
                 .map_err(|error| match error {
                     RepositoryDispatchError::Reader(ReaderAcquireError::Saturated { .. }) => {

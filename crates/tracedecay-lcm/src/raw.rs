@@ -386,6 +386,48 @@ pub struct StagedRawMessageIngest {
     whole_message: Option<StagedWholeMessage>,
 }
 
+impl StagedRawMessageIngest {
+    /// The whole-message payload this staged row will reference after commit.
+    pub fn external_payload_ref(&self) -> Option<&str> {
+        self.whole_message
+            .as_ref()
+            .map(|message| message.payload_ref.payload_ref.as_str())
+    }
+
+    /// Keeps the sanitized provider metadata beneath a whole-message payload
+    /// envelope. Re-ingest of an already stored row uses this so provider
+    /// fields survive; the new envelope keys always win over provider keys.
+    pub fn retain_provider_metadata(&mut self) -> Result<(), LcmError> {
+        let (Some(whole_message), Some(provider)) = (
+            self.whole_message.as_mut(),
+            self.prepared.metadata_json.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        let encoding = |error: serde_json::Error| {
+            LcmError::Db(format!("LCM metadata encoding failed: {error}"))
+        };
+        let mut merged: JsonValue = serde_json::from_str(provider).map_err(encoding)?;
+        let envelope: JsonValue =
+            serde_json::from_str(&whole_message.metadata_json).map_err(encoding)?;
+        let (Some(merged_object), JsonValue::Object(envelope)) = (merged.as_object_mut(), envelope)
+        else {
+            return Err(LcmError::Db(
+                "LCM metadata must be a JSON object".to_owned(),
+            ));
+        };
+        for (key, value) in envelope {
+            // The provider side carries the same body receipt plus the
+            // metadata receipt, so its protection envelope is the superset.
+            if key != "ingest_protection" || !merged_object.contains_key(&key) {
+                merged_object.insert(key, value);
+            }
+        }
+        whole_message.metadata_json = merged.to_string();
+        Ok(())
+    }
+}
+
 struct StagedWholeMessage {
     payload_ref: LcmPayloadRef,
     placeholder: String,
@@ -1297,6 +1339,41 @@ pub fn provider_metadata_requires_resanitization(
                 quarantined: false,
             })?;
     Ok(sanitized != original)
+}
+
+/// Re-sanitizes provider metadata while preserving the independently bound body receipt.
+pub fn resanitize_stored_provider_metadata_json(stored: &str) -> Result<String, LcmError> {
+    let refused = |reason: String| LcmError::SanitizationRefused {
+        reason,
+        quarantined: false,
+    };
+    let mut metadata: JsonValue = serde_json::from_str(stored)
+        .map_err(|error| refused(format!("invalid stored metadata: {error}")))?;
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| refused("stored metadata must be an object".to_owned()))?;
+    let mut protection = object
+        .remove("ingest_protection")
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(|| refused("stored metadata has no protection envelope".to_owned()))?;
+    let original = serde_json::to_string(&metadata).map_err(|error| refused(error.to_string()))?;
+    let mut sanitized = sanitize_provider_metadata_json(&original, MAX_PROVIDER_METADATA_BYTES)
+        .ok_or_else(|| refused("metadata sanitization failed".to_owned()))?;
+    let encoded = serde_json::to_string(&sanitized).map_err(|error| refused(error.to_string()))?;
+    let receipt = bind_sanitized_lcm_payload_text(&original, &encoded)
+        .map_err(|error| refused(error.to_string()))?;
+    protection.insert(
+        "metadata_sanitization_receipt".to_owned(),
+        serde_json::to_value(receipt.receipt()).map_err(|error| refused(error.to_string()))?,
+    );
+    sanitized
+        .as_object_mut()
+        .ok_or_else(|| refused("sanitized metadata must be an object".to_owned()))?
+        .insert(
+            "ingest_protection".to_owned(),
+            JsonValue::Object(protection),
+        );
+    serde_json::to_string(&sanitized).map_err(|error| refused(error.to_string()))
 }
 
 /// Pure function of the provider metadata bytes: every failure is a

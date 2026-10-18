@@ -49,6 +49,7 @@ impl CodeGraphProjectionReadPort for CountingProjection {
                 RequestAdmission::Admitted => {}
                 RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
+                RequestAdmission::GrantExpired => return Err(CodeGraphReadError::Denied),
             }
             VerifiedCodeGraphRead::new(
                 self.scope.clone(),

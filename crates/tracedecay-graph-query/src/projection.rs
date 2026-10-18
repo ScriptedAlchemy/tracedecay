@@ -63,6 +63,45 @@ pub enum CodeGraphReadError {
     Corrupt { detail: String },
 }
 
+/// Read and incomplete-evidence refusals remain typed until the host chooses
+/// its public outcome; other query and source failures keep their runtime cause.
+#[derive(Debug, Error)]
+pub enum GraphQueryError {
+    #[error(transparent)]
+    Read(#[from] CodeGraphReadError),
+    /// A query could not establish complete evidence. Hosts classify this
+    /// variant; the reason code is retained only for the outbound runtime error.
+    #[error("{detail}")]
+    EvidenceUnavailable {
+        reason_code: &'static str,
+        detail: String,
+    },
+    #[error(transparent)]
+    Runtime(#[from] TraceDecayError),
+}
+
+pub type GraphQueryResult<T> = Result<T, GraphQueryError>;
+
+impl From<CodeGraphProjectionError> for GraphQueryError {
+    fn from(error: CodeGraphProjectionError) -> Self {
+        Self::Read(map_projection_error(error))
+    }
+}
+
+/// The outbound adapter for hosts that still return the runtime error contract.
+impl From<GraphQueryError> for TraceDecayError {
+    fn from(error: GraphQueryError) -> Self {
+        match error {
+            GraphQueryError::Read(error) => map_code_graph_read_runtime_error(error),
+            GraphQueryError::EvidenceUnavailable {
+                reason_code,
+                detail,
+            } => Self::project_route(reason_code, false, detail),
+            GraphQueryError::Runtime(error) => error,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CodeGraphReadRequest<'a> {
     pub context: &'a RequestContext,
@@ -248,6 +287,7 @@ impl VerifiedCodeGraphRead {
             RequestAdmission::Admitted => {}
             RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
             RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
+            RequestAdmission::GrantExpired => return Err(CodeGraphReadError::Denied),
         }
         self.store
             .interactive_reader_with_cancellation(self.store.generation(), cancellation)
@@ -317,6 +357,7 @@ pub fn map_projection_error(error: CodeGraphProjectionError) -> CodeGraphReadErr
     }
 }
 
+/// Render a typed graph refusal for an outbound runtime-error boundary.
 pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDecayError {
     match error {
         CodeGraphReadError::ResetRequired { detail } => TraceDecayError::ResetRequired {
@@ -373,51 +414,4 @@ pub fn map_code_graph_read_runtime_error(error: CodeGraphReadError) -> TraceDeca
             typed_detail: None,
         },
     }
-}
-
-/// The graph read error a query surfaced through
-/// [`map_code_graph_read_runtime_error`], or `None` when `error` did not come
-/// from a code-graph read. A parked route refusal stays parked whatever code
-/// carried it; any other project-route refusal without a code-graph reason is
-/// an unavailable graph read.
-pub fn code_graph_read_error_from_runtime(error: &TraceDecayError) -> Option<CodeGraphReadError> {
-    if let Some((_authority, reason)) = error.reset_required_context() {
-        return Some(CodeGraphReadError::ResetRequired {
-            detail: reason.to_owned(),
-        });
-    }
-    if let Some(ApplicationProblemDetailV1::Parked {
-        cause,
-        remedy,
-        retries_on_wake,
-    }) = error.project_route_typed_detail()
-    {
-        return Some(CodeGraphReadError::Parked {
-            cause: cause.clone(),
-            remedy: remedy.clone(),
-            retries_on_wake: *retries_on_wake,
-        });
-    }
-    if let Some(ApplicationProblemDetailV1::CodeGraphRewarming { retry_after_millis }) =
-        error.project_route_typed_detail()
-    {
-        return Some(CodeGraphReadError::Rewarming {
-            retry_after_millis: *retry_after_millis,
-        });
-    }
-    let (reason_code, _retryable, detail) = error.project_route_context()?;
-    let detail = detail.to_owned();
-    Some(match reason_code {
-        "code-graph-registry-missing" => CodeGraphReadError::MissingRegistry,
-        "code-graph-refused" => CodeGraphReadError::Refused { detail },
-        "code-graph-stale" => CodeGraphReadError::Stale { detail },
-        "code-graph-cancelled" => CodeGraphReadError::Cancelled,
-        "code-graph-timed-out" => CodeGraphReadError::TimedOut,
-        "code-graph-budget-exhausted" => CodeGraphReadError::BudgetExhausted { detail },
-        "code-graph-denied" => CodeGraphReadError::Denied,
-        "code-graph-invalid-request" => CodeGraphReadError::InvalidRequest { detail },
-        "code-graph-corrupt" => CodeGraphReadError::Corrupt { detail },
-        "code-graph-reset-required" => CodeGraphReadError::ResetRequired { detail },
-        _ => CodeGraphReadError::Unavailable { detail },
-    })
 }

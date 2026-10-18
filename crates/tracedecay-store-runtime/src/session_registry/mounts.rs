@@ -153,10 +153,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             identity.profile_id().clone(),
         ));
         let remote_replay_transaction = Arc::new(
-            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new()
-                .map_err(|error| {
-                    session_registry_error("start remote replay transaction authority", error)
-                })?,
+            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(),
         );
         // The kernel's registry initialises profile- and session-scoped shards
         // through a fail-closed port, because the registered schema lives in
@@ -268,6 +265,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             code_graph_publication_gates: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
             reset_required_stores: std::sync::Mutex::new(BTreeMap::new()),
+            lost_store_files: std::sync::Mutex::new(BTreeMap::new()),
             retained_hook_tasks: RetainedHookTasks::new(),
             session_sync_service: Arc::new(std::sync::OnceLock::new()),
             remote_recovery_project_lifecycle: Arc::new(std::sync::OnceLock::new()),
@@ -366,10 +364,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
         let project_id = ProjectId::new(project_id)
             .map_err(|error| session_registry_error(OPERATION, error.to_string()))?;
-        let authority =
-            LocalProjectEnrollmentAuthorityV1::new(project_id.clone(), [manifest.project_root]);
-        self.resolver
-            .register_project_authority(authority.clone())
+        let added = self
+            .resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                [manifest.project_root],
+            ))
             .map_err(|error| session_registry_error(OPERATION, format!("{error:?}")))?;
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
@@ -379,7 +379,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let refusal = self
             .registered_store_reset_refusal(shard_id.clone(), OPERATION)
             .await;
-        self.resolver.withdraw_project_authority(&authority);
+        self.resolver.withdraw_project_authority(&added);
         match refusal? {
             Some(refusal) => self.record_registered_admission(shard_id, Some(&refusal)),
             None => stamp_sessions_admission(manifest_path, digest),
@@ -1162,13 +1162,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             })?;
         let projects = self.project_owners.ready_session_projects()?;
         for project_id in projects {
-            {
-                let _span = tracing::trace_span!(
-                    "daemon.session_registry.mount.remote_promotion_reconcile"
-                )
-                .entered();
-                recovery.reconcile_interrupted_promotions(&project_id)
-            }
+            tracing::Instrument::instrument(
+                recovery.reconcile_interrupted_promotions(&project_id),
+                tracing::trace_span!("daemon.session_registry.mount.remote_promotion_reconcile"),
+            )
+            .await
             .map_err(|error| {
                 session_registry_error(
                     "reconcile interrupted remote promotion",
@@ -1267,8 +1265,12 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// The dropped owners leave their `SQLite` runtimes mounted, so the
     /// profile database owner and pin are released too and every store
     /// runtime no longer held is then closed: its writer runs the shutdown
-    /// TRUNCATE checkpoint instead of leaving a retained WAL.
-    pub async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
+    /// TRUNCATE checkpoint instead of leaving a retained WAL. A runtime still
+    /// held is waited on until `deadline`, the caller's store-close budget.
+    pub async fn close_retained_graph_runtimes_for_shutdown(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
         let identities = self.drain_retained_graph_owners_for_shutdown()?;
         let mut first_error = None;
         for (binding, locator) in identities {
@@ -1290,7 +1292,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 .take(),
         );
         drop(self.profile_pin.lock().await.take());
-        if let Err(failure) = self.registry.close_idle_for_shutdown().await
+        if let Err(failure) = self.registry.close_idle_for_shutdown(deadline).await
             && first_error.is_none()
         {
             first_error = Some(session_registry_error(
@@ -1504,6 +1506,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 project_id.clone(),
                 enrollment_roots,
             ))
+            .map(drop)
             .map_err(|error| {
                 session_registry_error("register project session authority", format!("{error:?}"))
             })
@@ -1652,13 +1655,11 @@ impl DaemonSessionRuntimeRegistryV1 {
             .cloned()
             .collect::<Vec<_>>();
         for recovery in recoveries {
-            {
-                let _span = tracing::trace_span!(
-                    "daemon.session_registry.mount.remote_promotion_reconcile"
-                )
-                .entered();
-                recovery.reconcile_interrupted_promotions(&project_id)
-            }
+            tracing::Instrument::instrument(
+                recovery.reconcile_interrupted_promotions(&project_id),
+                tracing::trace_span!("daemon.session_registry.mount.remote_promotion_reconcile"),
+            )
+            .await
             .map_err(|error| {
                 session_registry_error(
                     "reconcile interrupted remote promotion",

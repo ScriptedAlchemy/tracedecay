@@ -27,7 +27,7 @@ pub enum GitIndexRecoveryError {
 /// Native reconciliation sees the real repository state but cannot initiate a
 /// fresh mutation. A `NeedsInspection` receipt is the required outcome when
 /// state drift prevents proof.
-pub trait GitIndexRecoveryExecutor {
+pub trait GitIndexRecoveryExecutor: Sync {
     fn reconcile(
         &self,
         record: &GitIndexTransactionRecordV1,
@@ -48,15 +48,15 @@ where
         Self { store, native }
     }
 
-    pub fn recover_repository(
+    pub async fn recover_repository(
         &self,
         repository_id: &RepositoryId,
         observed_at: UtcMicros,
     ) -> Result<Vec<GitIndexTransactionReceiptV1>, GitIndexRecoveryError> {
-        let records = self.store.recovery_candidates(repository_id)?;
+        let records = self.store.recovery_candidates(repository_id).await?;
         let mut receipts = Vec::with_capacity(records.len());
         for record in records {
-            receipts.push(self.recover_record(&record, observed_at)?);
+            receipts.push(self.recover_record(&record, observed_at).await?);
         }
         Ok(receipts)
     }
@@ -65,7 +65,7 @@ where
     /// admitted transaction whose native boundary became ambiguous; neither
     /// caller is allowed to invoke native apply a second time.
     #[tracing::instrument(name = "daemon.git.tx.recover_record", level = "trace", skip_all)]
-    pub fn recover_record(
+    pub async fn recover_record(
         &self,
         record: &GitIndexTransactionRecordV1,
         observed_at: UtcMicros,
@@ -76,7 +76,7 @@ where
             if original_receipt.outcome != GitIndexReceiptOutcomeV1::NeedsInspection {
                 return Ok(original_receipt.clone());
             }
-            let proof = self.reconcile_or_quarantine(record, observed_at)?;
+            let proof = self.reconcile_or_quarantine(record, observed_at).await?;
             // A terminal inspection receipt has no post-boundary phase that
             // can distinguish a coincidental candidate from our mutation.
             // Exact restoration to the old snapshot is the only automatic
@@ -85,41 +85,44 @@ where
             if proof.outcome != GitIndexReceiptOutcomeV1::AbortedNoChange
                 || !receipt_binds_record(&proof, record)
             {
-                quarantine(self.store, record)?;
+                quarantine(self.store, record).await?;
                 return Err(GitIndexRecoveryError::Indeterminate);
             }
             let proof = recovery_proof_at(&proof, record, observed_at)?;
-            self.store.clear_repository_quarantine(
-                &record.journal.repository_id,
-                &record.journal.transaction_id,
-                proof.clone(),
-            )?;
+            self.store
+                .clear_repository_quarantine(
+                    &record.journal.repository_id,
+                    &record.journal.transaction_id,
+                    proof.clone(),
+                )
+                .await?;
             return Ok(proof);
         }
 
-        let receipt = self.reconcile_or_quarantine(record, observed_at)?;
+        let receipt = self.reconcile_or_quarantine(record, observed_at).await?;
         if !receipt_binds_record(&receipt, record) {
-            quarantine(self.store, record)?;
+            quarantine(self.store, record).await?;
             return Err(GitIndexRecoveryError::Indeterminate);
         }
         let receipt = recovery_proof_at(&receipt, record, observed_at)?;
 
-        let Ok(preterminal) = advance_to_terminal(self.store, record, receipt.outcome, observed_at)
+        let Ok(preterminal) =
+            advance_to_terminal(self.store, record, receipt.outcome, observed_at).await
         else {
-            quarantine(self.store, record)?;
+            quarantine(self.store, record).await?;
             return Err(GitIndexRecoveryError::Indeterminate);
         };
         if receipt.outcome == GitIndexReceiptOutcomeV1::NeedsInspection {
             // Persist the blocking truth first. If the subsequent atomic
             // receipt write fails, the repository still remains fenced.
-            quarantine(self.store, record)?;
+            quarantine(self.store, record).await?;
         }
         let mut terminal_journal = preterminal;
         if terminal_journal
             .advance(terminal_phase(receipt.outcome), observed_at)
             .is_err()
         {
-            quarantine(self.store, record)?;
+            quarantine(self.store, record).await?;
             return Err(GitIndexRecoveryError::Indeterminate);
         }
         let write = GitIndexTransactionTerminalWriteV1 {
@@ -129,18 +132,18 @@ where
             receipt: receipt.clone(),
         };
         if write.validate().is_err() {
-            quarantine(self.store, record)?;
+            quarantine(self.store, record).await?;
             return Err(GitIndexRecoveryError::Indeterminate);
         }
-        if let Ok(stored) = self.store.write_terminal(write) {
+        if let Ok(stored) = self.store.write_terminal(write).await {
             Ok(stored)
         } else {
-            quarantine(self.store, record)?;
+            quarantine(self.store, record).await?;
             Err(GitIndexRecoveryError::Indeterminate)
         }
     }
 
-    fn reconcile_or_quarantine(
+    async fn reconcile_or_quarantine(
         &self,
         record: &GitIndexTransactionRecordV1,
         observed_at: UtcMicros,
@@ -154,7 +157,7 @@ where
         } {
             Ok(receipt)
         } else {
-            quarantine(self.store, record)?;
+            quarantine(self.store, record).await?;
             unobserved_needs_inspection(record, observed_at)
         }
     }
@@ -201,7 +204,7 @@ fn unobserved_needs_inspection(
     .map_err(GitIndexRecoveryError::Domain)
 }
 
-fn advance_to_terminal<S>(
+async fn advance_to_terminal<S>(
     store: &S,
     record: &GitIndexTransactionRecordV1,
     outcome: GitIndexReceiptOutcomeV1,
@@ -228,11 +231,9 @@ where
     for phase in phases {
         let expected_phase_epoch = journal.phase_epoch;
         journal.advance(*phase, observed_at)?;
-        journal = store.compare_and_swap_journal(
-            &record.idempotency_key,
-            expected_phase_epoch,
-            journal,
-        )?;
+        journal = store
+            .compare_and_swap_journal(&record.idempotency_key, expected_phase_epoch, journal)
+            .await?;
     }
     Ok(journal)
 }
@@ -244,17 +245,19 @@ fn receipt_binds_record(
     record.receipt_binds_preview(receipt)
 }
 
-fn quarantine<S>(
+async fn quarantine<S>(
     store: &S,
     record: &GitIndexTransactionRecordV1,
 ) -> Result<(), GitIndexRecoveryError>
 where
     S: GitIndexTransactionStore,
 {
-    store.quarantine_repository(
-        &record.journal.repository_id,
-        &record.journal.transaction_id,
-    )?;
+    store
+        .quarantine_repository(
+            &record.journal.repository_id,
+            &record.journal.transaction_id,
+        )
+        .await?;
     Ok(())
 }
 

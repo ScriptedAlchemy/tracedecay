@@ -1,9 +1,9 @@
-use super::problems::{application_contract_error_response, registered_adapter_unavailable};
-use axum::response::Response;
+use super::problems::registered_adapter_unavailable;
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use tracedecay_api::{
-    CanonicalInvocationResult, HandoffOperation, HttpApplicationControls, WorkOperation,
-    WorkflowOperation,
+    CanonicalInvocationResult, HandoffOperation, HttpAdapterError, HttpApplicationControls,
+    HttpJsonEnvelope, WorkOperation, WorkflowOperation,
 };
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ProblemOwningLayer,
@@ -15,7 +15,6 @@ use tracedecay_daemon_protocol::{
 
 pub(crate) trait RegisteredHttpOperation: Copy {
     fn operation_id(self) -> String;
-    fn is_read_only(self) -> bool;
     fn problem_family(self) -> &'static str;
     fn display_family(self) -> &'static str;
     fn application_problem_is_bound(
@@ -120,10 +119,6 @@ impl RegisteredHttpOperation for WorkOperation {
         WorkOperation::operation_id_str(self).to_owned()
     }
 
-    fn is_read_only(self) -> bool {
-        WorkOperation::is_read_only(self)
-    }
-
     fn problem_family(self) -> &'static str {
         "work"
     }
@@ -149,10 +144,6 @@ impl RegisteredHttpOperation for WorkflowOperation {
         WorkflowOperation::operation_id_str(self).to_owned()
     }
 
-    fn is_read_only(self) -> bool {
-        false
-    }
-
     fn problem_family(self) -> &'static str {
         "workflow"
     }
@@ -176,14 +167,6 @@ impl RegisteredHttpOperation for WorkflowOperation {
 impl RegisteredHttpOperation for HandoffOperation {
     fn operation_id(self) -> String {
         HandoffOperation::operation_id_str(self).to_owned()
-    }
-
-    fn is_read_only(self) -> bool {
-        // Not a blanket `false` any more: enumeration reads the grant store
-        // without issuing or consuming anything, and treating it as a mutation
-        // here would deny a safe read the retry and replay handling a read is
-        // entitled to.
-        HandoffOperation::is_read_only(self)
     }
 
     fn problem_family(self) -> &'static str {
@@ -213,9 +196,11 @@ impl RegisteredHttpOperation for HandoffOperation {
 /// still an application failure of the named family, not an MCP tool-resolution
 /// failure, so the response must retain the operation's registered result
 /// schema and canonical runtime problem taxonomy.
-pub(crate) fn registered_executor_unavailable<T, O>(operation: O, request_id: RequestId) -> Response
+pub(crate) fn registered_executor_unavailable<O>(
+    operation: O,
+    request_id: RequestId,
+) -> Result<HttpJsonEnvelope<serde_json::Value>, HttpAdapterError>
 where
-    T: Serialize,
     O: RegisteredHttpOperation,
 {
     let problem_code = |suffix: &str| format!("{}.{}", operation.problem_family(), suffix);
@@ -270,18 +255,16 @@ where
             );
         }
     };
-    let problem = match ApplicationProblemEnvelope::new(
+    let problem = ApplicationProblemEnvelope::new(
         result_contract,
         request_id,
         ApplicationProblem::unavailable(SafeDiagnostic {
             code: problem_code("transport_unavailable"),
             message: format!("The {family} application transport is unavailable"),
         }),
-    ) {
-        Ok(problem) => problem.with_owning_layer(ProblemOwningLayer::Runtime),
-        Err(error) => return application_contract_error_response(error),
-    };
-    CanonicalInvocationResult::<T>::new(binding_id.clone(), Err(problem)).into_http_response()
+    )?
+    .with_owning_layer(ProblemOwningLayer::Runtime);
+    Ok(CanonicalInvocationResult::new(binding_id.clone(), Err(problem)).into_http_json())
 }
 
 #[tracing::instrument(
@@ -289,7 +272,7 @@ where
     level = "trace",
     skip_all
 )]
-pub(super) async fn invoke_registered_http<T, O>(
+pub(super) async fn invoke_registered<O>(
     executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     operation: O,
     request_id: RequestId,
@@ -297,13 +280,15 @@ pub(super) async fn invoke_registered_http<T, O>(
     invocation: tracedecay_daemon_protocol::DaemonInvocationRequest,
     select_outcome: impl FnOnce(
         tracedecay_daemon_protocol::DaemonInvocationOutcome,
-    ) -> Option<(
-        tracedecay_contracts::ResolvedScope,
-        tracedecay_contracts::ApplicationOutcome<T>,
-    )>,
-) -> Response
+    ) -> Result<
+        Option<(
+            tracedecay_contracts::ResolvedScope,
+            tracedecay_contracts::ApplicationOutcome<serde_json::Value>,
+        )>,
+        serde_json::Error,
+    >,
+) -> Result<HttpJsonEnvelope<serde_json::Value>, HttpAdapterError>
 where
-    T: Serialize,
     O: RegisteredHttpOperation,
 {
     let problem_code = |suffix: &str| format!("{}.{}", operation.problem_family(), suffix);
@@ -359,7 +344,7 @@ where
         }
     };
     let binding_id = binding_id.clone();
-    let policy = if operation.is_read_only() {
+    let policy = if binding.effect().is_read_only() {
         InvocationCancellationPolicy::ReadOnly
     } else {
         InvocationCancellationPolicy::AuthoritativeEffect
@@ -420,9 +405,9 @@ where
                     })
                 }
             },
-            outcome => match select_outcome(outcome) {
+            outcome => match select_outcome(outcome)? {
                 Some((scope, outcome)) => {
-                    return CanonicalInvocationResult::new(
+                    return Ok(CanonicalInvocationResult::new(
                         binding_id,
                         Ok(ApplicationEnvelope {
                             contract: result_contract,
@@ -435,7 +420,7 @@ where
                             cost: None,
                         }),
                     )
-                    .into_http_response();
+                    .into_http_json());
                 }
                 None => ApplicationProblem::unavailable(SafeDiagnostic {
                     code: problem_code("protocol_unavailable"),
@@ -445,9 +430,45 @@ where
         },
         Err(problem) => problem,
     };
-    let problem = match ApplicationProblemEnvelope::new(result_contract, request_id, problem) {
-        Ok(problem) => problem.with_owning_layer(owning_layer),
-        Err(error) => return application_contract_error_response(error),
-    };
-    CanonicalInvocationResult::<T>::new(binding_id, Err(problem)).into_http_response()
+    let problem = ApplicationProblemEnvelope::new(result_contract, request_id, problem)?
+        .with_owning_layer(owning_layer);
+    Ok(CanonicalInvocationResult::new(binding_id, Err(problem)).into_http_json())
+}
+
+/// Render at the HTTP edge for registered families without an MCP owner.
+pub(super) async fn invoke_registered_http<T, O>(
+    executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    operation: O,
+    request_id: RequestId,
+    controls: HttpApplicationControls,
+    invocation: tracedecay_daemon_protocol::DaemonInvocationRequest,
+    select_outcome: impl FnOnce(
+        tracedecay_daemon_protocol::DaemonInvocationOutcome,
+    ) -> Option<(
+        tracedecay_contracts::ResolvedScope,
+        tracedecay_contracts::ApplicationOutcome<T>,
+    )>,
+) -> Response
+where
+    T: Serialize,
+    O: RegisteredHttpOperation,
+{
+    invoke_registered(
+        executor,
+        operation,
+        request_id,
+        controls,
+        invocation,
+        |outcome| {
+            select_outcome(outcome)
+                .map(|(scope, outcome)| {
+                    outcome
+                        .try_map_payload(serde_json::to_value)
+                        .map(|outcome| (scope, outcome))
+                })
+                .transpose()
+        },
+    )
+    .await
+    .into_response()
 }

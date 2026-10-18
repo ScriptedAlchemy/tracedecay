@@ -24,7 +24,8 @@ use tracedecay_contracts::remote::credential_admission::{
 };
 use tracedecay_contracts::remote::protocol::{
     EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1, RemoteProtocolExecutionControlV1,
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    RemoteProtocolFutureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1,
 };
 use tracedecay_contracts::remote::query::{
     REMOTE_QUERY_SCHEMA_REVISION_V1, RemoteQueryOperationV1, RemoteQueryRequestV1,
@@ -126,12 +127,9 @@ macro_rules! unreachable_protocol_port {
                 &self,
                 request: RemoteProtocolRequestV1<$request>,
                 _credential: OpaqueRemoteCredential,
-            ) -> Result<
-                RemoteProtocolResponseV1<Self::Output>,
-                tracedecay_contracts::ApplicationContractError,
-            > {
+            ) -> RemoteProtocolFutureV1<'_, Self::Output> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                unavailable_response(request)
+                Box::pin(std::future::ready(unavailable_response(request)))
             }
 
             fn execute_controlled(
@@ -139,15 +137,12 @@ macro_rules! unreachable_protocol_port {
                 request: RemoteProtocolRequestV1<$request>,
                 _credential: OpaqueRemoteCredential,
                 control: RemoteProtocolExecutionControlV1,
-            ) -> Result<
-                RemoteProtocolResponseV1<Self::Output>,
-                tracedecay_contracts::ApplicationContractError,
-            > {
+            ) -> RemoteProtocolFutureV1<'_, Self::Output> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 if let Some(deadline) = &self.controlled_deadline {
                     deadline.store(control.deadline.0, Ordering::SeqCst);
                 }
-                unavailable_response(request)
+                Box::pin(std::future::ready(unavailable_response(request)))
             }
         }
     };

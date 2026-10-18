@@ -118,6 +118,9 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
             legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
             detail: None,
         },
+        // The cause survives to the caller: busy retries, an exceeded result
+        // limit and invalid stored data do not, and none reads as a stale graph.
+        WorkProductApplicationErrorV1::Storage(failure) => failure.application_problem(),
         WorkProductApplicationErrorV1::GraphAuthorityUnavailable
         | WorkProductApplicationErrorV1::EventAuthorityUnavailable
         | WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
@@ -155,7 +158,7 @@ pub(crate) fn work_background_context(
     RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(now_micros()),
         request_id,
         deadline,
         cancellation,
@@ -178,7 +181,7 @@ pub(crate) fn work_blocked_interval_recovery_context(
     RequestContext::new(
         actor.clone(),
         grant.scope.clone(),
-        grant.clone(),
+        crate::callable_code_authorization::mounted_grant_at(grant, now_micros()),
         request_id,
         deadline,
         cancellation,
@@ -331,7 +334,7 @@ pub(crate) fn work_request_context(
     let context = RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(observed_at),
         canonical_request_id.clone(),
         deadline,
         cancellation,
@@ -514,10 +517,51 @@ mod workflow_effect_receipt_tests {
 mod work_product_problem_tests {
     use tracedecay_contracts::{
         ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic,
-        WorkProductApplicationErrorV1,
+        WorkProductApplicationErrorV1, WorkStorageFailureV1,
     };
 
     use super::work_product_problem;
+
+    /// A storage failure keeps its cause at the daemon boundary. None of the
+    /// three reads as the stale-graph answer a real revision conflict gets, and
+    /// they stay distinct from each other and from plain unavailability.
+    #[test]
+    fn storage_failures_keep_distinct_non_stale_answers() {
+        let conflict = work_product_problem(WorkProductApplicationErrorV1::VersionConflict);
+        assert!(matches!(conflict, ApplicationProblem::Stale { .. }));
+        assert_eq!(conflict.reason_code(), "work.graph_version_conflict");
+
+        let unavailable =
+            work_product_problem(WorkProductApplicationErrorV1::EventAuthorityUnavailable);
+        assert!(matches!(
+            unavailable,
+            ApplicationProblem::Unavailable { .. }
+        ));
+
+        let busy = work_product_problem(WorkProductApplicationErrorV1::Storage(
+            WorkStorageFailureV1::Busy,
+        ));
+        assert!(matches!(busy, ApplicationProblem::Saturated { .. }));
+        assert_eq!(busy.reason_code(), "work.storage_busy");
+        assert_eq!(busy.retry(), RetryDirective::AfterDelay);
+
+        let limit = work_product_problem(WorkProductApplicationErrorV1::Storage(
+            WorkStorageFailureV1::ResultLimitExceeded,
+        ));
+        assert_eq!(limit.reason_code(), "work.storage_result_limit_exceeded");
+        assert_eq!(limit.retry(), RetryDirective::Never);
+
+        let invalid = work_product_problem(WorkProductApplicationErrorV1::Storage(
+            WorkStorageFailureV1::StoredDataInvalid,
+        ));
+        assert_eq!(invalid.reason_code(), "work.storage_data_invalid");
+        assert_eq!(invalid.retry(), RetryDirective::Never);
+        assert_eq!(invalid.legal_actions(), [LegalAction::ContactAdministrator]);
+        for problem in [&busy, &limit, &invalid] {
+            problem.validate().expect("storage problems are valid");
+            assert!(!matches!(problem, ApplicationProblem::Stale { .. }));
+        }
+    }
 
     #[test]
     fn stale_evidence_continuation_requires_a_refresh() {

@@ -111,8 +111,10 @@ fn run<T>(future: impl Future<Output = T>) -> T {
 #[test]
 fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
     let store = RegisteredWorkflowStore::start("handoff-open");
-    let sqlite =
-        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
+    let sqlite = run(HandoffOpenSqliteAuthority::from_retained_exact_sql(
+        store.retained_exact_sql(),
+    ))
+    .unwrap();
     let issue_context = context("request.handoff.issue");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -148,8 +150,10 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
 
     drop(service);
     let store = store.restart("handoff-open-restart");
-    let sqlite =
-        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
+    let sqlite = run(HandoffOpenSqliteAuthority::from_retained_exact_sql(
+        store.retained_exact_sql(),
+    ))
+    .unwrap();
     let open_context = context("request.handoff.open");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let request = OpenTaskHandoffRequestV1 {
@@ -199,8 +203,10 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
 #[test]
 fn changed_input_for_the_same_request_is_an_idempotency_conflict() {
     let store = RegisteredWorkflowStore::start("handoff-open-idempotency-conflict");
-    let sqlite =
-        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
+    let sqlite = run(HandoffOpenSqliteAuthority::from_retained_exact_sql(
+        store.retained_exact_sql(),
+    ))
+    .unwrap();
     let issue_context = context("request.handoff.issue-idempotency-conflict");
     let service = HandoffOpenService::new(sqlite.clone(), CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -235,7 +241,7 @@ fn changed_input_for_the_same_request_is_an_idempotency_conflict() {
     assert_eq!(replay.receipt, first.receipt);
 
     assert_eq!(
-        sqlite.consume(
+        run(sqlite.consume(
             grant.token_digest(),
             &HandoffOpenExpectationV1::from_request(
                 &open_context,
@@ -246,7 +252,7 @@ fn changed_input_for_the_same_request_is_an_idempotency_conflict() {
             open_context.request_id(),
             &digest('d'),
             UtcMicros(2_200_000),
-        ),
+        )),
         Err(HandoffOpenAuthorityError::IdempotencyConflict)
     );
 
@@ -268,8 +274,10 @@ fn changed_input_for_the_same_request_is_an_idempotency_conflict() {
 #[test]
 fn wrong_session_and_expired_grants_are_concealed_without_consuming() {
     let store = RegisteredWorkflowStore::start("handoff-open-conceal");
-    let sqlite =
-        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
+    let sqlite = run(HandoffOpenSqliteAuthority::from_retained_exact_sql(
+        store.retained_exact_sql(),
+    ))
+    .unwrap();
     let issue_context = context("request.handoff.issue-conceal");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -328,8 +336,10 @@ fn wrong_session_and_expired_grants_are_concealed_without_consuming() {
 #[test]
 fn enumeration_reads_the_durable_frontier_secret_free_across_a_restart() {
     let store = RegisteredWorkflowStore::start("handoff-open-list");
-    let sqlite =
-        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
+    let sqlite = run(HandoffOpenSqliteAuthority::from_retained_exact_sql(
+        store.retained_exact_sql(),
+    ))
+    .unwrap();
     let issue_context = context("request.handoff.issue-list");
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
     let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
@@ -351,8 +361,10 @@ fn enumeration_reads_the_durable_frontier_secret_free_across_a_restart() {
     // not from anything the issuing process held in memory.
     drop(service);
     let store = store.restart("handoff-open-list-restart");
-    let sqlite =
-        HandoffOpenSqliteAuthority::from_retained_exact_sql(store.retained_exact_sql()).unwrap();
+    let sqlite = run(HandoffOpenSqliteAuthority::from_retained_exact_sql(
+        store.retained_exact_sql(),
+    ))
+    .unwrap();
     let service = HandoffOpenService::new(sqlite, CurrentTarget);
 
     let live = run(service.list_task(
@@ -410,4 +422,67 @@ fn enumeration_reads_the_durable_frontier_secret_free_across_a_restart() {
     ))
     .unwrap();
     assert!(other.handoffs.is_empty());
+}
+
+/// Issuing and opening a handoff on a native worker parks no runtime thread:
+/// the authority's writes are writer jobs and its reads are awaited.
+#[test]
+fn handoff_calls_awaited_on_a_native_worker_park_no_native_thread() {
+    use tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits;
+    use tracedecay_rusqlite_runtime::native_runtime::{
+        NativeTask, NativeTaskOutcome, block_on, native_thread_writer_waits,
+    };
+
+    let store = RegisteredWorkflowStore::start("handoff-open-native-worker");
+    let retained = store.retained_exact_sql();
+    let writer_waits = native_thread_writer_waits();
+    let reader_waits = native_thread_reader_waits();
+    let task = NativeTask::spawn(async move {
+        let sqlite = HandoffOpenSqliteAuthority::from_retained_exact_sql(retained)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        let service = HandoffOpenService::new(sqlite, CurrentTarget);
+        let issue_context = context("request.handoff.native-issue");
+        let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
+        service
+            .issue(
+                &issue_context,
+                binding(&issue_context),
+                &token,
+                UtcMicros(1_000_000),
+                UtcMicros(61_000_000),
+            )
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        service
+            .open_task(
+                &context("request.handoff.native-open"),
+                OpenTaskHandoffRequestV1 {
+                    token: TOKEN_SECRET.to_owned(),
+                    session_id: id::<HandoffSessionId>("lsp-session.handoff.runtime-store"),
+                },
+                authority_snapshot(),
+                UtcMicros(2_000_000),
+            )
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        Ok::<_, String>(())
+    })
+    .unwrap();
+
+    assert_eq!(
+        block_on(task.wait()).unwrap(),
+        NativeTaskOutcome::Completed(Ok(()))
+    );
+    assert_eq!(store.count("handoff_open_grants_v1"), 1);
+    assert_eq!(
+        native_thread_writer_waits() - writer_waits,
+        0,
+        "no handoff write parked the native worker on the writer"
+    );
+    assert_eq!(
+        native_thread_reader_waits() - reader_waits,
+        0,
+        "no handoff read parked the native worker on a reader"
+    );
 }

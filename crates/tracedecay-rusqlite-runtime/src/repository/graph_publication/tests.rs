@@ -4,7 +4,6 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{
@@ -19,47 +18,21 @@ use tracedecay_store::{
     GraphPublicationSequenceV1, GraphPublicationStoreErrorV1, GraphPublicationStoreV1,
     GraphRecoveredGenerationDigestV1, GraphReplayAppendOutcomeV1, GraphReplayRetirementOutcomeV1,
     GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
-    GraphVerifiedHeadCompareAndSwapV1, RepositoryWritePayloadV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    GraphVerifiedHeadCompareAndSwapV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use crate::exact_sql::{ExactSqlHandle, ExactSqlStatement, ExactSqlValue};
-use crate::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
-use crate::{ExistingWriterLocator, PersistentWriter, StorageOperationExecutor};
+use crate::reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool};
+use crate::{ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter};
 
 use super::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
-
-struct NoWrites;
-
-impl StorageOperationExecutor for NoWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoReads;
-
-impl ReaderQueryExecutor for NoReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
-        unreachable!("exact SQL queries bypass the closed product read executor")
-    }
-}
 
 struct Fixture {
     _directory: TempDir,
     _writer: PersistentWriter,
-    readers: ReaderPool<NoReads>,
+    readers: ReaderPool<ExactSqlOnlyReaderV1>,
     handle: ExactSqlHandle,
 }
 
@@ -91,13 +64,13 @@ impl Fixture {
             &crate::native_runtime::handle().expect("native runtime"),
             ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
             AdmissionConfigV1::default(),
-            NoWrites,
+            ExactSqlOnlyStorageOperationV1,
         )
         .unwrap();
         let readers = ReaderPool::start(
             ExistingReaderLocator::new(binding, locator, path).unwrap(),
             AdmissionConfigV1::default().readers,
-            NoReads,
+            ExactSqlOnlyReaderV1,
         )
         .unwrap();
         let handle = ExactSqlHandle::attach(&writer, &readers).unwrap();

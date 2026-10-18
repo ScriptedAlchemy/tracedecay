@@ -1025,7 +1025,7 @@ async fn workflow_storage_retains_one_issuing_client_until_all_clones_drop() {
 
     let database = owner.issue_lease().unwrap();
     install_workflow_schema_for_purpose_test(&database).await;
-    let storage = database.workflow_storage().unwrap();
+    let storage = database.workflow_storage().await.unwrap();
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
@@ -1083,7 +1083,7 @@ async fn handoff_open_storage_validates_mounted_schema_and_retains_one_client() 
         .await
         .unwrap();
     assert!(rows.next().await.unwrap().is_some());
-    let storage = database.handoff_open_storage().unwrap();
+    let storage = database.handoff_open_storage().await.unwrap();
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
@@ -1314,9 +1314,9 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
             .is_err()
     );
     assert!(database.work_storage().is_err());
-    assert!(database.workflow_storage().is_err());
+    assert!(database.workflow_storage().await.is_err());
     assert!(database.authorized_scope_set_storage().is_err());
-    assert!(database.handoff_open_storage().is_err());
+    assert!(database.handoff_open_storage().await.is_err());
     assert!(
         database
             .remote_storage(purpose_test_remote_keyring())
@@ -1695,4 +1695,125 @@ async fn external_client_clone_and_operation_remain_typed_owner_retirement_block
     );
     assert!(reopened.binding().authority_epoch > control.binding().authority_epoch);
     assert_eq!(reopened.verified_locator(), control.locator());
+}
+
+async fn graph_transaction_generation(database: &Database) -> u64 {
+    database
+        .get_metadata("graph_transaction_generation")
+        .await
+        .unwrap()
+        .map_or(0, |raw| raw.parse().unwrap())
+}
+
+async fn write_probe(
+    executor: &impl crate::db::engine::Executor,
+    value: &str,
+) -> crate::db::engine::Result<u64> {
+    executor
+        .execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('job-probe', ?1)",
+            (value,),
+        )
+        .await
+}
+
+async fn write_probe_then_yield(
+    executor: &impl crate::db::engine::Executor,
+) -> crate::db::engine::Result<()> {
+    write_probe(executor, "lost").await?;
+    let mut yielded = false;
+    std::future::poll_fn(|context| {
+        if std::mem::replace(&mut yielded, true) {
+            std::task::Poll::Ready(())
+        } else {
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    Ok(())
+}
+
+async fn publish_transact_fixture(label: &str) -> (tempfile::TempDir, DatabaseOwnerV1) {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(format!("{label}.db"));
+    let authority = DatabaseAuthority::acquire_test(&path, label).unwrap();
+    let owner = publish_fixture_owner_runtime(
+        &path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+        TestRuntimeShardFamilyV1::Code,
+    )
+    .await
+    .unwrap();
+    (temp, owner)
+}
+
+#[asupersync::test]
+async fn transact_runs_an_executor_helper_and_advances_the_graph_generation_once() {
+    let (_temp, owner) = publish_transact_fixture("transact-generation").await;
+    let database = owner.issue_lease().unwrap();
+    let before = graph_transaction_generation(&database).await;
+
+    let changed = database
+        .transact("transact generation", async |tx| {
+            write_probe(tx, "committed").await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        database.get_metadata("job-probe").await.unwrap().as_deref(),
+        Some("committed")
+    );
+    assert_eq!(graph_transaction_generation(&database).await, before + 1);
+}
+
+#[asupersync::test]
+async fn a_transact_body_that_awaits_a_foreign_future_is_refused_and_writes_nothing() {
+    let (_temp, owner) = publish_transact_fixture("transact-foreign-await").await;
+    let database = owner.issue_lease().unwrap();
+    let before = graph_transaction_generation(&database).await;
+
+    let error = database
+        .open_writer_connection_unguarded("transact foreign await")
+        .unwrap()
+        .transact(
+            tracedecay_rusqlite_runtime::exact_sql::JobPolicy::Bounded,
+            async |tx| write_probe_then_yield(tx).await,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, crate::db::engine::Error::JobAwaitedForeignFuture);
+    assert!(
+        database
+            .transact("transact foreign await", async |tx| {
+                write_probe_then_yield(tx).await
+            })
+            .await
+            .is_err()
+    );
+
+    assert_eq!(database.get_metadata("job-probe").await.unwrap(), None);
+    assert_eq!(graph_transaction_generation(&database).await, before);
+}
+
+#[asupersync::test]
+async fn transact_refuses_a_client_without_an_active_write_scope() {
+    let (_temp, owner) = publish_transact_fixture("transact-write-scope").await;
+    let writable = owner.issue_lease().unwrap();
+    let read_only = owner.issue_read_only_lease().unwrap();
+    let before = graph_transaction_generation(&writable).await;
+
+    let refused = read_only
+        .transact("read-only transact", async |tx| {
+            write_probe(tx, "refused").await
+        })
+        .await;
+
+    assert!(refused.is_err());
+    assert_eq!(writable.get_metadata("job-probe").await.unwrap(), None);
+    assert_eq!(graph_transaction_generation(&writable).await, before);
 }
