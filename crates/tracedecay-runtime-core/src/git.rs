@@ -755,11 +755,12 @@ pub fn normalize_git_remote_url(remote: &str) -> Option<String> {
     } else {
         remote.to_string()
     };
+    normalized = normalized.to_ascii_lowercase();
     normalized.truncate(normalized.trim_end_matches('/').len());
     if let Some(stripped) = normalized.strip_suffix(".git") {
         normalized = stripped.trim_end_matches('/').to_string();
     }
-    Some(normalized.to_ascii_lowercase())
+    Some(normalized)
 }
 
 /// The directory a local `origin` (an absolute path or a `file://` URL)
