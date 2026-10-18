@@ -341,7 +341,8 @@ async fn live_queued_owner_claim_is_not_recovered_as_delayed_work() {
                 configuration_revision: "configuration.owner.v1".into(),
                 policy_revision: "policy.owner.v1".into(),
             },
-            2,
+            // Both ordinary carriers and the owner must fit before the native worker polls.
+            3,
         )
         .expect("producer"),
     );
@@ -351,7 +352,6 @@ async fn live_queued_owner_claim_is_not_recovered_as_delayed_work() {
             .expect("first queue carrier"),
         ObservabilityEmissionOutcomeV1::Enqueued
     );
-    tokio::task::yield_now().await;
     assert_eq!(
         producer
             .try_emit(envelope(&scope, "caller", 73, 7_300_000))
