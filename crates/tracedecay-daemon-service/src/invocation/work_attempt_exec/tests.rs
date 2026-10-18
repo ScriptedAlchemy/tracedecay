@@ -2452,7 +2452,7 @@ done
 const TURN_COMPLETES: &str = r#"printf '%s\n' '{"method":"item/completed","params":{"item":{"content":[{"type":"output_text","text":"work result"}]}}}'; printf '%s\n' '{"method":"turn/completed","params":{"turn":{"id":"work-turn"}}}'; exit 0"#;
 
 #[cfg(unix)]
-const TURN_HANGS: &str = r#"printf x > MARKER.turn; sleep 120"#;
+const TURN_HANGS: &str = "printf x > MARKER.turn; sleep 120";
 
 /// Hangs before reading the handshake: the session never starts.
 #[cfg(unix)]
@@ -2471,7 +2471,7 @@ struct AppServerAttempt {
 
 #[cfg(unix)]
 impl AppServerAttempt {
-    async fn spawn(
+    fn spawn(
         root: &Path,
         script: &str,
         deadline: UtcMicros,
@@ -2587,8 +2587,7 @@ fn cancelling_a_running_app_server_session_settles_cancelled_promptly() {
             &APP_SERVER_SCRIPT.replace("ON_TURN", TURN_HANGS),
             deadline_in(300),
             store,
-        )
-        .await;
+        );
         let fixture = &attempt.fixture;
 
         while !attempt.marker_exists("turn") || fixture.state() != WorkAttemptStateV1::Running {
@@ -2652,8 +2651,7 @@ fn a_completed_app_server_session_settles_succeeded_once() {
             &APP_SERVER_SCRIPT.replace("ON_TURN", TURN_COMPLETES),
             deadline_in(300),
             store,
-        )
-        .await;
+        );
 
         assert!(
             attempt
@@ -2679,7 +2677,7 @@ fn an_app_server_that_never_starts_its_session_settles_timed_out_once() {
         let (_artifact_dir, store) = provider_artifact_store().await;
         let directory = tempfile::TempDir::new().unwrap();
         let attempt =
-            AppServerAttempt::spawn(directory.path(), STARTUP_HANGS, deadline_in(2), store).await;
+            AppServerAttempt::spawn(directory.path(), STARTUP_HANGS, deadline_in(2), store);
 
         assert!(
             attempt
