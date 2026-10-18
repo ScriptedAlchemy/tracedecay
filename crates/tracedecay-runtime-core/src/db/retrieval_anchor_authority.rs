@@ -341,6 +341,66 @@ pub async fn append_retrieval_anchor_disposition_on(
     Ok(AnchorDispositionAppendOutcomeV1::Appended)
 }
 
+async fn publish_retrieval_anchor_derivative_on(
+    transaction: &impl Executor,
+    derivative: &RetrievalAnchorDerivativeV1,
+) -> Result<AnchorDispositionAppendOutcomeV1> {
+    let owner = owner_json(derivative.owner())?;
+    if !AnchorDispositionStateV1::serves_derivatives(
+        current_disposition(transaction, derivative.source_anchor_id(), &owner).await?,
+    ) {
+        return Err(authority_error(
+            "cannot publish lineage from an unavailable anchor",
+        ));
+    }
+    let changed = transaction
+        .execute(
+            "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
+                source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                derivative.source_anchor_id().as_str(),
+                owner.as_str(),
+                derivative.kind().as_str(),
+                derivative.derivative_id(),
+                i64::from(derivative.is_direct_evidence()),
+            ],
+        )
+        .await
+        .map_err(database_error)?;
+    let outcome = if changed == 1 {
+        AnchorDispositionAppendOutcomeV1::Appended
+    } else {
+        let mut rows = transaction
+            .query(
+                "SELECT direct_evidence FROM retrieval_anchor_reverse_lineage
+                 WHERE source_anchor_id = ?1 AND owner_json = ?2
+                   AND derivative_kind = ?3 AND derivative_id = ?4",
+                params![
+                    derivative.source_anchor_id().as_str(),
+                    owner.as_str(),
+                    derivative.kind().as_str(),
+                    derivative.derivative_id(),
+                ],
+            )
+            .await
+            .map_err(database_error)?;
+        let replayed = rows
+            .next()
+            .await
+            .map_err(database_error)?
+            .is_some_and(|row| {
+                row.get::<i64>(0).ok() == Some(i64::from(derivative.is_direct_evidence()))
+            });
+        drop(rows);
+        if !replayed {
+            return Err(authority_error("anchor derivative identity collision"));
+        }
+        AnchorDispositionAppendOutcomeV1::Replayed
+    };
+    Ok(outcome)
+}
+
 impl super::Database {
     #[tracing::instrument(
         name = "runtime_core.db.anchor_disposition_append",
@@ -352,10 +412,11 @@ impl super::Database {
         record: &RetrievalAnchorDispositionRecordV1,
     ) -> Result<AnchorDispositionAppendOutcomeV1> {
         record.validate()?;
-        let transaction = self.begin_write_transaction(OPERATION).await?;
-        let outcome = append_retrieval_anchor_disposition_on(&transaction, record).await?;
-        transaction.commit().await?;
-        Ok(outcome)
+        let record = record.clone();
+        self.transact(OPERATION, async move |tx| {
+            append_retrieval_anchor_disposition_on(tx, &record).await
+        })
+        .await?
     }
 
     pub(crate) async fn publish_retrieval_anchor_derivative(
@@ -363,62 +424,11 @@ impl super::Database {
         derivative: &RetrievalAnchorDerivativeV1,
     ) -> Result<AnchorDispositionAppendOutcomeV1> {
         derivative.validate()?;
-        let transaction = self.begin_write_transaction(OPERATION).await?;
-        let owner = owner_json(derivative.owner())?;
-        if !AnchorDispositionStateV1::serves_derivatives(
-            current_disposition(&transaction, derivative.source_anchor_id(), &owner).await?,
-        ) {
-            return Err(authority_error(
-                "cannot publish lineage from an unavailable anchor",
-            ));
-        }
-        let changed = transaction
-            .execute(
-                "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
-                    source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    derivative.source_anchor_id().as_str(),
-                    owner.as_str(),
-                    derivative.kind().as_str(),
-                    derivative.derivative_id(),
-                    i64::from(derivative.is_direct_evidence()),
-                ],
-            )
-            .await
-            .map_err(database_error)?;
-        let outcome = if changed == 1 {
-            AnchorDispositionAppendOutcomeV1::Appended
-        } else {
-            let mut rows = transaction
-                .query(
-                    "SELECT direct_evidence FROM retrieval_anchor_reverse_lineage
-                     WHERE source_anchor_id = ?1 AND owner_json = ?2
-                       AND derivative_kind = ?3 AND derivative_id = ?4",
-                    params![
-                        derivative.source_anchor_id().as_str(),
-                        owner.as_str(),
-                        derivative.kind().as_str(),
-                        derivative.derivative_id(),
-                    ],
-                )
-                .await
-                .map_err(database_error)?;
-            let replayed = rows
-                .next()
-                .await
-                .map_err(database_error)?
-                .is_some_and(|row| {
-                    row.get::<i64>(0).ok() == Some(i64::from(derivative.is_direct_evidence()))
-                });
-            drop(rows);
-            if !replayed {
-                return Err(authority_error("anchor derivative identity collision"));
-            }
-            AnchorDispositionAppendOutcomeV1::Replayed
-        };
-        transaction.commit().await?;
-        Ok(outcome)
+        let derivative = derivative.clone();
+        self.transact(OPERATION, async move |tx| {
+            publish_retrieval_anchor_derivative_on(tx, &derivative).await
+        })
+        .await?
     }
 
     pub(crate) async fn resolve_retrieval_anchor_derivatives<O>(

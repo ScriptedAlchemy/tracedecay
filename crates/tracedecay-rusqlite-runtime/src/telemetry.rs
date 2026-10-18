@@ -20,6 +20,19 @@ pub(crate) use sqlite_vm::{observe_statement, take_observed_vm};
 
 pub(crate) const MAX_TRACKED_WRITER_CLIENTS: usize = 64;
 
+#[derive(Default)]
+pub(crate) struct TaskTelemetry {
+    lock_work: (bool, u64, u64),
+    sqlite_vm: SqliteVmSnapshot,
+}
+
+impl TaskTelemetry {
+    pub(crate) fn swap(&mut self) {
+        lock_work::swap(&mut self.lock_work);
+        sqlite_vm::swap(&mut self.sqlite_vm);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WriterOperationCounters {
     pub offered_operations: u64,

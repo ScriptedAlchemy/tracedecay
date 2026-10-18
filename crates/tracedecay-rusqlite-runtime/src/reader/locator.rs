@@ -92,7 +92,7 @@ pub enum ReaderStartError {
     LocatorPathIsNotAbsolute,
     LocatorPathMissing,
     LocatorPathIsNotFile,
-    ThreadSpawn(std::io::Error),
+    RuntimeUnavailable,
     StartupChannelClosed,
     OpenFailed(ConnectionPolicyError),
     ReadOnlySetupFailed(ConnectionPolicyError),
@@ -113,7 +113,7 @@ impl fmt::Display for ReaderStartError {
             }
             Self::LocatorPathMissing => f.write_str("verified SQLite path is missing"),
             Self::LocatorPathIsNotFile => f.write_str("verified SQLite path is not a regular file"),
-            Self::ThreadSpawn(error) => write!(f, "failed to start SQLite reader thread: {error}"),
+            Self::RuntimeUnavailable => f.write_str("storage runtime is unavailable"),
             Self::StartupChannelClosed => {
                 f.write_str("SQLite reader exited before reporting startup")
             }
@@ -144,7 +144,6 @@ impl Error for ReaderStartError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidReaderBudget(error) => Some(error),
-            Self::ThreadSpawn(error) => Some(error),
             Self::OpenFailed(error) | Self::ReadOnlySetupFailed(error) => Some(error),
             Self::SchemaProbeFailed(error) => Some(error),
             Self::OpenedDatabaseIdentity(error) => Some(error),

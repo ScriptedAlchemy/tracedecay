@@ -5,7 +5,7 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, atomic::AtomicBool, mpsc},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -40,6 +40,8 @@ const ROW_ALLOCATION_OVERHEAD: usize =
 const CELL_ALLOCATION_OVERHEAD: usize = std::mem::size_of::<ExactSqlValue>();
 
 mod clock;
+#[cfg(test)]
+pub(crate) use clock::fake::TaskClock;
 mod column;
 mod command;
 mod guard;
@@ -53,7 +55,7 @@ pub(crate) use column::{
 pub(crate) use json::{decode as decode_json, encode as encode_json};
 pub use types::*;
 
-pub use command::ExactSqlJobTransaction;
+pub use command::{ExactSqlJobTransaction, JobPolicy};
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
@@ -119,7 +121,7 @@ pub struct ExactSqlHandle {
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
-    if asupersync::runtime::Runtime::current_handle().is_some() {
+    if crate::native_runtime::on_native_thread() {
         NATIVE_THREAD_WRITER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if record_native_thread_wait("writer", std::panic::Location::caller()) {
             tracing::warn!(
@@ -130,6 +132,13 @@ fn recv_writer_reply<T>(
         }
     }
     response.recv_blocking()
+}
+
+fn refuse_on_pool() -> Result<(), ExactSqlError> {
+    if crate::storage_pool::on_pool() {
+        return Err(ExactSqlError::WriterUnavailable);
+    }
+    Ok(())
 }
 
 static NATIVE_THREAD_WRITER_WAITS: std::sync::atomic::AtomicU64 =
@@ -192,7 +201,7 @@ pub fn native_thread_writer_waits() -> u64 {
 /// `recv_writer_reply` does for writer waits.
 #[track_caller]
 pub(crate) fn note_native_thread_reader_wait() {
-    if asupersync::runtime::Runtime::current_handle().is_some() {
+    if crate::native_runtime::on_native_thread() {
         NATIVE_THREAD_READER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if record_native_thread_wait("reader", std::panic::Location::caller()) {
             tracing::warn!(
@@ -526,19 +535,73 @@ impl ExactSqlHandle {
         R: Send + 'static,
         E: Send + 'static,
     {
+        self.transact_with_policy(JobPolicy::Bounded, job).await
+    }
+
+    /// [`Self::transact`] under `policy`.
+    pub async fn transact_with_policy<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(policy, move |transaction| Ok(job(transaction)))
+            .await
+    }
+
+    /// [`Self::transact_with_policy`] for an async body, so an async helper
+    /// over the job's statements runs unchanged. The body is polled once
+    /// inside the job: its statements are synchronous, so it completes on that
+    /// poll unless it awaited something else, which would hold the writer
+    /// across the wait. Such a job rolls back with
+    /// [`ExactSqlError::JobAwaitedForeignFuture`].
+    pub async fn transact_async<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        body: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: AsyncFn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        self.run_job(policy, move |transaction| {
+            complete_now(body(transaction)).ok_or(ExactSqlError::JobAwaitedForeignFuture)
+        })
+        .await
+    }
+
+    async fn run_job<R, E, F>(
+        &self,
+        policy: JobPolicy,
+        job: F,
+    ) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<Result<R, E>, ExactSqlError>
+            + Send
+            + Sync
+            + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
         let (outcome, verdict) = async_channel::bounded(1);
         let (reply, response) = async_channel::bounded(1);
         let job: command::WriterJob = Box::new(move |transaction| {
-            let result = job(transaction);
+            let result = job(transaction)?;
             let commit = result.is_ok();
             let _ = outcome.try_send(result);
-            commit
+            Ok(commit)
         });
         self.writer
             .as_ref()
             .ok_or(ExactSqlError::WriterUnavailable)?
             .try_send(WriterCommand::Job {
                 job,
+                policy,
                 reply,
                 authority: self.write_authority.clone(),
             })
@@ -570,6 +633,7 @@ impl ExactSqlHandle {
 
     #[track_caller]
     pub fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows, ExactSqlError> {
+        refuse_on_pool()?;
         recv_writer_reply(self.enqueue_checkpoint_wal_truncate()?)
             .map_err(|_| ExactSqlError::WriterUnavailable)?
     }
@@ -786,7 +850,7 @@ impl ExactSqlHandle {
         ),
         ExactSqlError,
     > {
-        let (commands, receiver) = mpsc::sync_channel(1);
+        let (commands, receiver) = async_channel::bounded(1);
         let (reply, response) = async_channel::bounded(1);
         let lease = Arc::new(TransactionLeaseState::default());
         self.writer
@@ -816,6 +880,7 @@ impl ExactSqlHandle {
         behavior: TransactionBehavior,
         policy: TransactionPolicy,
     ) -> Result<ExactSqlTransaction, ExactSqlError> {
+        refuse_on_pool()?;
         let (transaction, response) = self.enqueue_transaction(behavior, policy)?;
         recv_writer_reply(response).map_err(|_| ExactSqlError::WriterUnavailable)??;
         Ok(transaction)
@@ -860,6 +925,7 @@ impl ExactSqlHandle {
 
     #[track_caller]
     fn dispatch_writer(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
+        refuse_on_pool()?;
         {
             let _span = tracing::trace_span!("rusqlite.exact_sql.dispatch").entered();
             {
@@ -914,7 +980,7 @@ impl ExactSqlReadSnapshot {
 }
 
 pub struct ExactSqlTransaction {
-    commands: Option<mpsc::SyncSender<TransactionCommand>>,
+    commands: Option<async_channel::Sender<TransactionCommand>>,
     lease: Arc<TransactionLeaseState>,
     policy: TransactionPolicy,
 }
@@ -930,6 +996,7 @@ enum RollbackDispatch {
 impl ExactSqlTransaction {
     #[track_caller]
     pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
+        refuse_on_pool()?;
         let sender = self
             .commands
             .as_ref()
@@ -1097,6 +1164,7 @@ impl ExactSqlTransaction {
     }
     #[track_caller]
     pub fn commit(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
+        refuse_on_pool()?;
         let lease = Arc::clone(&self.lease);
         recv_writer_reply(self.enqueue_commit(None)?)
             .map_err(|_| transaction_terminal_error(&lease))?
@@ -1156,6 +1224,7 @@ impl ExactSqlTransaction {
 
     #[track_caller]
     pub fn rollback(self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
+        refuse_on_pool()?;
         match self.begin_rollback() {
             RollbackDispatch::Awaiting { lease, response } => recv_writer_reply(response)
                 .unwrap_or_else(|_| settled_rollback_or_terminal_error(&lease)),
@@ -1212,6 +1281,7 @@ impl ExactSqlTransaction {
         request: SqlRequest,
         execution_policy: ExecutionPolicy,
     ) -> Result<SqlResult, ExactSqlError> {
+        refuse_on_pool()?;
         recv_writer_reply(self.enqueue_transaction_request(request, execution_policy)?)
             .map_err(|_| transaction_terminal_error(&self.lease))?
     }
@@ -1277,6 +1347,15 @@ fn verify_write_authority(
     match authority {
         Some(authority) => authority.verify(intent),
         None => Ok(()),
+    }
+}
+
+/// One poll; `None` means the future is pending.
+fn complete_now<F: Future>(future: F) -> Option<F::Output> {
+    match std::pin::pin!(future).poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    {
+        std::task::Poll::Ready(output) => Some(output),
+        std::task::Poll::Pending => None,
     }
 }
 
@@ -1440,37 +1519,50 @@ pub(crate) fn execute_query(
     )
 }
 
-/// Prepares a read statement, riding out the short window in which a
-/// freshly opened WAL database is still being recovered by its writer.
-///
-/// SQLite answers a reader that arrives during WAL recovery with
-/// `SQLITE_BUSY_RECOVERY`, which bypasses the connection's busy handler, so
-/// a reader started right after its writer could fail its very first
-/// statement with "database is locked" under load. The window is bounded by
-/// recovery itself; retry a few times before surfacing the error.
+const PREPARE_QUERY: &str = "prepare query";
+
 fn prepare_read_statement<'c>(
     connection: &'c Connection,
     sql: &str,
 ) -> Result<rusqlite::CachedStatement<'c>, ExactSqlError> {
-    const ATTEMPTS: u32 = 8;
-    const BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
-    let mut attempt = 0;
-    loop {
-        match guard::prepare_cached(connection, sql) {
-            Ok(statement) => return Ok(statement),
-            Err(rusqlite::Error::SqliteFailure(failure, _))
-                if attempt < ATTEMPTS
-                    && matches!(
-                        failure.code,
-                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                    ) =>
-            {
-                attempt += 1;
-                std::thread::sleep(BACKOFF);
-            }
-            Err(error) => return Err(sqlite_error("prepare query", error)),
+    guard::prepare_cached(connection, sql).map_err(|error| sqlite_error(PREPARE_QUERY, error))
+}
+
+/// SQLite answers a connection that starts a read while another connection
+/// recovers the WAL with `SQLITE_BUSY_RECOVERY`, which bypasses the busy
+/// handler, so a reader started right after its writer, or a writer whose
+/// file another process just opened, could fail a statement with "database
+/// is locked" under load. The window is bounded by recovery itself; retry a
+/// few times before surfacing the error.
+pub(crate) async fn read_across_wal_recovery<T>(
+    mut read: impl FnMut() -> Result<T, ExactSqlError>,
+) -> Result<T, ExactSqlError> {
+    const RETRIES: u32 = 8;
+    const BACKOFF: Duration = Duration::from_millis(25);
+    for _ in 0..RETRIES {
+        match read() {
+            Err(ExactSqlError::Sqlite {
+                operation: PREPARE_QUERY,
+                code: Some(rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED),
+                ..
+            }) => crate::storage_pool::sleep(BACKOFF).await,
+            done => return done,
         }
     }
+    read()
+}
+
+async fn request_across_wal_recovery<T>(
+    request: SqlRequest,
+    mut run: impl FnMut(SqlRequest) -> Result<T, ExactSqlError>,
+) -> Result<T, ExactSqlError> {
+    if !matches!(
+        request,
+        SqlRequest::Query(_) | SqlRequest::ExecuteReturning(_)
+    ) {
+        return run(request);
+    }
+    read_across_wal_recovery(|| run(request.clone())).await
 }
 
 fn execute_query_unchecked(
@@ -1605,12 +1697,12 @@ fn settled_rollback_or_terminal_error(
 }
 
 fn map_transaction_send_error(
-    error: mpsc::TrySendError<TransactionCommand>,
+    error: async_channel::TrySendError<TransactionCommand>,
     lease: &TransactionLeaseState,
 ) -> ExactSqlError {
     match error {
-        mpsc::TrySendError::Full(_) => ExactSqlError::Busy,
-        mpsc::TrySendError::Disconnected(_) => transaction_terminal_error(lease),
+        async_channel::TrySendError::Full(_) => ExactSqlError::Busy,
+        async_channel::TrySendError::Closed(_) => transaction_terminal_error(lease),
     }
 }
 
