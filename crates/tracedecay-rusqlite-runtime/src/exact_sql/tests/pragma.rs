@@ -110,7 +110,7 @@ fn closed_reader_pool_reports_typed_memory_release_noop() {
     let readers = ReaderPool::start(
         ExistingReaderLocator::new(binding.clone(), locator(&binding, 'c'), path).unwrap(),
         AdmissionConfigV1::default().readers,
-        NoReads,
+        ExactSqlOnlyReaderV1,
     )
     .unwrap();
     let channel = ExactSqlHandle::attach_read_only(&readers);

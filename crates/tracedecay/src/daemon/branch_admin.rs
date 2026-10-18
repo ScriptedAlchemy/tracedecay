@@ -1043,30 +1043,6 @@ impl StoreAdministration {
     }
 
     #[tracing::instrument(
-        name = "daemon.branch_admin.mounted_project_servers",
-        level = "trace",
-        skip_all
-    )]
-    pub(super) async fn mounted_project_servers(&self) -> Vec<Arc<crate::mcp::McpServer>> {
-        let Ok(profile_root) = self
-            .profile_identity()
-            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
-        else {
-            return Vec::new();
-        };
-
-        {
-            let servers = self.project_servers.lock().await;
-            servers
-                .servers
-                .iter()
-                .filter(|(key, _)| key.owner.profile_root == profile_root)
-                .map(|(_, entry)| Arc::clone(&entry.server))
-                .collect::<Vec<_>>()
-        }
-    }
-
-    #[tracing::instrument(
         name = "daemon.branch_admin.mounted_project_graphs",
         level = "trace",
         skip_all
@@ -1074,10 +1050,29 @@ impl StoreAdministration {
     pub(super) async fn mounted_project_graphs(
         &self,
     ) -> Vec<Arc<tracedecay_project::project::TraceDecay>> {
-        let servers = self.mounted_project_servers().await;
-        let mut graphs = Vec::with_capacity(servers.len());
-        for server in &servers {
-            graphs.push(server.cg().await);
+        let Ok(profile_root) = self
+            .profile_identity()
+            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
+        else {
+            return Vec::new();
+        };
+
+        // A cloned server handle counts as a client lease, and a bounded route
+        // bind never evicts a leased server. Take the graph slots under the
+        // registry lock and read them after it drops, so a held graph swap
+        // parks neither a route bind nor an eviction.
+        let slots = {
+            let servers = self.project_servers.lock().await;
+            servers
+                .servers
+                .iter()
+                .filter(|(key, _)| key.owner.profile_root == profile_root)
+                .map(|(_, entry)| entry.server.graph_slot())
+                .collect::<Vec<_>>()
+        };
+        let mut graphs = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            graphs.push(slot.read().await.clone());
         }
         graphs
     }

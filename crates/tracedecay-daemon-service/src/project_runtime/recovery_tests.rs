@@ -363,7 +363,7 @@ async fn a_retried_shutdown_cannot_readmit_a_cancelled_recovery_owner() {
     registry.begin_shutdown();
     assert!(probe.is_cancelled());
     assert_eq!(
-        registry.shut_down_all().await,
+        registry.shut_down_all(None).await,
         super::ProjectRuntimesStop::Stopped
     );
     assert_eq!(
@@ -416,7 +416,7 @@ async fn daemon_shutdown_drains_admitted_requests_before_removing_runtimes() {
 
     let shutdown_registry = registry.clone();
     let shutdown = tokio::spawn(async move {
-        shutdown_registry.shut_down_all().await;
+        shutdown_registry.shut_down_all(None).await;
     });
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !registry.closed.load(std::sync::atomic::Ordering::Acquire) {

@@ -33,10 +33,6 @@ use tracedecay_code_index::production::{
     VerifiedSealedLexicalPageReadV1, VerifiedSealedLexicalPageSourceV1,
     VerifiedSealedLexicalSymbolDisplayV1,
 };
-use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-};
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::historical_query::{
     HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
@@ -46,8 +42,7 @@ use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
     ChunkerRevision, CodeSearchChunkV1, ComponentRevision, EphemeralSanitizedQueryViewV1,
     ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId, LanguageId, ManifestDigest,
-    PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, ProjectionKeyV1, ProjectionKindV1,
     PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision, RelationEdgeKindV1,
     RepositoryDirtyStateV1, RepositoryId, RetrievalFailure, RetrievalRequest, RetrievalScope,
     RetrievalSnapshot, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
@@ -57,22 +52,21 @@ use tracedecay_domain::{
 use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneEvidence,
-    ExactLaneRequest, ExactLaneRetriever,
+    ExactLaneRequest,
 };
 use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageError,
     FusionStageInput,
 };
 use tracedecay_query::retrieval::graph::{
-    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    production_code_index_freshness,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, production_code_index_freshness,
 };
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
     CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
-    lexical_query_parts, merge_lexical_routes,
+    LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1, lexical_query_parts,
+    merge_lexical_routes,
 };
 use tracedecay_query::retrieval::ports::{
     CodeCandidateBindingV1, TEXT_ARTIFACT_PAGE_BYTES_V1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
@@ -108,53 +102,6 @@ pub struct GenerateCandidateOutputsOptions<'a> {
     /// Authoritative identity for `repo_root`, injected by the composing
     /// binary. See [`AdmittedCorpusScopeFn`].
     pub admitted_scope: AdmittedCorpusScopeFn,
-}
-
-#[derive(Default)]
-struct ApplyingProjectionSink;
-
-impl CodeChunkProjectionSink for ApplyingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions: Vec<ChunkProjectionDecisionV1> = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    ProjectionOperationV1::Updated
-                } else {
-                    ProjectionOperationV1::Added
-                },
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: change.current_digest.clone(),
-            })
-            .collect();
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: ProjectionOperationV1::Deleted,
-                    outcome: ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        decisions.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
 }
 
 #[derive(Clone)]
@@ -1389,14 +1336,15 @@ fn publish_scope_generation(
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
-    let published = CodeIndexProductionOwnerV1::new(
-        config,
-        MemorySealedPublicationStoreV1::default(),
-        ApplyingProjectionSink,
-    )
-    .map_err(|error| CandidateOutputError::Contract(format!("open production owner: {error}")))?
-    .build_and_publish(request, &ActiveControl)
-    .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
+    let published =
+        CodeIndexProductionOwnerV1::new(config, MemorySealedPublicationStoreV1::default())
+            .map_err(|error| {
+                CandidateOutputError::Contract(format!("open production owner: {error}"))
+            })?
+            .build_and_publish(request, &ActiveControl)
+            .map_err(|error| {
+                CandidateOutputError::Contract(format!("publish generation: {error}"))
+            })?;
     let generation = published.decoded().map(Arc::clone).ok_or_else(|| {
         CandidateOutputError::Contract("a generation without a parent builds cold".to_owned())
     })?;

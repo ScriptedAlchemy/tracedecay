@@ -613,3 +613,98 @@ fn an_admission_ledger_root_that_is_not_a_directory_is_unavailable_not_empty() {
         "an unusable admission ledger is a typed failure, not nothing owed: {pending:?}"
     );
 }
+
+/// A Claude tool call mints its lifecycle only for the intent pass. With the
+/// pass disabled, the default, it writes nothing inside the hook's budget;
+/// Kimi binds its lifecycle for every Scout claim, so the gate leaves it be.
+#[tokio::test]
+async fn claude_tool_calls_mint_a_lifecycle_only_while_the_intent_pass_is_enabled() {
+    use tracedecay_daemon_service::context_scout_lifecycle::{
+        AuthorityRegistrationV1, lookup_registered_context_scout_lifecycle,
+        register_context_scout_lifecycle_authority,
+    };
+    use tracedecay_domain::{NativeHostIdentityV1, ObservationSourceRangeV1, ProjectId, SessionId};
+
+    let temporary = tempfile::tempdir().unwrap();
+    let project_id = ProjectId::new("project.claude-lifecycle-gate").unwrap();
+    let runtime =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            temporary.path().join("profile"),
+            temporary.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+    let sessions = runtime
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+        .unwrap();
+    let (hook_project_id, hook_worktree_id) = ([81; 16], [82; 16]);
+    assert_eq!(
+        register_context_scout_lifecycle_authority(
+            hook_project_id,
+            hook_worktree_id,
+            project_id,
+            tracedecay_domain::WorktreeId::new("worktree.claude-lifecycle-gate").unwrap(),
+            &sessions,
+        ),
+        AuthorityRegistrationV1::Registered
+    );
+    let background_cpu = runtime.background_cpu();
+    let mount = HookV2LifecycleMountV1 {
+        lifecycle: None,
+        project_sessions: &sessions,
+        background_cpu: Some(&background_cpu),
+    };
+    let minted = |session: &'static str| async move {
+        lookup_registered_context_scout_lifecycle(
+            hook_project_id,
+            hook_worktree_id,
+            &SessionId::new(session.to_owned()).unwrap(),
+        )
+        .await
+        .is_some()
+    };
+    let tool_call = |host: NativeHostIdentityV1, session: &'static str, intent_enabled: bool| {
+        let mount = &mount;
+        async move {
+            let lifecycle = tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1::new(
+                session,
+                "call.gate",
+                [1; 16],
+            )
+            .unwrap();
+            admit_gated_native_lifecycle(
+                mount,
+                ProviderId::new(host.hook_key()).unwrap(),
+                &lifecycle,
+                ObservationSourceRangeV1::new(1, 2).unwrap(),
+                host,
+                intent_enabled,
+            )
+            .await
+        }
+    };
+
+    assert!(
+        tool_call(
+            NativeHostIdentityV1::ClaudeCode,
+            "session.claude.off",
+            false
+        )
+        .await
+    );
+    assert!(
+        !minted("session.claude.off").await,
+        "a Claude tool call with the intent pass disabled writes no lifecycle"
+    );
+    assert!(tool_call(NativeHostIdentityV1::ClaudeCode, "session.claude.on", true).await);
+    assert!(
+        minted("session.claude.on").await,
+        "a Claude tool call with the intent pass enabled mints its lifecycle"
+    );
+    assert!(tool_call(NativeHostIdentityV1::KimiCode, "session.kimi.off", false).await);
+    assert!(
+        minted("session.kimi.off").await,
+        "Kimi keeps minting its lifecycle whatever the intent pass says"
+    );
+}

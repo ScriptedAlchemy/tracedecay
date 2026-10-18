@@ -15,7 +15,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{WorkProductAuthorizedRelationScopeV1, WorkProductGraphV1};
 
-use super::{fold_graph, load_journal};
+use super::{FromStoreFault, fold_graph, load_journal};
 
 use crate::work::RegisteredWorkWrite;
 use crate::work_run_control::WorkSqliteJobStorage;
@@ -218,8 +218,8 @@ fn graph_for_product(
     context: &tracedecay_contracts::WorkProductPortContextV1,
     product: &WorkProductEventCommitV1,
 ) -> Result<WorkProductGraphV1, AdmissionError> {
-    let journal =
-        load_journal(transaction, context.authorized_scope()).ok_or(AdmissionError::Unavailable)?;
+    let journal = load_journal(transaction, context.authorized_scope())
+        .map_err(AdmissionError::from_fault)?;
     let graph =
         fold_graph(&journal, product.event().sequence()).ok_or(AdmissionError::Unavailable)?;
     if graph.version() != product.verified_graph_version().graph_version() {
@@ -258,6 +258,7 @@ fn map_product_error(error: WorkProductEventPortErrorV1) -> AdmissionError {
         WorkProductEventPortErrorV1::VersionConflict => AdmissionError::VersionConflict,
         WorkProductEventPortErrorV1::IdempotencyConflict => AdmissionError::IdempotencyConflict,
         WorkProductEventPortErrorV1::Unavailable => AdmissionError::Unavailable,
+        WorkProductEventPortErrorV1::Storage(failure) => AdmissionError::Storage(failure),
         WorkProductEventPortErrorV1::Cancelled => AdmissionError::Cancelled,
         WorkProductEventPortErrorV1::TimedOut => AdmissionError::TimedOut,
     }

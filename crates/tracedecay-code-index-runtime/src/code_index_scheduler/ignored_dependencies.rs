@@ -256,6 +256,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         previous_roster: Vec<CodeIndexIgnoredSourceAdmissionV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
+        let began_under = self.epoch.load(std::sync::atomic::Ordering::Acquire);
         let _workers = self.ensure_worker_plan()?;
         let _worker_memory = match self.reserve_worker_memory() {
             Ok(reservation) => reservation,
@@ -326,7 +327,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         let generation_id = generation.manifest().generation_id.clone();
         drop((retained_bytes, retained_reservations));
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
-        self.mark_reconciled(SourceContentManifestV1::for_snapshot(generation.snapshot()));
+        self.mark_reconciled(
+            SourceContentManifestV1::for_snapshot(generation.snapshot()),
+            began_under,
+        );
         let latest = self.bind_latest_complete(
             self.decoded_publication(&generation)
                 .map_err(CodeIndexProductionErrorV1::Publication)?,

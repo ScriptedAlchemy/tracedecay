@@ -84,6 +84,19 @@ async fn observation_store_resolver_rejects_conflicting_path_common_dir_and_mark
     db.upsert_code_project("proj_marker", &marker_owner, None, None, None)
         .await
         .unwrap();
+    // The marker counts only for a project this profile holds a store for.
+    db.upsert_store_instance(StoreInstanceUpsert {
+        store_id: "store:proj_marker:profile_sharded".to_string(),
+        project_id: "proj_marker".to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: "projects/proj_marker".to_string(),
+        manifest_relpath: None,
+        last_verified_at: None,
+        last_write_at: None,
+    })
+    .await
+    .unwrap();
     write_repository_identity_marker(&project, "proj_marker").unwrap();
 
     let error = db

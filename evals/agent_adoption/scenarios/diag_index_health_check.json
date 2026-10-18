@@ -33,7 +33,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "outcome": {
+    "kind": "ungraded",
+    "reason": "freshness and size are run-dependent; no fixed answer to check"
+  },
   "max_tool_calls": 4,
-  "notes": "is-the-index-healthy; no fixed ground_truth since freshness/size are run-dependent, graded on tool choice."
+  "notes": "is-the-index-healthy; freshness/size are run-dependent, so the answer is ungraded and the run is judged on routing only."
 }

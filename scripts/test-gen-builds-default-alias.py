@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Behavioral tests for Bazel default-feature alias collapse."""
+"""Behavioral tests for Bazel feature aliases and test input ownership."""
 
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -74,6 +75,30 @@ class DefaultAliasNormalizationTests(unittest.TestCase):
             self.gen.normalize_default_alias({"production"}, table),
             {"default", "production"},
         )
+
+
+class TestResourceOwnershipTests(unittest.TestCase):
+    def test_suite_owns_its_inputs_and_explicit_shared_modules(self) -> None:
+        gen = load_gen_builds()
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch).resolve()
+            for name in ("owned/main.rs", "owned/input.json", "other/main.rs",
+                         "common/mod.rs", "fixtures/sample.rs"):
+                path = root / "tests" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture")
+            package = {"manifest_path": str(root / "Cargo.toml")}
+            target = {"src_path": str(root / "tests/owned/main.rs")}
+            patterns = gen.test_resource_globs(package, target, (root / "tests/common",))
+            # Match Bazel's recursive file globs, including files below each directory.
+            inputs = {path.relative_to(root).as_posix() for pattern in patterns
+                      for path in root.glob(pattern + "/*") if path.is_file()}
+            self.assertIn("tests/owned/input.json", inputs)
+            self.assertIn("tests/common/mod.rs", inputs)
+            self.assertIn("tests/fixtures/sample.rs", inputs)
+            self.assertNotIn("tests/other/main.rs", inputs)
+            sources = {path for path, _ in gen.target_sources(target)}
+            self.assertEqual(sources, {root / "tests/owned/main.rs"})
 
 
 if __name__ == "__main__":

@@ -58,10 +58,10 @@ use super::session_window::{
     render_window_state,
 };
 use super::{
-    ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1,
-    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutSessionClaimInputV1,
-    ContextScoutSessionEvidenceExt, ContextScoutSuppressionV1, ContextScoutTriggerV1,
-    select_context_scout_delivery_window,
+    ContextScoutDeliverySelectionInputV1, ContextScoutDurableStoreOutcomeV1,
+    ContextScoutRuntimeOutcomeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
+    ContextScoutSessionClaimInputV1, ContextScoutSessionEvidenceExt, ContextScoutSuppressionV1,
+    ContextScoutTriggerV1, select_context_scout_delivery_window,
 };
 
 const INTENT_CANDIDATE_DEDUPE_DOMAIN: &str = "tracedecay.context-scout.intent-candidate.v1";
@@ -421,17 +421,29 @@ pub async fn run_context_scout_intent_pass(
         delivered_dedupe_keys: session.delivered_dedupe_keys,
         candidates: vec![candidate],
     };
-    match pass
+    let prepared = pass
         .owner
         .prepare_intent(&input, pass.deadline, pass.cancellation.clone())
         .await
-    {
-        Ok(ContextScoutRuntimeOutcomeV1::Enqueued { entry, .. }) => {
-            ContextScoutIntentPassOutcomeV1::Enqueued {
-                entry,
-                lifecycle: Box::new(intent_lifecycle),
-            }
-        }
+        .map(|outcome| match outcome {
+            // The store kept the copy of this suggestion it already claimed
+            // or delivered to the session.
+            ContextScoutRuntimeOutcomeV1::Enqueued {
+                store_outcome: ContextScoutDurableStoreOutcomeV1::Duplicate,
+                ..
+            } => ContextScoutRuntimeOutcomeV1::Suppressed {
+                reason: ContextScoutSuppressionV1::Duplicate,
+            },
+            outcome => outcome,
+        });
+    match prepared {
+        Ok(ContextScoutRuntimeOutcomeV1::Enqueued {
+            entry,
+            store_outcome: ContextScoutDurableStoreOutcomeV1::Stored,
+        }) => ContextScoutIntentPassOutcomeV1::Enqueued {
+            entry,
+            lifecycle: Box::new(intent_lifecycle),
+        },
         Ok(ContextScoutRuntimeOutcomeV1::Suppressed { reason }) => {
             let withheld = match reason {
                 ContextScoutSuppressionV1::Duplicate => Some("suppressed_duplicate"),
@@ -453,9 +465,11 @@ pub async fn run_context_scout_intent_pass(
                 model_outcome,
             }
         }
-        Ok(ContextScoutRuntimeOutcomeV1::Unavailable) | Err(_) => {
-            ContextScoutIntentPassOutcomeV1::Unavailable
-        }
+        Ok(
+            ContextScoutRuntimeOutcomeV1::Enqueued { .. }
+            | ContextScoutRuntimeOutcomeV1::Unavailable,
+        )
+        | Err(_) => ContextScoutIntentPassOutcomeV1::Unavailable,
     }
 }
 

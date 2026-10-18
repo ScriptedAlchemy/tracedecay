@@ -66,7 +66,9 @@ pub fn nodes_addressed_by_selector(
             "missing required parameter: qualified_name or node_id",
         ));
     };
-    graph.resolve_qualified_name(qualified_name, None, 1_000)
+    graph
+        .resolve_qualified_name(qualified_name, None, 1_000)
+        .map_err(Into::into)
 }
 
 pub fn required_graph_metadata(

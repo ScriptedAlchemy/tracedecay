@@ -26,17 +26,16 @@ pub(super) fn registered_adapter_unavailable(
     request_id: RequestId,
     code: &str,
     message: &str,
-) -> Response {
-    match tracedecay_api::adapter_problem(
+) -> Result<tracedecay_api::HttpJsonEnvelope<serde_json::Value>, tracedecay_api::HttpAdapterError> {
+    tracedecay_api::adapter_problem(
         request_id,
         ApplicationProblem::unavailable(SafeDiagnostic {
             code: code.to_owned(),
             message: message.to_owned(),
         }),
-    ) {
-        Ok(problem) => tracedecay_api::application_problem_response(problem),
-        Err(error) => application_contract_error_response(error),
-    }
+    )
+    .map(Into::into)
+    .map_err(Into::into)
 }
 
 pub(super) fn application_contract_error_response(error: ApplicationContractError) -> Response {

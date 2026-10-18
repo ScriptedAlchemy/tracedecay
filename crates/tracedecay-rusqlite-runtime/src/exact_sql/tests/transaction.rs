@@ -23,6 +23,19 @@ fn sqlite_busy(message: String) -> rusqlite::Error {
     )
 }
 
+fn retry_without_connection(
+    mut begin: impl FnMut() -> rusqlite::Result<()>,
+    shutdown: &AtomicBool,
+    cancelled: impl FnMut() -> bool,
+) -> rusqlite::Result<()> {
+    let mut connection = Connection::open_in_memory().unwrap();
+    crate::storage_pool::wait_until(
+        retry_busy_begin(&mut connection, |_| begin(), shutdown, cancelled),
+        None,
+    )
+    .unwrap()
+}
+
 fn is_busy_with(error: &rusqlite::Error, expected: &str) -> bool {
     matches!(
         error,
@@ -33,7 +46,7 @@ fn is_busy_with(error: &rusqlite::Error, expected: &str) -> bool {
 
 #[test]
 fn immediate_begin_retries_sqlite_busy_until_lock_releases() {
-    let (_directory, mut locker, contender) = busy_begin_connections();
+    let (_directory, mut locker, mut contender) = busy_begin_connections();
     let mut lock = Some(
         locker
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -44,19 +57,24 @@ fn immediate_begin_retries_sqlite_busy_until_lock_releases() {
 
     // This thread's exact SQL clock is frozen, so it never reaches the acquire
     // deadline and the holder's release alone decides when a retry succeeds.
-    let transaction = retry_busy_begin(
-        || {
-            attempts += 1;
-            let attempt =
-                rusqlite::Transaction::new_unchecked(&contender, TransactionBehavior::Immediate);
-            if let Some(lock) = lock.take() {
-                lock.rollback().unwrap();
-            }
-            attempt
-        },
-        &shutdown,
-        || false,
+    let transaction = crate::storage_pool::wait_until(
+        retry_busy_begin(
+            &mut contender,
+            |contender| {
+                attempts += 1;
+                let attempt =
+                    rusqlite::Transaction::new_unchecked(contender, TransactionBehavior::Immediate);
+                if let Some(lock) = lock.take() {
+                    lock.rollback().unwrap();
+                }
+                attempt
+            },
+            &shutdown,
+            || false,
+        ),
+        None,
     )
+    .unwrap()
     .unwrap();
 
     assert_eq!(
@@ -73,7 +91,7 @@ fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
     clock.install();
     let mut attempts = 0;
 
-    let error = retry_busy_begin(
+    let error = retry_without_connection(
         || {
             attempts += 1;
             clock.advance(Duration::from_millis(1));
@@ -93,7 +111,7 @@ fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
 
     shutdown.store(true, Ordering::Release);
     let mut attempts = 0;
-    let error = retry_busy_begin(
+    let error = retry_without_connection(
         || {
             attempts += 1;
             clock.advance(Duration::from_millis(1));
@@ -114,7 +132,7 @@ fn immediate_begin_busy_retry_honors_cancellation() {
     let cancelled = AtomicBool::new(false);
     let mut attempts = 0;
 
-    let error = retry_busy_begin(
+    let error = retry_without_connection(
         || {
             attempts += 1;
             if attempts == 1 {
@@ -144,7 +162,7 @@ fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
     let shutdown = AtomicBool::new(false);
     let mut attempts = 0;
 
-    let error = retry_busy_begin(
+    let error = retry_without_connection(
         || {
             attempts += 1;
             if attempts == 1 {

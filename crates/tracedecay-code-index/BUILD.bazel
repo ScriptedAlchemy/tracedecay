@@ -131,8 +131,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["tests/code_index_suite/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-code-extraction:fixtures"],
+    compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/code_index_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/code_index_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-code-extraction:fixtures"],
 )
 
 rust_test(
@@ -146,8 +146,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
 )
 
 rust_test(
@@ -163,8 +163,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:query-code-index", "//tests:fixtures"],
 )
 
 rust_test(
@@ -180,8 +180,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -197,8 +197,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:index-bench"],
 )
 
 rust_test(
@@ -214,8 +214,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -231,8 +231,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -248,8 +248,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -265,8 +265,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
-    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
-    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 filegroup(

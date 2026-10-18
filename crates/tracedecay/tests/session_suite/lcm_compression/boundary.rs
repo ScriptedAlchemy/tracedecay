@@ -372,7 +372,7 @@ async fn compression_boundary_link_preserves_payload_owner_and_projects_debt() {
             LcmSummarizerMode::Fake {
                 summary_text: "first chunk summary".into(),
             },
-            Some(4),
+            Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
         ))
@@ -476,7 +476,7 @@ async fn boundary_link_to_existing_target_leaves_source_session_state_intact() {
             LcmSummarizerMode::Fake {
                 summary_text: "first chunk summary".into(),
             },
-            Some(4),
+            Some(2 * budget_tokens("old-1 token")),
             Some(2),
             None,
         ))

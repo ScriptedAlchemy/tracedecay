@@ -6,6 +6,7 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
@@ -64,7 +65,8 @@ const RETAINED_WAL_BYTES: i64 = WAL_SOFT_LIMIT_BYTES as i64;
 /// pathname stat.
 #[derive(Debug)]
 pub(crate) struct OpenedDatabaseFile {
-    file: File,
+    /// `None` once [`Self::release`] closed the descriptor of a lost file.
+    file: Mutex<Option<File>>,
     identity: u64,
 }
 
@@ -88,19 +90,42 @@ impl OpenedDatabaseFile {
             return Err(OpenedDatabaseFileError::NotFile);
         }
         let identity = opened_file_identity(&file)?;
-        Ok(Self { file, identity })
+        Ok(Self {
+            file: Mutex::new(Some(file)),
+            identity,
+        })
+    }
+
+    /// Closes the pinned descriptor of a file that was unlinked or replaced,
+    /// for every holder of this handle at once. The identity stays readable;
+    /// anything that needs the descriptor afterwards reports `Replaced`.
+    pub(crate) fn release(&self) {
+        self.file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
     }
 
+    fn with_file<T>(
+        &self,
+        use_file: impl FnOnce(&File) -> T,
+    ) -> Result<T, OpenedDatabaseFileError> {
+        self.file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(use_file)
+            .ok_or(OpenedDatabaseFileError::Replaced)
+    }
+
     pub(crate) fn try_clone(&self) -> Result<Self, OpenedDatabaseFileError> {
+        let file = self.with_file(|file| file.try_clone())?;
         Ok(Self {
-            file: self
-                .file
-                .try_clone()
-                .map_err(|_| OpenedDatabaseFileError::Open)?,
+            file: Mutex::new(Some(file.map_err(|_| OpenedDatabaseFileError::Open)?)),
             identity: self.identity,
         })
     }
@@ -112,10 +137,8 @@ impl OpenedDatabaseFile {
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
         use std::os::unix::io::AsRawFd;
 
-        Ok(PathBuf::from(format!(
-            "/proc/self/fd/{}",
-            self.file.as_raw_fd()
-        )))
+        let descriptor = self.with_file(|file| file.as_raw_fd())?;
+        Ok(PathBuf::from(format!("/proc/self/fd/{descriptor}")))
     }
 
     /// Selects the pathname used by a writer connection.
@@ -182,8 +205,34 @@ impl OpenedDatabaseFile {
         if opened_file_identity(&current)? != self.identity {
             return Err(OpenedDatabaseFileError::Replaced);
         }
-        let _ = &self.file;
         Ok(())
+    }
+
+    /// Whether this file was unlinked, or `path` now names another file.
+    /// A path that cannot be inspected for another reason is not lost.
+    #[cfg(unix)]
+    pub(crate) fn is_lost(&self, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        let unlinked = self
+            .with_file(|file| file.metadata().is_ok_and(|pinned| pinned.nlink() == 0))
+            .unwrap_or(true);
+        if unlinked {
+            return true;
+        }
+        match std::fs::metadata(path) {
+            Ok(current) => metadata_identity(&current) != self.identity,
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn is_lost(&self, path: &Path) -> bool {
+        !path.exists()
+            || matches!(
+                self.verify_current_path(path),
+                Err(OpenedDatabaseFileError::Replaced)
+            )
     }
 
     pub(crate) fn verify_connection(
@@ -310,18 +359,23 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 
 #[cfg(unix)]
 fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
-    use std::os::unix::fs::MetadataExt;
-
     let metadata = file
         .metadata()
         .map_err(|_| OpenedDatabaseFileError::Inspect)?;
+    Ok(metadata_identity(&metadata))
+}
+
+#[cfg(unix)]
+fn metadata_identity(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+
     let mut hasher = Sha256::new();
     hasher.update(metadata.dev().to_le_bytes());
     hasher.update(metadata.ino().to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_le_bytes(bytes).max(1))
+    u64::from_le_bytes(bytes).max(1)
 }
 
 #[cfg(unix)]
@@ -519,6 +573,14 @@ pub struct VerifiedReader {
     connection: Connection,
     canonical_path: PathBuf,
     file_identity: u64,
+}
+
+pub fn default_vfs_max_pathname() -> Option<usize> {
+    // SAFETY: SQLite owns registered VFS values for process lifetime; this
+    // reads the immutable pathname limit from the default VFS.
+    let vfs = unsafe { rusqlite::ffi::sqlite3_vfs_find(std::ptr::null()) };
+    let max_pathname = unsafe { vfs.as_ref() }?.mxPathname;
+    usize::try_from(max_pathname).ok()
 }
 
 impl VerifiedReader {

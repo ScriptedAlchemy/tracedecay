@@ -67,6 +67,39 @@ pub struct GitRepositoryHistory {
 }
 
 impl GitRepositoryAuthority {
+    /// Every parentless commit reachable from HEAD, empty when HEAD is unborn.
+    ///
+    /// `None` when the roots cannot be known: the history is shallow, an
+    /// object is unreadable, or the walk exceeds `max_commits` or `deadline`.
+    pub fn root_commits(
+        &self,
+        max_commits: usize,
+        deadline: std::time::Duration,
+    ) -> Option<Vec<GitOidV1>> {
+        let head = self.head().ok()?;
+        let Some(tip) = head.commit() else {
+            return Some(Vec::new());
+        };
+        if self.git_dir.join("shallow").is_file() || self.common_dir.join("shallow").is_file() {
+            return None;
+        }
+        let tip = gix::hash::ObjectId::from_hex(tip.as_str().as_bytes()).ok()?;
+        let repository = self.repository.to_thread_local();
+        let started = std::time::Instant::now();
+        let mut roots = Vec::new();
+        for (visited, info) in repository.rev_walk([tip]).all().ok()?.enumerate() {
+            if visited >= max_commits || started.elapsed() > deadline {
+                return None;
+            }
+            let info = info.ok()?;
+            if info.parent_ids.is_empty() {
+                roots.push(GitOidV1::new(info.id.to_string()).ok()?);
+            }
+        }
+        roots.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Some(roots)
+    }
+
     /// Bounded in-process commit traversal.
     pub fn history(
         &self,

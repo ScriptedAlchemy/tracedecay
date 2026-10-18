@@ -139,6 +139,24 @@ pub enum ApplicationProblemKind {
     TimedOut,
 }
 
+impl ApplicationProblemKind {
+    /// Canonical HTTP status code for this problem kind. Servers and clients
+    /// share this one mapping; it is an integer so no HTTP framework is needed.
+    pub const fn http_status(self) -> u16 {
+        match self {
+            Self::InvalidRequest => 400,
+            Self::NotFoundOrNotAuthorized => 404,
+            Self::Conflict | Self::PartialEffect | Self::Stale => 409,
+            Self::Unsupported => 422,
+            Self::ResetRequired | Self::Unavailable => 503,
+            Self::ExecutionFailed => 500,
+            Self::Saturated => 429,
+            Self::Cancelled => 408,
+            Self::TimedOut => 504,
+        }
+    }
+}
+
 /// Stable reason an application authority is unavailable.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,

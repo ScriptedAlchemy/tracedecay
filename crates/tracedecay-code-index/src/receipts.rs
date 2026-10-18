@@ -177,7 +177,7 @@ impl ProjectionRequestEvidenceV1 {
 /// Whether a batch receipt's publication digest still has to be recomputed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PublicationDigestTrustV1 {
-    /// The receipt crossed a trust boundary, a projection sink, durable
+    /// The receipt crossed a trust boundary, such as durable
     /// storage, or any other caller, so its self-declared publication digest
     /// proves nothing until it is recomputed from the receipt's own fields.
     Unverified,

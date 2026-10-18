@@ -25,6 +25,10 @@ pub(crate) fn observe_statement(statement: &Statement<'_>) {
     OBSERVED.with(|cell| cell.set(cell.get().saturating_add(delta)));
 }
 
+pub(crate) fn swap(saved: &mut SqliteVmSnapshot) {
+    *saved = OBSERVED.replace(*saved);
+}
+
 pub(crate) fn take_observed_vm() -> SqliteVmSnapshot {
     OBSERVED.with(|cell| cell.replace(SqliteVmSnapshot::default()))
 }

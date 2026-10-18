@@ -33,8 +33,8 @@ pub mod task_session;
 
 pub use self::execution::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
-    NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSymbolRecordV1, QueryExecutionContractErrorV1,
+    NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1, NativeSymbolRecordV1,
+    QueryExecutionContractErrorV1,
 };
 pub use self::observation::{
     ContextUseOutcomeV1, ObservedWithCoverageV1, RetrievalPipelineObservationV1,

@@ -357,6 +357,9 @@ pub enum ExactSqlError {
     ReaderUnavailable(String),
     TransactionClosed,
     TransactionExpired,
+    /// A job body awaited something other than its own statements, so it was
+    /// rolled back rather than hold the writer across the wait.
+    JobAwaitedForeignFuture,
     Sqlite {
         operation: &'static str,
         code: Option<i32>,
@@ -403,6 +406,9 @@ impl fmt::Display for ExactSqlError {
                 formatter.write_str("exact SQL transaction is already closed")
             }
             Self::TransactionExpired => formatter.write_str("exact SQL transaction lease expired"),
+            Self::JobAwaitedForeignFuture => {
+                formatter.write_str("exact SQL job awaited a future other than its own statements")
+            }
             Self::Sqlite {
                 operation, message, ..
             } => {

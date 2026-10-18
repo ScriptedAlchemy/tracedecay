@@ -269,7 +269,7 @@ in.
   validates, builds a job over owned inputs, `try_send`s it to the file's lane
   (full means `Busy`), and awaits a oneshot. No storage API is sync, so nothing
   parks a native worker, a Tokio worker or a blocking-pool thread on SQLite.
-- Jobs are re-runnable: `Fn(&mut WriteTx) -> Result<R>` and `Fn(&ReadTx) ->
+- Jobs are re-runnable: `Fn(&WriteTx) -> Result<R>` and `Fn(&ReadTx) ->
   Result<R>` over owned or shared inputs, with no effect outside their transaction.
   That is what lets the executor run a job again after a fence interrupt or a
   reconnect. Batched writes take one savepoint per job, so a job's ordinary error
@@ -731,6 +731,48 @@ changes a file that holds memory.
     each domain keeps its own idempotency.
   - Reads use `query_async` and preview/apply use `on_blocking_pool`. Both are
     blocking-pool hops that step 7 replaces.
+- Step 5, job transactions (2026-10-18, #4244).
+  The interactive transactions that remain become writer jobs without rewriting
+  the async helpers that run inside them. `ExactSqlHandle::transact_async` takes an
+  async body and polls it once, with a no-op waker, inside the job. The body's
+  statements are synchronous, so a body that awaits only them completes on that
+  poll. A body that awaits anything else returns `Pending`, and the job rolls back
+  with `ExactSqlError::JobAwaitedForeignFuture` instead of holding the writer
+  across the wait. That is section 4's "a write is one job, which cannot `.await`"
+  as a test. The job transaction is now `Sync`, so `&ExactSqlJobTransaction` crosses
+  the `Send` boundaries the helpers already require. It holds the writer task's
+  transaction in a `Mutex` behind a trait object, which keeps the type covariant
+  and adds no `unsafe impl`. `JobPolicy::AuthorizedLongLease` with
+  `transact_with_policy` renews the lease after each successful statement, as the
+  interactive long lease does, and `execute_batch` runs a batch inside the job.
+  Existing `transact` callers are unchanged. Next, in order: runtime-core `WriteTx`
+  over the executor traits with `Database::transact` and `transact_bulk`, then the
+  call sites one crate per PR (runtime-core, global-db in five slices, sessions,
+  session-memory, schema stages and invariants, `remote/*`, graph publication),
+  then deletion of the interactive APIs in runtime-core and global-db, and last in
+  rusqlite-runtime.
+  - Slice 2 (2026-10-18, #4248). runtime-core's
+    `WriteTx` implements `QueryExecutor` and `Executor` over the job transaction,
+    so a helper written against `&impl Executor` runs inside a job unchanged.
+    `Database::transact` and `transact_bulk` check the write scope at begin and
+    advance `graph_transaction_generation` inside the job, as a committed
+    `DatabaseWriteTransaction` does, and hold the writer lane so they queue
+    behind interactive writers instead of retrying `Busy`. `set_metadata`, the
+    retrieval-anchor disposition and derivative writes, and
+    `execute_write_engine` and `execute_write_batch` run as jobs.
+- Step 5i-3, global-db configuration and rollup writes (2026-10-18, branch
+  `refactor/storage-global-db-config-jobs`). `RegisteredGlobalDb::transact` runs a
+  body as one writer job over `Database::transact`, handing it a
+  `RegisteredGlobalDbWriteTx` that implements the executor traits, so the existing
+  `&impl Executor` helpers run in it unchanged. It checks the daemon write scope
+  before queueing; the runtime verifies the same authority again at COMMIT, so a
+  scope that ends mid-body rolls the job back. The configuration store, control and
+  revision writes and the observability rollup rebuild, claim, release, frontier
+  and compaction writes now use it. The interactive transaction stays for the other
+  global-db sites, which move in the next slices. Bodies are `Fn`, so each site
+  clones what it owns into the closure. A rollup rebuild that finds its stored
+  receipt still ends by rolling back, so replay does not advance the transaction
+  generation.
 - #4138 (2026-10-16). Shutdown store close waits up to 3 s for leases to drain
   before deciding a store's WAL cannot be truncated. Under load, owners joined
   before store close could still be unwinding the tasks that held their leases,
@@ -777,6 +819,151 @@ changes a file that holds memory.
   `global.db` rows) or a store the daemon does not mount (orphan collection's
   memory check), and neither holds a read slot on a live file. It goes with step
   8, where a project directory describes itself and memory has its own file.
+- Step 7, shared pool (2026-10-17, #4242). Every
+  attached file's writer and readers are tasks on one fixed pool of
+  `tracedecay-store-N` threads, so the thread count no longer grows with the file
+  count. N defaults to the host's available parallelism clamped to 6..16, not the
+  flat 6 of section 4: with 6, the `//crates/tracedecay:unit_test` binary, which
+  opens many stores at once in one process, timed out cold opens in 3 of 5 runs
+  and ran 24% slower than master; with 16 it passed 3 of 3 and ran faster. A task
+  holds a pool thread only while it runs SQL; idle waits, batch dwell, snapshot
+  polls, busy-begin and WAL-recovery retries are awaits on the pool timer. A synchronous store wait issued from a pool thread
+  (writer start, reply waits, reader acquire and snapshot calls, task join, drain)
+  refuses with the existing unavailable errors in every build profile instead of
+  parking. FairQueue, batching, the ledger, the checkpoint controller and the
+  step 6 fence are unchanged. Deviations, each with the slice that closes it:
+  - The override is `TRACEDECAY_STORE_THREADS`, not daemon configuration; it moves to
+    `StorageConfig` with the executor's public surface.
+  - No thread is reserved for foreground classes yet. Today's files mix classes
+    (Work shares `sessions.db` with observation ingest), so a reservation by file
+    has nothing to key on until step 8. Until then N statements running long at
+    once delay every other store. Measured under host load at N=6, three runs
+    each: `mcp_suite` 193 to 242 s on this branch against 224 to 227 s on master,
+    `daemon_suite` 92 to 123 s against 97 to 124 s.
+  - Fenced TRUNCATE on lanes and idle close are the next slices of this step.
+  Proof: 64 attached stores add exactly N threads, all of them pool threads.
+- Step 7, unlink probe and ProfileLost (2026-10-18, branch
+  `feat/storage-unlink-probe-profile-lost`). Each writer checks its pinned file
+  every 2 s, between batches and from its idle wait: `fstat` link count 0, or a
+  path that is missing or names another inode, means the file is lost. The
+  writer then fails its queued work as `Unavailable { reason: FileLost }`, drops
+  its connection and pinned descriptor, and tells its attachment, which tells
+  every reader to interrupt and exit and drops its own handles; none of this
+  waits on a pool thread. Later submits and reads on that attachment answer
+  `FileLost`. The registry unmaps a lost runtime on the next lookup or open of
+  its key, so that open resolves and publishes a fresh runtime under the
+  existing creation rules. The daemon pins `profile-identity.json` by inode at
+  start and checks it every second from its accept loop; once the file is gone
+  or replaced it logs `daemon_shutdown outcome=profile_lost` and leaves through
+  the ordinary graceful shutdown, which closes every store, then exits with
+  status 66 (`EX_NOINPUT`). The launchd unit restarts only after a failed exit
+  (`SuccessfulExit=false`), so a zero exit would leave the daemon down; systemd
+  uses `Restart=always` and restarts on either. Evicting a lost runtime also
+  clears the profile pins recorded on its key, so a reopened key does not count
+  them. Deviations:
+  - Read-only attachments have no writer and so no probe. Their file stays open
+    until the store closes.
+  - A lost attachment dropped its reader pool at once and the registry dropped
+    the runtime without waiting for the reader workers to exit. The next entry
+    closes this (#4258).
+  - Owners that hold a lease on the lost runtime (mounted project and profile
+    owners) keep it, so they answer `FileLost` until a restart remounts them.
+    #4130's reset-required record therefore stays, with its reason updated:
+    the space is now released, and the restart only remounts those owners.
+  - The watch runs on the Unix daemon only; the loopback daemon has no inode.
+  Proof: an unlinked store reports itself lost and holds no descriptor on its
+  files within one probe interval, and the next open serves a fresh store;
+  deleting the profile under a running daemon logs `profile_lost` within one
+  tick and the daemon exits with every store closed.
+- Step 7b follow-ups, lost-file readers (2026-10-18, branch
+  `fix/4258-lost-file-readers`, #4258). Closing a lost file now finishes its
+  work. The reader pool's pinned descriptor is closed on loss for every holder of
+  it, so a reader lease or retained snapshot that keeps the pool object alive no
+  longer keeps the unlinked inode open. A reader worker that a growing acquire
+  spawned while the pool was closing is shut down as it registers instead of
+  idling until the pool drops. The attachment keeps the lost pool only until its
+  workers have exited. The registry keeps a lost runtime mapped until then:
+  its lookup answers `Evicting` and an open is refused with
+  `RuntimeEvictionInProgress`, so no successor publishes beside connections still
+  open on the old file. The next lookup or open after the last worker exits
+  unmaps it as before. This is a short window, in practice a few milliseconds,
+  and a worker stuck in native work holds it open, as a stuck close does for
+  capacity eviction. The lost writer's own connection closes when its task
+  returns right after the notice, which the next entry adds to the check
+  (#4280). Proof: with the
+  reader pool held across the loss, the unlinked file's descriptors are gone and
+  `lost_file_closed` turns true; removing `close_for_lost_file`, the descriptor
+  release, the late-registration shutdown or the registry hold each fails its
+  own test.
+- Step 7b follow-ups, lost writer and blocked acquires (2026-10-18, branch
+  `fix/4280-lost-writer`, #4280). `lost_file_closed` now also waits for the lost
+  writer's task to finish, because the writer's SQLite connection closes only when
+  that task returns, after the loss notice has run. The attachment keeps the lost
+  writer beside the lost reader pool and marks the file lost, moves both handles
+  and closes the pool in one lock hold, so no check sees a lost file with nothing
+  left to wait on. A caller blocked in the reader pool's acquire when the file is
+  lost, or acquiring afterwards, now gets `FileLost` instead of `Draining`; the
+  pool flips to draining and records the loss in one lock hold. Proof: with the
+  writer task held after the notice and the readers already exited,
+  `lost_file_closed` stays false and turns true once the task returns; removing
+  the writer check or the `FileLost` reason each fails its own test.
+- Step 8a, repository identity (2026-10-17, branch `feat/storage-repository-identity`).
+  A second full clone, a shallow clone, and a checkout after a merge of unrelated
+  histories open the project that first enrolled the repository, with no `init`.
+  Anchors are rows in the existing `global.db` `project_aliases` table under the
+  prefixes `git-root-commit:`, `git-subproject:` and `git-remote-url:`, beside the
+  path and `git-common-dir:` rows. There is no `catalog.db`, no schema change, and
+  no `tracedecay project link` or `project split`. Registration keeps the first
+  enrolled checkout as `canonical_root`, never re-points an anchor, and caches
+  each checkout's registration on its own. MCP scope admits a checkout outside the
+  registered root when its own marker names the project. The daemon source binding
+  digest names the project, so every checkout verifies one binding, and a binding
+  under the old root-derived digest rebinds once. Deviations from section 2:
+  - A shared root commit adopts only beside agreement on the remote: the
+    checkout's normalized `origin` equals the `git-remote-url:` anchor an
+    enrolled checkout of the project recorded, or its `origin` is a local path or
+    `file://` URL that is itself an enrolled checkout. A shallow clone adopts on
+    its remote alone. Forks, re-pointed templates and subtree-merged libraries
+    therefore no longer share a project, so they need no `project split`.
+    `ssh://`, scp-style and `https://` spellings of one host path normalize
+    equal, and a `file://` URL equals its plain path.
+  - A subproject's remote anchor carries its path in the checkout
+    (`git-remote-url:<url>#<path>`), so two subprojects of one repository stay
+    apart.
+  - Anchors that name two projects adopt neither, and the checkout mints its own
+    project instead of reporting a conflict.
+  - Registration and lookup resolve in one order: a marker naming a store this
+    profile holds, then path and `git-common-dir:` aliases, then anchors. Two
+    clones enrolled under separate ids before this step keep both ids.
+  - A marker naming a store this profile does not hold yields to the registry and
+    is replaced by the id the profile resolves; one naming a held store is never
+    rewritten. At first touch, when nothing else names the checkout, the profile
+    enrolls under the marker's id.
+  - The daemon's enrollment authority for a project admits another root when that
+    root's own marker names the project, and withdrawing a registration removes
+    only the roots it added.
+  - The history walk runs at most once per checkout and HEAD in a process, on the
+    blocking pool. Lookup walks only a checkout that no held marker, path or
+    common-dir alias names; registration walks a named checkout only until its
+    project records a history anchor. A root that a fetch or merge adds to an
+    enrolled checkout is therefore recorded when a checkout no alias names (a
+    fresh clone) registers.
+  - Only the registered root writes `code_projects.git_remote_url` and
+    `default_branch`. The GitHub source binding follows each checkout's own
+    `origin`, which adopted clones share or which is a local path that binds
+    nothing, so it does not flip between clones.
+  - Two clones on one branch share the `profile_graph_scope_id(store, branch)`
+    row but not graph data: the code scope carries each checkout's worktree id
+    and repository id, so the scope id is unchanged. A test pins that two clones
+    on one branch resolve distinct code scopes.
+  Open: the lifecycle and the claim count a marker as held when its shard
+  directory exists, the registry when a `store_instances` row names it. After an
+  upgrade, a repository's anchors belong to whichever enrolled clone registers
+  first. `branch add` of one branch from two clones overwrites that branch's
+  `branch_meta.json` provenance. Code-index scope reconciliation counts as live
+  only the lease repository's worktrees and mounted roots, so it collects a second
+  clone's code-index scope once that clone has been unmounted for 7 days, and the
+  clone re-indexes on its next open.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose
@@ -789,7 +976,8 @@ changes a file that holds memory.
   6. The 512 MiB response-handle cap on top of #4128's TTL sweep: step 10.
   7. Hook events into `telemetry.hook_events`: step 8.
   8. Closing a store's lane when its file is lost, instead of a daemon restart:
-     step 7's unlink probe. #4130 is the interim restart remedy.
+     closed by step 7's unlink probe. Owners that cache the lost runtime's
+     lease still need #4130's restart to serve it again.
   9. A 24-hour acceptance run on a fresh profile showing bounded growth: step 12.
 - Step 4 merged into step 8 (2026-10-16). A dead-letter valve on today's global
   queue was built and then dropped: the projection code deliberately keeps corrupt

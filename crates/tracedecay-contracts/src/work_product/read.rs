@@ -636,6 +636,8 @@ pub enum WorkGraphReadPortErrorV1 {
     Stale,
     #[error("Verified Work graph is unavailable")]
     Unavailable,
+    #[error("Work graph storage failed: {0}")]
+    Storage(crate::WorkStorageFailureV1),
     #[error("Work graph read was cancelled")]
     Cancelled,
     #[error("Work graph read timed out")]
@@ -650,6 +652,7 @@ impl From<WorkGraphReadPortErrorV1> for WorkProductApplicationErrorV1 {
             WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized => Self::NotFoundOrNotAuthorized,
             WorkGraphReadPortErrorV1::Stale => Self::VersionConflict,
             WorkGraphReadPortErrorV1::Unavailable => Self::GraphAuthorityUnavailable,
+            WorkGraphReadPortErrorV1::Storage(failure) => Self::Storage(failure),
             WorkGraphReadPortErrorV1::Cancelled => Self::Cancelled,
             WorkGraphReadPortErrorV1::TimedOut => Self::TimedOut,
             WorkGraphReadPortErrorV1::CursorRefused(mismatch) => Self::CursorRefused(mismatch),

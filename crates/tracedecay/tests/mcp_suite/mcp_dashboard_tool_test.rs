@@ -135,10 +135,14 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
         .get(&format!("{origin}/?token={}", "0".repeat(64)))
         .call()
         .expect("forged launch response");
-    assert_eq!(forged.status().as_u16(), 401);
+    assert!(
+        forged.headers().get("location").is_none() && forged.headers().get("set-cookie").is_none(),
+        "a forged launch URL earns no redirect and no credential"
+    );
 
     // A browser opening the launch URL is redirected to the tokenless path
-    // with a session cookie, and that cookie alone admits later requests.
+    // with the token in the URL fragment, never in a cookie that other loopback
+    // ports would receive; the page then sends it as a request header.
     let agent = tracedecay_application::http_agent::http_agent(
         ureq::Agent::config_builder()
             .http_status_as_error(false)
@@ -148,16 +152,18 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
     );
     let launched = agent.get(&launch_url).call().expect("launch URL response");
     assert_eq!(launched.status().as_u16(), 303);
-    assert_eq!(launched.headers()["location"], "/");
-    let session_cookie = format!("tracedecay_dashboard_{port}={token}");
     assert_eq!(
-        launched.headers()["set-cookie"],
-        format!("{session_cookie}; Path=/; HttpOnly; SameSite=Strict").as_str()
+        launched.headers()["location"],
+        format!("/#token={token}").as_str()
     );
-    let cap_url = format!("{origin}/api/capabilities");
+    assert!(launched.headers().get("set-cookie").is_none());
+    let cap_url = format!(
+        "{}/api/capabilities",
+        crate::common::dashboard_api_base_url(&launch_url)
+    );
     // Give the background server a moment to accept (rarely needed but robust)
     for _ in 0..40 {
-        if let Ok(mut resp) = agent.get(&cap_url).header("Cookie", &session_cookie).call()
+        if let Ok(mut resp) = agent.get(&cap_url).call()
             && resp.status().as_u16() == 200
         {
             let raw = resp.body_mut().read_to_string().unwrap_or_default();

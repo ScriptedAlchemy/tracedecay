@@ -477,7 +477,12 @@ impl RegisteredGlobalDbHarness {
 
     #[cfg(test)]
     pub(crate) fn revoke(&mut self) {
-        drop(self._scope.take());
+        drop(self.take_scope());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_scope(&mut self) -> Option<DaemonDatabaseScope> {
+        self._scope.take()
     }
 
     /// Remounts through daemon admission, which defers historical convergence

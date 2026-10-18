@@ -200,7 +200,7 @@ describe('a graph read that failed', () => {
 });
 
 describe('the URL-stable Code view shell', () => {
-  it('exposes the five peer lenses with Cortex selected by default', async () => {
+  it('offers the mounted lenses with Cortex selected by default', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -238,22 +238,31 @@ describe('the URL-stable Code view shell', () => {
     );
   });
 
-  it('restores Atlas as a disabled, truthful unavailable view', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const { pathname, search } = new URL(String(input), 'http://localhost');
-        return jsonOk(resolveFixture(pathname, search));
-      }),
-    );
-    renderCode('/code?view=atlas');
+  it('opens a retired Atlas link in Cortex and preserves its symbol for Trace', async () => {
+    const fetchMock = serveFixtures();
+    vi.stubGlobal('fetch', fetchMock);
+    const user = userEvent.setup();
+    renderCode('/code?view=atlas&symbol=sym-0');
 
-    expect(await screen.findByText('Atlas is unavailable')).toBeTruthy();
-    expect(screen.getByText(/fixed structural treemap projection/i)).toBeTruthy();
-    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Atlas' }).disabled).toBe(
-      true,
+    expect(await screen.findByRole('region', { name: 'Graph register' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Cortex' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Cortex' }).getAttribute('aria-current')).toBe(
+      'page',
     );
-    expect(screen.queryByRole('region', { name: 'Graph register' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Atlas' })).toBeNull();
+    expect(screen.queryByText('Atlas is unavailable')).toBeNull();
+    expect(
+      fetchMock.mock.calls.some((call) => {
+        const url = new URL(String(call[0]), 'http://localhost');
+        return url.pathname.endsWith('/subgraph') && url.searchParams.get('node_id') === 'sym-0';
+      }),
+    ).toBe(true);
+
+    const trace = screen.getByRole<HTMLButtonElement>('button', { name: 'Trace' });
+    await waitFor(() => expect(trace.disabled).toBe(false));
+    await user.click(trace);
+    expect(trace.getAttribute('aria-current')).toBe('page');
+    expect(await screen.findByRole('heading', { name: /trace ·/i })).toBeTruthy();
   });
 
   it('moves and activates views with native keyboard controls', async () => {

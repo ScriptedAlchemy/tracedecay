@@ -443,6 +443,59 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
     );
 }
 
+#[test]
+fn a_pool_task_is_refused_snapshot_calls_instead_of_parked() {
+    use crate::exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlStatementBudget};
+
+    let store = TestStore::new();
+    let spawned = super::worker::spawn(
+        store.locator(),
+        CountExecutor,
+        Arc::new(crate::telemetry::ReaderAdmissionRecorder::default()),
+    )
+    .expect("spawn reader worker");
+    spawned
+        .client
+        .begin(super::READ_SNAPSHOT_LIFETIME)
+        .expect("begin read snapshot");
+    let client = spawned.client.clone();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let (report, refused) = std::sync::mpsc::channel();
+    crate::storage_pool::spawn(async move {
+        let probe = Probe::for_request(&read);
+        let query = ExactSqlStatement::new("SELECT 1".to_owned(), Vec::new()).unwrap();
+        let _ = report.send((
+            client.pin_exact_sql(),
+            client.execute(read, &probe).map(|_| ()),
+            client
+                .execute_exact_sql_query(query, ExactSqlStatementBudget::Request)
+                .map(|_| ()),
+        ));
+    })
+    .unwrap_or_else(|_| panic!("the storage pool must start"));
+
+    let (pin, execute, query) = refused
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a pool task's snapshot calls must return, not park");
+    let unavailable = || {
+        Err(ExactSqlError::ReaderUnavailable(
+            ReaderWorkerError::WorkerClosed.to_string(),
+        ))
+    };
+    assert_eq!(pin, unavailable(), "a pool task's pin must refuse");
+    assert!(
+        matches!(execute, Err(ReaderWorkerError::WorkerClosed)),
+        "a pool task's read must refuse, got {execute:?}"
+    );
+    assert_eq!(
+        query,
+        unavailable(),
+        "a pool task's exact query must refuse"
+    );
+    spawned.client.shutdown();
+    spawned.join.join().unwrap();
+}
+
 /// Table-size telemetry walks `dbstat` for the whole store, so on a
 /// multi-gigabyte database the scan runs for minutes. A caller that cannot
 /// get its reply within the bound must receive a typed deadline error and
@@ -1430,4 +1483,69 @@ fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
         checkpoint_blockers.checkpoint_blockers().is_clear(),
         "the blocker must clear once the written-off worker exits"
     );
+}
+
+#[test]
+fn a_worker_spawned_while_the_pool_closes_for_a_lost_file_exits() {
+    let store = TestStore::new();
+    let mut budget = two_reader_budget();
+    budget.max_per_hot_shard = 3;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let _held: Vec<_> = (0..2)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect();
+    let closing = pool.clone();
+    pool.run_once_after_spawn(move || closing.close_for_lost_file());
+
+    assert!(matches!(
+        pool.acquire(&read, &probe, Duration::ZERO),
+        Err(ReaderAcquireError::Interrupted {
+            reason: tracedecay_store::UnavailableReasonV1::FileLost
+        })
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pool.workers_exited() {
+        assert!(
+            Instant::now() < deadline,
+            "a worker registered after the lost-file sweep must still be shut down"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn an_acquire_blocked_when_the_file_is_lost_reports_file_lost() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let _held: Vec<_> = (0..2)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect();
+    let waiter_pool = pool.clone();
+    let waiting_read = read.clone();
+    let waiter = std::thread::spawn(move || {
+        waiter_pool.acquire(
+            &waiting_read,
+            &Probe::for_request(&waiting_read),
+            Duration::from_secs(30),
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while pool.snapshot().waiting_general == 0 {
+        assert!(Instant::now() < deadline, "the acquire never blocked");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    pool.close_for_lost_file();
+
+    assert!(matches!(
+        waiter.join().unwrap(),
+        Err(ReaderAcquireError::Interrupted {
+            reason: tracedecay_store::UnavailableReasonV1::FileLost
+        })
+    ));
 }

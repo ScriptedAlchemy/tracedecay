@@ -468,6 +468,53 @@ pub struct HookV2LifecycleMountV1<'a> {
     pub background_cpu: Option<&'a std::sync::Arc<ProcessBackgroundCpuV1>>,
 }
 
+/// Claude's lifecycle exists only for the Context Scout intent pass, so it is
+/// minted only while that pass is enabled. Kimi Code and `OpenCode` bind theirs for
+/// every Scout claim and are not gated.
+const fn intent_gated_lifecycle(producer: tracedecay_domain::NativeHostIdentityV1) -> bool {
+    matches!(
+        producer,
+        tracedecay_domain::NativeHostIdentityV1::ClaudeCode
+    )
+}
+
+/// Mirrors the intent pass's own disabled check, so a project the pass would
+/// skip pays no lifecycle write inside the hook's synchronous budget.
+async fn context_scout_intent_enabled(cg: &TraceDecay) -> bool {
+    let Ok(pinned) = cg.configuration_runtime().client().current().await else {
+        return false;
+    };
+    tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1::from_current(
+        &pinned.into_current_state(),
+    )
+    .is_some_and(|pin| {
+        pin.intent_settings().is_some_and(|settings| settings.enabled)
+            && pin.control().state
+                != tracedecay_agent_hosts::agents::context_scout::ContextScoutServiceStateV1::Disabled
+    })
+}
+
+async fn admit_gated_native_lifecycle(
+    mount: &HookV2LifecycleMountV1<'_>,
+    provider: ProviderId,
+    lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+    producer: tracedecay_domain::NativeHostIdentityV1,
+    intent_enabled: bool,
+) -> bool {
+    if intent_gated_lifecycle(producer) && !intent_enabled {
+        return true;
+    }
+    admit_native_context_scout_lifecycle(
+        mount.project_sessions,
+        mount.background_cpu,
+        provider,
+        lifecycle,
+        range,
+    )
+    .await
+}
+
 pub async fn admit_hook_v2_envelope(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -655,18 +702,21 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
     if let Some(mount) = mount.as_ref()
         && let Some(native_lifecycle) = mount.lifecycle.as_ref()
     {
+        let intent_enabled =
+            intent_gated_lifecycle(envelope.producer) && context_scout_intent_enabled(cg).await;
         let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
             return HookV2AdmissionOutcomeV1::Backpressured;
         };
         let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
             return HookV2AdmissionOutcomeV1::Backpressured;
         };
-        if !admit_native_context_scout_lifecycle(
-            mount.project_sessions,
-            mount.background_cpu,
+        if !admit_gated_native_lifecycle(
+            mount,
             provider,
             native_lifecycle,
             range,
+            envelope.producer,
+            intent_enabled,
         )
         .await
         {

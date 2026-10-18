@@ -729,6 +729,49 @@ pub fn git_remote_url(project_root: &Path) -> Option<String> {
     git_capture(project_root, &["config", "--get", "remote.origin.url"])
 }
 
+/// Spells one remote the same however it was cloned: `ssh://`, scp-style and
+/// `https://` URLs of one host path become `https://host/path` without user
+/// info, a `file://` URL becomes its path, and a trailing `/` or `.git` and
+/// letter case are dropped.
+pub fn normalize_git_remote_url(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if remote.is_empty() {
+        return None;
+    }
+    let host_path = |host_path: &str| {
+        let (host, path) = host_path.split_once('/').unwrap_or((host_path, ""));
+        let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+        format!("https://{host}/{}", path.trim_start_matches('/'))
+    };
+    let mut normalized = if let Some(path) = remote.strip_prefix("file://") {
+        path.to_string()
+    } else if let Some((_, rest)) = remote.split_once("://") {
+        host_path(rest)
+    } else if let Some((host, path)) = remote.split_once(':')
+        && host.len() > 1
+        && !host.contains('/')
+    {
+        host_path(&format!("{host}/{path}"))
+    } else {
+        remote.to_string()
+    };
+    normalized = normalized.to_ascii_lowercase();
+    normalized.truncate(normalized.trim_end_matches('/').len());
+    if let Some(stripped) = normalized.strip_suffix(".git") {
+        normalized = stripped.trim_end_matches('/').to_string();
+    }
+    Some(normalized)
+}
+
+/// The directory a local `origin` (an absolute path or a `file://` URL)
+/// names, or `None` for a network remote.
+#[must_use]
+pub fn local_remote_path(remote: &str) -> Option<PathBuf> {
+    let remote = remote.trim();
+    let path = Path::new(remote.strip_prefix("file://").unwrap_or(remote));
+    path.is_absolute().then(|| path.to_path_buf())
+}
+
 /// Outcome of the bounded `git -C` capture used by repository identity lookup.
 #[derive(Debug)]
 pub enum GitCaptureAtResult {
