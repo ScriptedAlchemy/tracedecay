@@ -2,19 +2,19 @@
 
 GitHub-hosted runners remain the workflow runners. Linux x86_64 test shards
 and Clippy, plus repository gates and the shipped CLI build, connect to the
-private NativeLink coordinator through the official Tailscale action. GitHub supplies checkout, analysis, local
-compilation, test execution, artifacts, and check reporting; Ubuntu-main and
+private NativeLink coordinator through the official Tailscale action. GitHub
+supplies checkout, analysis, local compilation, test execution, artifacts, and
+check reporting; Ubuntu-main and
 Omarchy supply additional Linux compilation and test capacity. The Mac worker
-serves macOS actions;
-this CI integration does not send Linux actions to it. Windows, ARM Linux,
+serves macOS actions; this CI integration does not send Linux actions to it. Windows, ARM Linux,
 and macOS CI retain their existing hosted execution. The Mac currently has a
 newer Xcode/SDK than the macos-26 image; matching OS and CPU alone does not make
 native compilation compatible.
 
 Rustc and TestRunner actions use Bazel dynamic execution with sandboxed local
 execution and remote execution. Both may start the same action; Bazel keeps the
-first result and cancels the other. Local work respects the runner CPU count and half its
-RAM. The shared action cache remains enabled. Tests carry Node, Rust Analyzer,
+first result and cancels the other. Local work respects the runner CPU count
+and half its RAM. The shared action cache remains enabled. Tests carry Node, Rust Analyzer,
 and their compiler tools as declared runfiles.
 Each remote test reserves four worker CPU units and the Rust harness uses four
 threads. The local branch reserves the hosted runner CPU budget so suites do not
