@@ -124,6 +124,9 @@ jobs:
   # runner for a couple of minutes of work; on 20 free slots that is three
   # queue entries per push doing what one does.
   gates:
+    permissions:
+      contents: read
+      id-token: write
     name: Repository gates
     runs-on: ubuntu-latest
     # The rustfmt build's crate_universe splice clones git-pinned crates from
@@ -182,6 +185,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           cache-key: ci-format-linux
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
 
       - name: Test the ranked-tail trim replay against the Rust rule cases
         run: bazel run //scripts:test-measure-ranked-tail-trim.py
@@ -304,7 +308,6 @@ jobs:
         id: bazel
         with:
           cache-key: ci-macos-test
-          test-tools: "true"
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
@@ -337,6 +340,9 @@ jobs:
   # family previously evicted the budget). root-b and workspace-c catch
   # unlisted targets in their groups.
   linux-test:
+    permissions:
+      contents: read
+      id-token: write
     name: Test Linux (${{ matrix.shard }})
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -477,9 +483,11 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-test-v2
+          # Tailscale independently checks this repository and immutable actor
+          # ID. This condition avoids requesting credentials for fork PRs.
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
           # Prefer v2; keep legacy prefixes as restore fallbacks if still present.
           extra-restore-keys: ci-linux-test,ci-linux-workspace-test
-          test-tools: "true"
 
       # Root suites exercise latency-sensitive daemon journeys. Finish their
       # compilation before testing so compiler work cannot consume that budget.
@@ -488,7 +496,7 @@ jobs:
         run: bazel build --config=ci ${{ matrix.targets }}
 
       - name: Build and test this shard
-        run: bazel test --config=ci ${{ matrix.test_resources }} ${{ matrix.targets }}
+        run: bazel test --config=ci ${{ steps.bazel.outputs.fleet-enabled == 'true' && '--default_test_resources=cpu=HOST_CPUS' || matrix.test_resources }} ${{ matrix.targets }}
 
       - name: Upload failed test diagnostics
         if: failure()
@@ -543,7 +551,6 @@ jobs:
         id: bazel
         with:
           cache-key: ci-windows-test
-          test-tools: "true"
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
@@ -570,6 +577,9 @@ jobs:
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:
+    permissions:
+      contents: read
+      id-token: write
     name: Clippy
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -586,6 +596,9 @@ jobs:
         id: bazel
         with:
           cache-key: ci-linux-clippy
+          # Tailscale independently checks this repository and immutable actor
+          # ID. This condition avoids requesting credentials for fork PRs.
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
           extra-restore-keys: ci-linux-test-v2
 
       - name: Run blocking Clippy policy
@@ -651,6 +664,9 @@ jobs:
   # mimalloc allocator, the embedded dashboard, opt-level 3) would otherwise
   # first appear while a release is being cut.
   shipped-cli:
+    permissions:
+      contents: read
+      id-token: write
     name: Shipped CLI build (x86_64-linux)
     needs: [scope-gate, gates]
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
@@ -666,6 +682,7 @@ jobs:
           config: release
           dest: target/x86_64-unknown-linux-gnu/release
           cache-key: release-x86_64-unknown-linux-gnu
+          tailscale-client-id: ${{ github.actor_id == '25274700' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.TS_BAZEL_CLIENT_ID || '' }}
 
       - name: Read immutable packaging inputs
         id: packaging

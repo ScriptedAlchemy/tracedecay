@@ -4,7 +4,7 @@
 export type UnknownValue = string & {};
 export type RetryDirective = "never" | "same_request" | "after_delay" | "after_revalidate" | "after_reconcile" | UnknownValue;
 export type LegalAction = "correct_request" | "reauthorize" | "refresh" | "retry" | "reconcile" | "reset" | "contact_administrator" | UnknownValue;
-export type OperationTermination = "completed" | "cancelled" | "timed_out" | "failed" | "unavailable" | "partial" | "effect_unknown" | UnknownValue;
+export type OperationTermination = (typeof OPERATION_TERMINATIONS)[number] | UnknownValue;
 export type EffectTermination = "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown" | UnknownValue;
 export type ApplicationProblemKind = "invalid_request" | "not_found_or_not_authorized" | "conflict" | "partial_effect" | "stale" | "unsupported" | "unavailable" | "execution_failed" | "reset_required" | "saturated" | "cancelled" | "timed_out" | UnknownValue;
 export type ApplicationUnavailableClassV1 = "authority" | "backend_unavailable" | "backend_disconnected" | "backend_retryable" | UnknownValue;
@@ -438,3 +438,4 @@ export function applicationProblemStatusMatches(status: number, kind: string): b
       return false;
   }
 }
+export const OPERATION_TERMINATIONS = ["completed", "cancelled", "timed_out", "failed", "unavailable", "effect_unknown", "partial"] as const;

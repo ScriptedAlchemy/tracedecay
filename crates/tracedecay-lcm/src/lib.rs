@@ -79,25 +79,38 @@ pub use retention::{
     LcmRetentionConfig, LcmRetentionPhaseReport, LcmRetentionReport, RetentionMode,
 };
 
-/// The LCM token-budget heuristic: whitespace-delimited words, never zero.
+/// The LCM token budget unit: ordinary `o200k_base` tokens, never zero.
 ///
 /// Every LCM budget decision is denominated in this unit, the compression
 /// trigger, the replay accounting, the retrieval window, and the policy
 /// reducer. It lives here, above both the contract reducers and the runtime,
-/// because the four of them must agree: a heuristic that only some callers
-/// adopt would let a session compress against one budget and be replayed
-/// against another.
+/// because the four of them must agree: a unit that only some callers adopt
+/// would let a session compress against one budget and be replayed against
+/// another.
 ///
-/// Named distinctly from the served-output `o200k_base` count so this budget
-/// path cannot be imported into tool-result accounting by accident.
+/// `o200k_base` is the one vocabulary TraceDecay embeds, so it stands in for
+/// the host model's tokenizer. If it cannot initialize, the count falls back
+/// to the byte length: every token spans at least one byte, so the length
+/// bounds the true count from above for any tokenizer and a failure can only
+/// make admission stricter, never admit an oversized message.
+///
+/// Named distinctly from the served-output count so this budget path cannot
+/// be imported into tool-result accounting by accident.
 pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
-    text.split_whitespace().count().max(1) as i64
+    let count = match tracedecay_tokenizer::count_ordinary_tokens(text) {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(%error, "o200k tokenizer unavailable; budgeting by byte length");
+            text.len() as u64
+        }
+    };
+    i64::try_from(count).unwrap_or(i64::MAX).max(1)
 }
 
 /// Visible text of a JSON message: the text [`lcm_message_budget_tokens`]
 /// counts, materialized for consumers that need the string itself.
 ///
-/// The budget unit is words of user-visible content, not serialized JSON.
+/// The budget counts tokens of user-visible content, not serialized JSON.
 /// String bodies stay strings; `{ "text": ... }` objects and arrays of
 /// `{ "text": ... }` parts contribute that text. Structured payloads with no
 /// text parts fall through to `Value`'s compact Display so a count is still
@@ -116,20 +129,14 @@ pub(crate) fn lcm_message_visible_text(message: &Value) -> String {
 }
 
 /// [`lcm_budget_tokens`] over the same visible text as
-/// [`lcm_message_visible_text`], counted from the borrowed `Value` without
-/// materializing that text. The parts of a text array are joined by
-/// whitespace, so their word counts add; the global minimum of one still
-/// applies to the whole message, not to each part.
+/// [`lcm_message_visible_text`]. Single-string shapes count from the borrowed
+/// `Value`; a text-part array is joined first, because tokens do not add
+/// across the `"\n\n"` separator the way whitespace-delimited words did.
 pub(crate) fn lcm_message_budget_tokens(message: &Value) -> i64 {
     match visible_content(message) {
         VisibleContent::Empty => lcm_budget_tokens(""),
         VisibleContent::Text(text) => lcm_budget_tokens(text),
-        VisibleContent::TextParts(items) => items
-            .iter()
-            .filter_map(|item| item.get("text").and_then(Value::as_str))
-            .map(|text| text.split_whitespace().count())
-            .sum::<usize>()
-            .max(1) as i64,
+        VisibleContent::TextParts(_) => lcm_budget_tokens(&lcm_message_visible_text(message)),
         VisibleContent::Structured(other) => lcm_budget_tokens(&other.to_string()),
     }
 }
@@ -281,28 +288,28 @@ mod budget_tests {
             (json!({ "role": "user" }), 1),
             (json!({ "content": null }), 1),
             (json!({ "content": "" }), 1),
-            (json!({ "content": "   \n\t " }), 1),
-            (json!({ "content": "alpha beta\ngamma" }), 3),
+            (json!({ "content": "   \n\t " }), 2),
+            (json!({ "content": "alpha beta\ngamma" }), 4),
             (json!({ "content": { "text": "" } }), 1),
             (json!({ "content": { "text": "one two" } }), 2),
             (json!({ "content": [] }), 1),
             (json!({ "content": [{ "text": "" }] }), 1),
-            (json!({ "content": [{ "text": "" }, { "text": "   " }] }), 1),
+            (json!({ "content": [{ "text": "" }, { "text": "   " }] }), 2),
             (
                 json!({ "content": [{ "text": "" }, { "text": "one" }, { "kind": "image" }, { "text": "two three" }] }),
-                3,
+                5,
             ),
             (
                 json!({ "content": [{ "text": "a b" }, { "text": "c" }] }),
-                3,
+                4,
             ),
             (
                 json!({ "content": [{ "kind": "image", "url": "x y z" }] }),
-                3,
+                13,
             ),
             (
                 json!({ "content": { "kind": "tool", "args": ["one two", 3] } }),
-                2,
+                12,
             ),
             (json!({ "content": 42 }), 1),
             (json!({ "content": true }), 1),
@@ -316,6 +323,56 @@ mod budget_tests {
             );
             assert_eq!(materialized, expected, "budget unit changed for {message}");
         }
+    }
+
+    /// A whitespace-free blob is one word but, at the longest all-`x` o200k
+    /// token of 8 bytes, at least `len / 8` model tokens (issue #4228).
+    #[test]
+    fn whitespace_free_text_is_budgeted_by_tokens_not_words() {
+        let blob = "x".repeat(4096);
+        assert_eq!(blob.split_whitespace().count(), 1);
+        assert!(lcm_budget_tokens(&blob) >= 4096 / 8);
+
+        let code = "f(x:u32)->u32{x+1};".repeat(200);
+        assert_eq!(code.split_whitespace().count(), 1);
+        assert!(lcm_budget_tokens(&code) > 200);
+        assert_eq!(
+            lcm_message_budget_tokens(&json!({ "content": code })),
+            lcm_budget_tokens(&code)
+        );
+    }
+
+    /// The cap is inclusive: a chunk of messages totalling exactly the cap
+    /// fits, one token under it does not.
+    #[test]
+    fn leaf_chunk_cap_boundary_is_counted_in_tokens() {
+        use crate::{LcmRawMessage, LcmStorageKind, compression_policy::bounded_leaf_chunk_len};
+
+        let content = "f(x:u32)->u32{x+1};".repeat(8);
+        assert_eq!(content.split_whitespace().count(), 1);
+        let each = lcm_budget_tokens(&content);
+        let backlog = (1..=3)
+            .map(|store_id| LcmRawMessage {
+                provider: "cursor".into(),
+                message_id: format!("message-{store_id}"),
+                session_id: "session-1".into(),
+                store_id,
+                role: "user".into(),
+                ordinal: store_id,
+                timestamp: None,
+                content: content.clone(),
+                content_hash: format!("hash-{store_id}"),
+                storage_kind: LcmStorageKind::Inline,
+                payload_ref: None,
+                metadata_json: None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bounded_leaf_chunk_len(&backlog, Some(each * 2), None), 2);
+        assert_eq!(
+            bounded_leaf_chunk_len(&backlog, Some(each * 2 - 1), None),
+            1
+        );
+        assert_eq!(bounded_leaf_chunk_len(&backlog, Some(each - 1), None), 0);
     }
 }
 

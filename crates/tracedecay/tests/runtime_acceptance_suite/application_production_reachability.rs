@@ -5,7 +5,7 @@
 //! the path stops executing; source text and catalog declarations are not
 //! accepted as reachability evidence.
 
-use crate::common;
+use crate::common::{self, fixture::copy_fixture_tree};
 
 use std::path::Path;
 use std::process::{Output, Stdio};
@@ -78,14 +78,16 @@ impl ProductionFixture {
 /// invocation client the hosts use.
 async fn production_fixture() -> ProductionFixture {
     let (environment, project) = common::IsolatedHome::new();
-    copy_dir(
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/context_eval_project"),
         &project,
-    );
-    copy_dir(
+    )
+    .expect("copy writable fixture");
+    copy_fixture_tree(
         &common::repository_path("tests/fixtures/managed_run_overlay"),
         &project,
-    );
+    )
+    .expect("copy writable fixture");
     write_pagination_probe(&project);
     rewrite_managed_run_overlay_to_privacy_safe(&project);
     std::fs::write(project.join(".gitignore"), "/target\nCargo.lock\n")
@@ -379,19 +381,6 @@ fn probe_type_source() -> String {
     }
     source.push_str(") -> u32 {\n    0\n}\n");
     source
-}
-
-fn copy_dir(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).expect("fixture destination");
-    for entry in std::fs::read_dir(source).expect("fixture directory") {
-        let entry = entry.expect("fixture entry");
-        let target = destination.join(entry.file_name());
-        if entry.file_type().expect("fixture entry type").is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).expect("copy checked-in fixture");
-        }
-    }
 }
 
 fn assert_command_success(label: &str, output: &Output) {

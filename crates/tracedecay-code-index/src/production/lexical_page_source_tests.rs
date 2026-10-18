@@ -21,10 +21,6 @@ use crate::{
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
     },
-    projection::{
-        ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
-        ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
-    },
 };
 
 const BATCH_FIXTURE_SOURCE: &str = concat!(
@@ -35,57 +31,6 @@ const BATCH_FIXTURE_SOURCE: &str = concat!(
     "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\" }\n",
     "pub fn final_batch_page() -> usize { 3 }\n",
 );
-
-#[derive(Default)]
-struct ApplyingProjectionSink;
-
-impl CodeChunkProjectionSink for ApplyingProjectionSink {
-    fn project_changed_chunks(
-        &mut self,
-        request: &tracedecay_domain::ProjectionBatchRequestV1,
-        receipt_builder: ProjectionReceiptBuilderV1<'_>,
-    ) -> Result<ProjectionSinkReceiptV1, ProjectionSinkErrorV1> {
-        let mut decisions: Vec<ChunkProjectionDecisionV1> = request
-            .changes
-            .added_or_changed
-            .iter()
-            .map(|change| ChunkProjectionDecisionV1 {
-                chunk_id: change.chunk_id.clone(),
-                prior_chunk_digest: change.prior_digest.clone(),
-                current_chunk_digest: change.current_digest.clone(),
-                operation: if change.prior_digest.is_some() {
-                    tracedecay_domain::ProjectionOperationV1::Updated
-                } else {
-                    tracedecay_domain::ProjectionOperationV1::Added
-                },
-                outcome: tracedecay_domain::ProjectionOutcomeV1::Applied,
-                output_digest: Some(
-                    change
-                        .current_digest
-                        .clone()
-                        .expect("added or changed chunks have a digest"),
-                ),
-            })
-            .collect();
-        decisions.extend(
-            request
-                .changes
-                .deleted
-                .iter()
-                .map(|change| ChunkProjectionDecisionV1 {
-                    chunk_id: change.chunk_id.clone(),
-                    prior_chunk_digest: change.prior_digest.clone(),
-                    current_chunk_digest: None,
-                    operation: tracedecay_domain::ProjectionOperationV1::Deleted,
-                    outcome: tracedecay_domain::ProjectionOutcomeV1::Applied,
-                    output_digest: None,
-                }),
-        );
-        receipt_builder
-            .build(&decisions)
-            .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
-    }
-}
 
 struct CancelDuringStaging {
     checks: AtomicUsize,
@@ -688,7 +633,6 @@ fn fixture_for_source_files(
             max_snapshot_age_micros: None,
         },
         super::super::MemorySealedPublicationStoreV1::default(),
-        ApplyingProjectionSink,
     )
     .expect("fixture production owner opens");
     let generation = owner

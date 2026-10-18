@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use axum::response::Response;
 use serde_json::Value;
 use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationRequest, is_http_application_operation_exposed,
@@ -254,7 +253,7 @@ fn work_application_router_with_executor(
 pub async fn invoke_work_operation(
     executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
     request: tracedecay_api::WorkHttpRequest,
-) -> Response {
+) -> Result<tracedecay_api::HttpJsonEnvelope<Value>, tracedecay_api::HttpAdapterError> {
     work::invoke_work_operation(Some(executor), request).await
 }
 
