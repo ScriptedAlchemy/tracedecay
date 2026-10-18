@@ -71,9 +71,9 @@ async fn registered_project_stores(
 }
 
 /// Holds every mounted store whose path no longer names the file this daemon
-/// opened in the reset-required state. A daemon writing into a deleted store
-/// fills an unlinked inode that no size census sees and no reset frees (#4099
-/// wrote 112 GB this way), so status and doctor name the restart instead.
+/// opened in the reset-required state. The writer's file probe closes such a
+/// store's connections, but its mounted owners keep the closed runtime, so
+/// status and doctor name the restart that remounts them.
 fn record_lost_store_files(
     sampling: &StoreTelemetrySamplingRegistry,
     registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
