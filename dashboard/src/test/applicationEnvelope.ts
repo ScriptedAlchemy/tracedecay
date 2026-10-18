@@ -28,7 +28,7 @@ const EXECUTION = {
 export function applicationSuccess(
   operation: ApplicationHttpOperationId,
   payload: unknown,
-  options: { scope?: unknown; requestId?: string; bindingId?: string } = {},
+  options: { scope?: unknown; requestId?: string; bindingId?: string; pendingEffect?: boolean } = {},
 ): { kind: 'success'; value: Record<string, unknown> } {
   const binding = APPLICATION_HTTP_BINDINGS[operation];
   const outcome =
@@ -41,9 +41,9 @@ export function applicationSuccess(
             idempotency_key: 'idempotency.fixture',
             authority: {},
             expected_state: 'sha256:expected',
-            execution: EXECUTION,
-            reconciliation: 'reconciled',
-            receipt: {},
+            execution: options.pendingEffect ? { ...EXECUTION, termination: 'effect_unknown' } : EXECUTION,
+            reconciliation: options.pendingEffect ? 'pending' : 'reconciled',
+            receipt: options.pendingEffect ? { outcome: 'effect_unknown', committed_state: null } : {},
             payload,
           },
         }

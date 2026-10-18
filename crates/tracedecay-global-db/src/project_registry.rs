@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -40,7 +40,7 @@ pub(super) const PROJECT_REGISTRY_PERFORMANCE_INDEX_SQL: &str = "
 ";
 
 /// Which registry table a reap candidate belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReapEntryKind {
     /// A `projects` row: the cross-project savings ledger, which despite the
@@ -64,7 +64,7 @@ impl ReapEntryKind {
 }
 
 /// One registry row whose referenced path is gone from disk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RegistryReapEntry {
     pub kind: ReapEntryKind,
     /// Primary key of the row: ledger path, alias key, or project id.
@@ -2240,6 +2240,18 @@ impl RegisteredGlobalDb {
     #[tracing::instrument(name = "global_db.registry.query.reap_plan", level = "trace", skip_all)]
     pub async fn plan_registry_reap(&self) -> tracedecay_domain::errors::Result<RegistryReapPlan> {
         const OPERATION: &str = "plan registry reap";
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        self.classify_registry_reap(&snapshot).await
+    }
+
+    async fn classify_registry_reap(
+        &self,
+        snapshot: &impl QueryExecutor,
+    ) -> tracedecay_domain::errors::Result<RegistryReapPlan> {
+        const OPERATION: &str = "classify registry reap";
         let profile_root = self
             .db_path()
             .parent()
@@ -2247,10 +2259,6 @@ impl RegisteredGlobalDb {
                 global_db_operation_message(OPERATION, "global database has no profile directory")
             })?
             .to_path_buf();
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let mut plan = RegistryReapPlan::default();
 
         let mut rows = snapshot
@@ -2342,7 +2350,9 @@ impl RegisteredGlobalDb {
             let canonical_root: String = row
                 .get(1)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let git_common_dir: Option<String> = row.get(2).ok();
+            let git_common_dir: Option<String> = row
+                .get(2)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
             if Path::new(&canonical_root).exists()
                 || git_common_dir
                     .as_deref()
@@ -2387,10 +2397,10 @@ impl RegisteredGlobalDb {
 
     /// Removes the rows in `plan.reapable`, and only those rows.
     ///
-    /// Every path is re-checked here rather than trusted from planning time,
-    /// so a checkout that reappeared between the two calls is skipped instead
-    /// of unregistered. Returns the number of rows actually removed. No
-    /// filesystem path is deleted, moved, or opened for writing.
+    /// Candidates are reclassified under the write transaction: new live aliases,
+    /// stores, or changed row identities invalidate stale entries. Each path is
+    /// checked again before deletion, and each matching row is counted once.
+    /// No filesystem path is deleted, moved, or opened for writing.
     #[tracing::instrument(name = "global_db.registry.persist.reap", level = "trace", skip_all)]
     pub async fn apply_registry_reap(
         &self,
@@ -2401,9 +2411,15 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut eligible: HashSet<_> = self
+            .classify_registry_reap(&transaction)
+            .await?
+            .reapable
+            .into_iter()
+            .collect();
         let mut removed = 0;
         for entry in &plan.reapable {
-            if Path::new(&entry.missing_path).exists() {
+            if !eligible.remove(entry) || Path::new(&entry.missing_path).exists() {
                 continue;
             }
             let statement = match entry.kind {
@@ -2411,11 +2427,11 @@ impl RegisteredGlobalDb {
                 ReapEntryKind::ProjectAlias => "DELETE FROM project_aliases WHERE alias_path = ?1",
                 ReapEntryKind::CodeProject => "DELETE FROM code_projects WHERE project_id = ?1",
             };
-            transaction
+            let changed_rows = transaction
                 .execute(statement, params![entry.key.as_str()])
                 .await
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            removed += 1;
+            removed += usize::from(changed_rows != 0);
         }
         transaction
             .commit()
