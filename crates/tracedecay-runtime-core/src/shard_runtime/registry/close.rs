@@ -17,6 +17,12 @@ use crate::shard_runtime::shard::ShardRuntimeEvictionBlocker;
 
 const SHUTDOWN_HOLD_DRAIN_POLL: Duration = Duration::from_millis(10);
 
+/// A pass is the last one when the next poll would land at or past the
+/// deadline, so the drain logs and returns before its caller's deadline.
+fn is_last_drain_pass(now: std::time::Instant, deadline: std::time::Instant) -> bool {
+    now + SHUTDOWN_HOLD_DRAIN_POLL >= deadline
+}
+
 /// What still keeps one mounted runtime from closing at shutdown.
 struct RuntimeHold {
     blockers: Vec<ShardRuntimeEvictionBlocker>,
@@ -183,7 +189,7 @@ impl StoreRuntimeRegistry {
         self.cancel_and_join_opens_for_shutdown(&cx).await?;
         let mut closed = 0;
         loop {
-            let final_pass = std::time::Instant::now() + SHUTDOWN_HOLD_DRAIN_POLL >= deadline;
+            let final_pass = is_last_drain_pass(std::time::Instant::now(), deadline);
             let (batch, held) = self.close_idle_batch(final_pass).await?;
             closed += batch;
             if !held || final_pass {
@@ -967,33 +973,41 @@ mod tests {
         drop(profile);
     }
 
-    /// A lease released after store close begins can still have its WAL
-    /// truncated before the caller's deadline. The pinned profile runtime
-    /// keeps the drain running to its last poll before that deadline, so the
-    /// close still returns before the caller's own deadline cancels it.
+    /// Leases released seconds after store close begins still have their
+    /// runtimes closed, so their WALs are truncated, while the caller's
+    /// deadline is far off.
     #[asupersync::test]
     async fn shutdown_close_waits_for_a_lease_released_while_it_runs() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
         let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
         let binding = code.binding().clone();
+        let profile_binding = profile.binding().clone();
         let release = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(4));
-            drop(code);
+            drop((code, profile));
         });
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        assert_eq!(registry.close_idle_for_shutdown(deadline).await.unwrap(), 1);
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the drain must return before its caller's deadline"
-        );
-        assert!(matches!(
-            registry.lookup(&binding),
-            StoreRuntimeLookup::Missing { .. }
-        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        assert_eq!(registry.close_idle_for_shutdown(deadline).await.unwrap(), 2);
+        for binding in [binding, profile_binding] {
+            assert!(matches!(
+                registry.lookup(&binding),
+                StoreRuntimeLookup::Missing { .. }
+            ));
+        }
         release.join().unwrap();
-        drop(profile);
+    }
+
+    /// The last pass runs while one poll still fits before the deadline, so
+    /// the drain logs its held runtimes and returns before the caller's own
+    /// deadline cancels it.
+    #[test]
+    fn the_last_drain_pass_runs_before_the_deadline() {
+        let now = std::time::Instant::now();
+        assert!(is_last_drain_pass(now, now + SHUTDOWN_HOLD_DRAIN_POLL / 2));
+        assert!(is_last_drain_pass(now, now + SHUTDOWN_HOLD_DRAIN_POLL));
+        assert!(!is_last_drain_pass(now, now + SHUTDOWN_HOLD_DRAIN_POLL * 2));
     }
 
     #[asupersync::test]
