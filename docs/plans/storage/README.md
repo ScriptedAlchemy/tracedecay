@@ -840,9 +840,130 @@ changes a file that holds memory.
     once delay every other store. Measured under host load at N=6, three runs
     each: `mcp_suite` 193 to 242 s on this branch against 224 to 227 s on master,
     `daemon_suite` 92 to 123 s against 97 to 124 s.
-  - Fenced TRUNCATE on lanes, idle close, the unlink probe and `ProfileLost` are the
-    next slices of this step.
+  - Fenced TRUNCATE on lanes and idle close are the next slices of this step.
   Proof: 64 attached stores add exactly N threads, all of them pool threads.
+- Step 7, unlink probe and ProfileLost (2026-10-18, branch
+  `feat/storage-unlink-probe-profile-lost`). Each writer checks its pinned file
+  every 2 s, between batches and from its idle wait: `fstat` link count 0, or a
+  path that is missing or names another inode, means the file is lost. The
+  writer then fails its queued work as `Unavailable { reason: FileLost }`, drops
+  its connection and pinned descriptor, and tells its attachment, which tells
+  every reader to interrupt and exit and drops its own handles; none of this
+  waits on a pool thread. Later submits and reads on that attachment answer
+  `FileLost`. The registry unmaps a lost runtime on the next lookup or open of
+  its key, so that open resolves and publishes a fresh runtime under the
+  existing creation rules. The daemon pins `profile-identity.json` by inode at
+  start and checks it every second from its accept loop; once the file is gone
+  or replaced it logs `daemon_shutdown outcome=profile_lost` and leaves through
+  the ordinary graceful shutdown, which closes every store, then exits with
+  status 66 (`EX_NOINPUT`). The launchd unit restarts only after a failed exit
+  (`SuccessfulExit=false`), so a zero exit would leave the daemon down; systemd
+  uses `Restart=always` and restarts on either. Evicting a lost runtime also
+  clears the profile pins recorded on its key, so a reopened key does not count
+  them. Deviations:
+  - Read-only attachments have no writer and so no probe. Their file stays open
+    until the store closes.
+  - A lost attachment dropped its reader pool at once and the registry dropped
+    the runtime without waiting for the reader workers to exit. The next entry
+    closes this (#4258).
+  - Owners that hold a lease on the lost runtime (mounted project and profile
+    owners) keep it, so they answer `FileLost` until a restart remounts them.
+    #4130's reset-required record therefore stays, with its reason updated:
+    the space is now released, and the restart only remounts those owners.
+  - The watch runs on the Unix daemon only; the loopback daemon has no inode.
+  Proof: an unlinked store reports itself lost and holds no descriptor on its
+  files within one probe interval, and the next open serves a fresh store;
+  deleting the profile under a running daemon logs `profile_lost` within one
+  tick and the daemon exits with every store closed.
+- Step 7b follow-ups, lost-file readers (2026-10-18, branch
+  `fix/4258-lost-file-readers`, #4258). Closing a lost file now finishes its
+  work. The reader pool's pinned descriptor is closed on loss for every holder of
+  it, so a reader lease or retained snapshot that keeps the pool object alive no
+  longer keeps the unlinked inode open. A reader worker that a growing acquire
+  spawned while the pool was closing is shut down as it registers instead of
+  idling until the pool drops. The attachment keeps the lost pool only until its
+  workers have exited. The registry keeps a lost runtime mapped until then:
+  its lookup answers `Evicting` and an open is refused with
+  `RuntimeEvictionInProgress`, so no successor publishes beside connections still
+  open on the old file. The next lookup or open after the last worker exits
+  unmaps it as before. This is a short window, in practice a few milliseconds,
+  and a worker stuck in native work holds it open, as a stuck close does for
+  capacity eviction. The lost writer's own connection closes when its task
+  returns right after the notice, which the next entry adds to the check
+  (#4280). Proof: with the
+  reader pool held across the loss, the unlinked file's descriptors are gone and
+  `lost_file_closed` turns true; removing `close_for_lost_file`, the descriptor
+  release, the late-registration shutdown or the registry hold each fails its
+  own test.
+- Step 7b follow-ups, lost writer and blocked acquires (2026-10-18, branch
+  `fix/4280-lost-writer`, #4280). `lost_file_closed` now also waits for the lost
+  writer's task to finish, because the writer's SQLite connection closes only when
+  that task returns, after the loss notice has run. The attachment keeps the lost
+  writer beside the lost reader pool and marks the file lost, moves both handles
+  and closes the pool in one lock hold, so no check sees a lost file with nothing
+  left to wait on. A caller blocked in the reader pool's acquire when the file is
+  lost, or acquiring afterwards, now gets `FileLost` instead of `Draining`; the
+  pool flips to draining and records the loss in one lock hold. Proof: with the
+  writer task held after the notice and the readers already exited,
+  `lost_file_closed` stays false and turns true once the task returns; removing
+  the writer check or the `FileLost` reason each fails its own test.
+- Step 8a, repository identity (2026-10-17, branch `feat/storage-repository-identity`).
+  A second full clone, a shallow clone, and a checkout after a merge of unrelated
+  histories open the project that first enrolled the repository, with no `init`.
+  Anchors are rows in the existing `global.db` `project_aliases` table under the
+  prefixes `git-root-commit:`, `git-subproject:` and `git-remote-url:`, beside the
+  path and `git-common-dir:` rows. There is no `catalog.db`, no schema change, and
+  no `tracedecay project link` or `project split`. Registration keeps the first
+  enrolled checkout as `canonical_root`, never re-points an anchor, and caches
+  each checkout's registration on its own. MCP scope admits a checkout outside the
+  registered root when its own marker names the project. The daemon source binding
+  digest names the project, so every checkout verifies one binding, and a binding
+  under the old root-derived digest rebinds once. Deviations from section 2:
+  - A shared root commit adopts only beside agreement on the remote: the
+    checkout's normalized `origin` equals the `git-remote-url:` anchor an
+    enrolled checkout of the project recorded, or its `origin` is a local path or
+    `file://` URL that is itself an enrolled checkout. A shallow clone adopts on
+    its remote alone. Forks, re-pointed templates and subtree-merged libraries
+    therefore no longer share a project, so they need no `project split`.
+    `ssh://`, scp-style and `https://` spellings of one host path normalize
+    equal, and a `file://` URL equals its plain path.
+  - A subproject's remote anchor carries its path in the checkout
+    (`git-remote-url:<url>#<path>`), so two subprojects of one repository stay
+    apart.
+  - Anchors that name two projects adopt neither, and the checkout mints its own
+    project instead of reporting a conflict.
+  - Registration and lookup resolve in one order: a marker naming a store this
+    profile holds, then path and `git-common-dir:` aliases, then anchors. Two
+    clones enrolled under separate ids before this step keep both ids.
+  - A marker naming a store this profile does not hold yields to the registry and
+    is replaced by the id the profile resolves; one naming a held store is never
+    rewritten. At first touch, when nothing else names the checkout, the profile
+    enrolls under the marker's id.
+  - The daemon's enrollment authority for a project admits another root when that
+    root's own marker names the project, and withdrawing a registration removes
+    only the roots it added.
+  - The history walk runs at most once per checkout and HEAD in a process, on the
+    blocking pool. Lookup walks only a checkout that no held marker, path or
+    common-dir alias names; registration walks a named checkout only until its
+    project records a history anchor. A root that a fetch or merge adds to an
+    enrolled checkout is therefore recorded when a checkout no alias names (a
+    fresh clone) registers.
+  - Only the registered root writes `code_projects.git_remote_url` and
+    `default_branch`. The GitHub source binding follows each checkout's own
+    `origin`, which adopted clones share or which is a local path that binds
+    nothing, so it does not flip between clones.
+  - Two clones on one branch share the `profile_graph_scope_id(store, branch)`
+    row but not graph data: the code scope carries each checkout's worktree id
+    and repository id, so the scope id is unchanged. A test pins that two clones
+    on one branch resolve distinct code scopes.
+  Open: the lifecycle and the claim count a marker as held when its shard
+  directory exists, the registry when a `store_instances` row names it. After an
+  upgrade, a repository's anchors belong to whichever enrolled clone registers
+  first. `branch add` of one branch from two clones overwrites that branch's
+  `branch_meta.json` provenance. Code-index scope reconciliation counts as live
+  only the lease repository's worktrees and mounted roots, so it collects a second
+  clone's code-index scope once that clone has been unmounted for 7 days, and the
+  clone re-indexes on its next open.
 - Growth sources from #4099 still open, each with the step that closes it:
   1. LCM payloads that no summary covers yet: step 10's evidence lever.
   2. Session databases of unmounted projects get no retention: step 10, whose
@@ -855,7 +976,8 @@ changes a file that holds memory.
   6. The 512 MiB response-handle cap on top of #4128's TTL sweep: step 10.
   7. Hook events into `telemetry.hook_events`: step 8.
   8. Closing a store's lane when its file is lost, instead of a daemon restart:
-     step 7's unlink probe. #4130 is the interim restart remedy.
+     closed by step 7's unlink probe. Owners that cache the lost runtime's
+     lease still need #4130's restart to serve it again.
   9. A 24-hour acceptance run on a fresh profile showing bounded growth: step 12.
 - Step 4 merged into step 8 (2026-10-16). A dead-letter valve on today's global
   queue was built and then dropped: the projection code deliberately keeps corrupt

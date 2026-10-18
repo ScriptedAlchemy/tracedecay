@@ -209,5 +209,35 @@ class RepetitionAccountingTests(unittest.TestCase):
         self.assertEqual(result["overall"]["opportunities"], 3)
         self.assertEqual(result["overall"]["triggered"], 0)
 
+class CorpusIndexTest(unittest.TestCase):
+    def test_repeated_labels_and_repetitions_remain_separate(self):
+        corpus = [{"id": "same", "category": "factstore-write"}, {"id": "same", "category": "factstore-recall"}]
+        rows = [row("same", scenario["category"], True, scenario_index=index, rep=rep)
+                for rep in (1, 2) for index, scenario in enumerate(corpus, 1)]
+        summary = scorecard.aggregate(rows, corpus, reps=2)
+        self.assertEqual(summary["overall"]["opportunities"], 4)
+        self.assertEqual(summary["overall"]["triggered"], 4)
+
+    def test_duplicate_index_cannot_double_count_an_opportunity(self):
+        rows = [row("same", "factstore-write", True, scenario_index=1)] * 2
+        with self.assertRaisesRegex(ValueError, "duplicate scenario/repetition"):
+            scorecard.aggregate(rows)
+
+    def test_index_does_not_override_the_corpus_identity(self):
+        corpus = [{"id": "expected", "category": "factstore-write"}]
+        for bad in [row("foreign", "factstore-write", True, scenario_index=1),
+                    row("expected", "factstore-recall", True, scenario_index=1),
+                    row("expected", "factstore-write", True, scenario_index=2)]:
+            with self.subTest(row=bad), self.assertRaises(ValueError):
+                scorecard.aggregate([bad], corpus)
+
+    def test_mixed_or_invalid_indices_are_refused(self):
+        for index in (None, 0, True, -1):
+            rows = [row("a", "factstore-write", True, scenario_index=1),
+                    row("b", "factstore-write", True, scenario_index=index)]
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                scorecard.aggregate(rows)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

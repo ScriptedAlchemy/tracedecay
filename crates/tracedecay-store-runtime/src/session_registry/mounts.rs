@@ -364,10 +364,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
         let project_id = ProjectId::new(project_id)
             .map_err(|error| session_registry_error(OPERATION, error.to_string()))?;
-        let authority =
-            LocalProjectEnrollmentAuthorityV1::new(project_id.clone(), [manifest.project_root]);
-        self.resolver
-            .register_project_authority(authority.clone())
+        let added = self
+            .resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                [manifest.project_root],
+            ))
             .map_err(|error| session_registry_error(OPERATION, format!("{error:?}")))?;
         let shard_id = StoreShardIdV1::project_sessions(
             self.identity.brain_id().clone(),
@@ -377,7 +379,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let refusal = self
             .registered_store_reset_refusal(shard_id.clone(), OPERATION)
             .await;
-        self.resolver.withdraw_project_authority(&authority);
+        self.resolver.withdraw_project_authority(&added);
         match refusal? {
             Some(refusal) => self.record_registered_admission(shard_id, Some(&refusal)),
             None => stamp_sessions_admission(manifest_path, digest),
@@ -1504,6 +1506,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 project_id.clone(),
                 enrollment_roots,
             ))
+            .map(drop)
             .map_err(|error| {
                 session_registry_error("register project session authority", format!("{error:?}"))
             })
