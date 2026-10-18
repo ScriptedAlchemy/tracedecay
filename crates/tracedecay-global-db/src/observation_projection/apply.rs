@@ -23,9 +23,10 @@ use tracedecay_runtime_core::db::{
 use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
 
 use super::state::{
-    canonicalize_session_project_paths, message_projection, output_ownership_sql, read_message,
-    read_observation, read_output_state, read_session, reconcile_session_rows_detailed, storage,
-    storage_message, stored_output_digest, verify_output_state, verify_projection_rows,
+    canonical_message_location, canonicalize_session_project_paths, message_projection,
+    output_ownership_sql, read_message, read_observation, read_output_state, read_session,
+    reconcile_session_rows_detailed, storage, storage_message, stored_output_digest,
+    verify_output_state, verify_projection_rows,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -1065,7 +1066,8 @@ async fn upsert_projected_raw_message(
     conn: &impl Executor,
     message: &SessionMessageRecord,
 ) -> ProjectionStoreResult<()> {
-    tracedecay_lcm::raw::upsert_projection_raw_message(conn, message)
+    let location = canonical_message_location(message)?;
+    tracedecay_lcm::raw::upsert_projection_raw_message(conn, message, location.as_deref())
         .await
         .map_err(|error| match error {
             LcmError::SanitizationRefused {
@@ -1154,9 +1156,9 @@ pub(super) async fn retire_replaced_codex_output(
 
 /// Replaces the stored output row with the one this binary derives.
 ///
-/// The projected message row is derived state, so every field but its identity
-/// is rewritten from the record. A projector that owns the output also owns the
-/// row's session, so the row is first moved onto the projection's session.
+/// The projected rendering is derived state. The canonical origin is captured
+/// once and survives rendering repairs. A projector that owns the output also
+/// owns the row's session, so the row is first moved onto that session.
 /// A Hermes body belongs to the Hermes LCM turn authority: an existing Hermes
 /// row keeps its body and takes only the projection's session columns. Shared
 /// with released-rendering convergence, which reaches the same row through a
@@ -1167,11 +1169,13 @@ pub(super) async fn supersede_projected_message(
 ) -> ProjectionStoreResult<()> {
     adopt_owned_projection_raw_session(conn, message).await?;
     if message.provider == "hermes" {
+        let location = canonical_message_location(message)?;
         let updated = conn
             .execute(
                 "UPDATE lcm_raw_messages
                  SET role = ?3, timestamp = ?4, ordinal = ?5, kind = ?6, model = ?7,
-                     tool_names = ?8, source_path = ?9, source_offset = ?10
+                     tool_names = ?8, source_path = ?9, source_offset = ?10,
+                     location_path = COALESCE(location_path, ?11)
                  WHERE provider = ?1 AND message_id = ?2",
                 params![
                     message.provider.as_str(),
@@ -1184,6 +1188,7 @@ pub(super) async fn supersede_projected_message(
                     message.tool_names.as_deref(),
                     message.source_path.as_deref(),
                     message.source_offset,
+                    location.as_deref(),
                 ],
             )
             .await

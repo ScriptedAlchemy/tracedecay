@@ -769,6 +769,7 @@ pub(in super::super) struct ProjectionStorageColumns {
     pub(in super::super) content_hash: String,
     pub(in super::super) snippet_text: String,
     pub(in super::super) index_text: String,
+    pub(in super::super) location_path: Option<String>,
 }
 
 pub(in super::super) struct ProjectionRowsBatch {
@@ -825,7 +826,8 @@ pub(in super::super) async fn read_projection_rows_batch(
         .map_err(|error| storage("encode projected message request", error))?;
         let sql = format!(
             "SELECT {}, message.storage_kind, COALESCE(message.content, ''),
-                    message.content_hash, message.snippet_text, message.index_text
+                    message.content_hash, message.snippet_text, message.index_text,
+                    message.location_path
              FROM json_each(?1) AS requested
              CROSS JOIN lcm_raw_messages AS message
              WHERE message.provider = json_extract(requested.value, '$.provider')
@@ -860,6 +862,9 @@ pub(in super::super) async fn read_projection_rows_batch(
                 content_hash: decode(21)?,
                 snippet_text: decode(22)?,
                 index_text: decode(23)?,
+                location_path: row
+                    .get(24)
+                    .map_err(|error| storage("decode projected message location", error))?,
             };
             let key = (message.provider.clone(), message.message_id.clone());
             storage_columns.insert(key.clone(), columns);
@@ -1080,6 +1085,23 @@ pub(in super::super) async fn resolve_output_projection(
         }
     };
     Ok(owner_projection)
+}
+
+/// Canonical location captured at the storage write boundary, outside the
+/// immutable provider rendering and its provenance digest.
+pub(in super::super) fn canonical_message_location(
+    message: &SessionMessageRecord,
+) -> ProjectionStoreResult<Option<String>> {
+    let Some(json) = message.metadata_json.as_deref() else {
+        return Ok(None);
+    };
+    let metadata: serde_json::Value = serde_json::from_str(json)
+        .map_err(|error| storage("decode projected message location", error))?;
+    Ok(metadata
+        .get(format!("{}_session_cwd", message.provider))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(durable_project_path_key))
 }
 
 /// Normalize projection rows through the same authority as runtime session writes

@@ -23,10 +23,11 @@ use super::apply::{
     derive_projection_with_alias, stage_provider_usage_effects, verify_effect,
 };
 use super::state::{
-    canonicalize_session_project_paths, consume_projection_queue_item, decode_observation_row,
-    decode_sequence, projected_stored_message, projection_retry_state, queued_sequence,
-    read_checkpoint, read_message, read_observation, read_session, reconcile_session_rows_detailed,
-    schedule_projection_retry, storage, storage_message, stored_output_digest, write_checkpoint,
+    canonical_message_location, canonicalize_session_project_paths, consume_projection_queue_item,
+    decode_observation_row, decode_sequence, projected_stored_message, projection_retry_state,
+    queued_sequence, read_checkpoint, read_message, read_observation, read_session,
+    reconcile_session_rows_detailed, schedule_projection_retry, storage, storage_message,
+    stored_output_digest, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -947,9 +948,13 @@ async fn activate_projection_rebuild_transaction(
             "projection rebuild generation is incomplete",
         ));
     }
+    retire_projection_predecessor_state(transaction, &job.generation).await?;
+    // Classify active outputs before clearing their current ownership. A
+    // compatible protected rendering can differ from the rebuilt row while
+    // still belonging to this projector; foreign outputs remain collisions.
+    prepare_rebuild_output_activation(transaction, &job.generation).await?;
     clear_active_projection(transaction, &job.generation).await?;
     activate_rebuild_sessions(transaction, &job.generation).await?;
-    prepare_rebuild_output_activation(transaction, &job.generation).await?;
     activate_rebuild_messages(transaction, &job.generation).await?;
     activate_rebuild_provenance(transaction, &job.generation).await?;
     activate_rebuild_workflow_facts(transaction, &job.generation).await?;
@@ -1490,7 +1495,17 @@ async fn write_staged_message(
     generation: &str,
     message: &SessionMessageRecord,
 ) -> ProjectionStoreResult<()> {
-    let json = encode_json(message, "encode staged projection message")?;
+    #[derive(serde::Serialize)]
+    struct StagedMessage<'a> {
+        #[serde(flatten)]
+        message: &'a SessionMessageRecord,
+        location_path: Option<String>,
+    }
+    let staged = StagedMessage {
+        message,
+        location_path: canonical_message_location(message)?,
+    };
+    let json = encode_json(&staged, "encode staged projection message")?;
     let content_hash = projected_content_hash(&message.text);
     conn.execute(
         "INSERT INTO observation_projection_rebuild_messages (
@@ -1956,7 +1971,6 @@ async fn clear_active_projection(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    retire_projection_predecessor_state(conn, generation).await?;
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_retained_outputs (
             output_provider TEXT NOT NULL,
@@ -2519,23 +2533,26 @@ async fn activate_rebuild_messages(
     .join(",\n            ");
     let text = json_extract_expr(MESSAGE_JSON_COLUMN, "text");
     let metadata = json_extract_expr(MESSAGE_JSON_COLUMN, "metadata_json");
+    let location = json_extract_expr(MESSAGE_JSON_COLUMN, "location_path");
     // A Hermes body belongs to the Hermes LCM turn authority, so an existing
     // Hermes row takes only the rebuilt session columns.
     conn.execute(
         &format!(
             "INSERT INTO lcm_raw_messages (
             provider, message_id, {session_columns}, content, content_hash, storage_kind,
-            payload_ref, placeholder_text, metadata_json
+            payload_ref, placeholder_text, metadata_json, location_path
          )
          SELECT output_provider, output_message_id,
                 {session_extracts},
-                {text}, content_hash, 'inline', NULL, NULL, {metadata}
+                {text}, content_hash, 'inline', NULL, NULL, {metadata}, {location}
          FROM observation_projection_rebuild_messages
          WHERE projector_version = ?1 AND generation = ?2
          ON CONFLICT(provider, message_id) DO UPDATE SET
             {session_updates},
-            {body_updates}
+            {body_updates},
+            location_path = COALESCE(lcm_raw_messages.location_path, excluded.location_path)
          WHERE {session_changed}
+            OR (lcm_raw_messages.location_path IS NULL AND excluded.location_path IS NOT NULL)
             OR (lcm_raw_messages.provider <> 'hermes' AND (
                 COALESCE(lcm_raw_messages.content, lcm_raw_messages.placeholder_text, '')
                     IS NOT excluded.content
@@ -2650,12 +2667,13 @@ async fn activate_rebuild_dispositions(
 #[allow(clippy::unwrap_used)]
 mod activation_tests {
     use super::{
-        REBUILD_PAGE_SIZE, SESSION_MESSAGE_PROJECTOR_VERSION, activate_rebuild_sessions,
-        reconcile_overlapping_rebuild_sessions,
+        REBUILD_PAGE_SIZE, SESSION_MESSAGE_PROJECTOR_VERSION,
+        activate_projection_rebuild_transaction, activate_rebuild_sessions,
+        reconcile_overlapping_rebuild_sessions, write_staged_message,
     };
     use crate::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::{Executor, params};
-    use tracedecay_store::{ProjectionStoreError, SessionRecord};
+    use tracedecay_store::{ProjectionStoreError, SessionMessageRecord, SessionRecord};
 
     const SESSION_ID: &str = "002bd803-dc62-46e2-b66a-a61cc282f0dc";
     /// One past the exact-SQL transport's `MAX_QUERY_ROWS`
@@ -2772,6 +2790,69 @@ mod activation_tests {
         assert_eq!(
             reconciled, OVERLAPS_PAST_TRANSPORT_ROW_CAP,
             "every overlapping session must be reconciled, not one page of {REBUILD_PAGE_SIZE}",
+        );
+    }
+
+    #[asupersync::test]
+    async fn activation_refuses_an_unowned_message_and_rolls_back() {
+        const GENERATION: &str = "generation.foreign-output";
+        let harness = RegisteredGlobalDbHarness::open("foreign-rebuild-output").await;
+        let active = session(None, None);
+        assert!(harness.registered.upsert_session(&active).await);
+        let foreign = SessionMessageRecord {
+            provider: active.provider.clone(),
+            session_id: active.session_id.clone(),
+            message_id: "message.foreign".to_owned(),
+            role: "assistant".to_owned(),
+            timestamp: Some(1),
+            ordinal: 1,
+            text: "retained foreign body".to_owned(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        tracedecay_lcm::raw::upsert_projection_raw_message(
+            &transaction,
+            &foreign,
+            Some("/foreign"),
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        stage(&transaction, GENERATION, &active).await;
+        let rebuilt = SessionMessageRecord {
+            text: "unrelated rebuilt body".to_owned(),
+            ..foreign.clone()
+        };
+        write_staged_message(&transaction, GENERATION, &rebuilt)
+            .await
+            .unwrap();
+        let error = activate_projection_rebuild_transaction(&transaction, 0)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProjectionStoreError::OutputCollision { provider, message_id } if provider == foreign.provider && message_id == foreign.message_id)
+        );
+        transaction.rollback().await.unwrap();
+        let snapshot = harness.registered.read_snapshot().await.unwrap();
+        let mut rows = snapshot.query("SELECT content, location_path FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2", params![foreign.provider.as_str(), foreign.message_id.as_str()]).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), foreign.text);
+        assert_eq!(row.get::<String>(1).unwrap(), "/foreign");
+        drop(rows);
+        let mut rows = snapshot
+            .query("SELECT COUNT(*) FROM observation_projection_rebuilds", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0,
+            "failed activation staging rolls back with the transaction"
         );
     }
 
