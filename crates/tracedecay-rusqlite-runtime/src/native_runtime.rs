@@ -121,6 +121,29 @@ where
     })
 }
 
+tokio::task_local! {
+    /// Answers for the effects of blocking work its scope queues through
+    /// [`spawn_owned_blocking`]. Each such work holds a clone until it
+    /// returns, so an owner that signals on its last drop (a project open's
+    /// completion) settles after that work, not when its wait is abandoned.
+    pub static BLOCKING_WORK_OWNER: std::sync::Arc<dyn Send + Sync>;
+}
+
+/// [`spawn_blocking`] for work whose effects belong to the enclosing
+/// [`BLOCKING_WORK_OWNER`]: dropping the returned future still abandons only
+/// the wait, but the owner stays held until the work returns.
+pub fn spawn_owned_blocking<T, F>(work: F) -> BoxFuture<'static, Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let owner = BLOCKING_WORK_OWNER.try_with(std::sync::Arc::clone).ok();
+    spawn_blocking(move || {
+        let _owner = owner;
+        work()
+    })
+}
+
 /// Runs `future` where a thread may park: from a native runtime thread it
 /// moves the whole future to one blocking-pool thread and polls it there;
 /// anywhere else it polls in place.

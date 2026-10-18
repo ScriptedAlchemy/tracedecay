@@ -44,12 +44,13 @@ impl Database {
     }
 
     /// Owner-bound workflow source and effect journal authority.
-    pub fn workflow_storage(
+    pub async fn workflow_storage(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_retained_exact_sql(
             self.retained_exact_sql_for_purpose("attach workflow storage")?,
         )
+        .await
         .map_err(|error| TraceDecayError::Database {
             message: format!("failed to validate workflow storage schema: {error:?}"),
             operation: "attach workflow storage".to_owned(),

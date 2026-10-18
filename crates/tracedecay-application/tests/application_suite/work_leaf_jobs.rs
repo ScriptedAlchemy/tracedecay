@@ -24,7 +24,6 @@ use tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits;
 use tracedecay_rusqlite_runtime::native_runtime::{
     NativeTask, NativeTaskOutcome, native_thread_writer_waits,
 };
-use tracedecay_rusqlite_runtime::storage_pool::STORE_THREAD_PREFIX;
 
 use crate::work_run_control_jobs::{authority, context, leased_attempt_of, task};
 
@@ -374,12 +373,11 @@ async fn placement_admit_and_release_awaited_on_a_native_worker_observe_off_the_
         "admit and release each observed the target once"
     );
     assert!(
-        threads.iter().all(|name| {
-            !name
-                .as_deref()
-                .is_some_and(|name| name.starts_with(STORE_THREAD_PREFIX))
-        }),
-        "the Git observation never ran on a storage pool thread: {threads:?}"
+        threads.iter().all(|name| name
+            .as_deref()
+            .is_some_and(|name| name.contains("-blocking-"))),
+        "the Git observation ran on the blocking pool, never the writer or the native worker: \
+         {threads:?}"
     );
     assert_eq!(
         database

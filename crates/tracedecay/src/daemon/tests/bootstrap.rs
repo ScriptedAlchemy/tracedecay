@@ -2780,6 +2780,59 @@ async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
     );
 }
 
+/// Aborting an open abandons its wait on blocking work, not the work: a Hook
+/// binding write still blocked in the pool must keep shutdown from reporting
+/// the open drained, so no write lands after shutdown returns `true`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_open_shutdown_joins_blocking_work_its_aborted_open_owns() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("shutdown-owned-blocking");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let written = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let binding_written = Arc::clone(&written);
+    match tasks.start_cancellable(route, move |_| async move {
+        tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
+            started_tx.send(()).expect("publish write start");
+            release_rx.recv().expect("release binding write");
+            binding_written.store(true, std::sync::atomic::Ordering::Release);
+        })
+        .await
+        .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })
+    }) {
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("blocked open must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("blocked open must fit"),
+    }
+    started_rx.await.expect("binding write started");
+
+    assert!(
+        !tasks
+            .shutdown_with_deadline(
+                tokio::time::Duration::ZERO,
+                tokio::time::Duration::from_millis(50),
+            )
+            .await,
+        "an aborted open whose binding write is still blocked must not report drained"
+    );
+    assert_eq!(tasks.tracked_route_count(), 1);
+    release_tx.send(()).expect("release binding write");
+    assert!(
+        tasks
+            .shutdown_with_deadline(
+                tokio::time::Duration::from_secs(5),
+                tokio::time::Duration::ZERO,
+            )
+            .await,
+        "shutdown must join the aborted open once its binding write returned"
+    );
+    assert!(
+        written.load(std::sync::atomic::Ordering::Acquire),
+        "the binding write must land before shutdown reports drained"
+    );
+    assert_eq!(tasks.tracked_route_count(), 0);
+}
+
 /// The daemon coordinator drops the `project_open` join at its phase deadline,
 /// which can come before the join's own cooperative window ends and its abort
 /// backstop runs. The open it was waiting on must be aborted then. Its route

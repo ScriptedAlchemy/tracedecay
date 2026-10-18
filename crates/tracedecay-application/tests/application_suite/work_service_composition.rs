@@ -71,7 +71,9 @@ async fn workflow_application_attach_fails_without_project_graph_runtime() {
             .expect("registered project store opens");
     let Err(error) = RegisteredWorkflowApplicationServicesV1::attach(
         runtime.project_database().expect("project database"),
-    ) else {
+    )
+    .await
+    else {
         panic!("workflow application attach requires a bound project graph");
     };
     assert_unbound_topology(error, "attach registered workflow topology");
@@ -208,6 +210,7 @@ async fn work_surfaces_attach_and_recover_through_deferred_graph_activation() {
     let work = RegisteredWorkApplicationServicesV1::attach(sessions)
         .expect("Work topology attaches while activation is pending");
     RegisteredWorkflowApplicationServicesV1::attach(sessions)
+        .await
         .expect("workflow topology attaches while activation is pending");
     let bound = sessions
         .project_graph_runtime()

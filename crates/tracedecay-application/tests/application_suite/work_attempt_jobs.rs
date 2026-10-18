@@ -391,10 +391,14 @@ async fn synthesis_awaited_on_a_native_worker_hydrates_sources_in_its_job() {
         bytes.len() as u64,
     )
     .unwrap();
+    let payload = WorkflowArtifactPayload::new(artifact.clone(), bytes).unwrap();
     database
         .workflow_storage()
+        .await
         .expect("workflow storage")
-        .persist(&WorkflowArtifactPayload::new(artifact.clone(), bytes).unwrap())
+        .transact(move |storage| storage.persist(&payload))
+        .await
+        .expect("the writer runs the job")
         .expect("the source payload persists");
     let attempts = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
     attempts
@@ -438,13 +442,13 @@ async fn synthesis_awaited_on_a_native_worker_hydrates_sources_in_its_job() {
                 execution_snapshot().topology().clone(),
                 command,
                 move |storage, start, sources| {
-                    let payload = storage
-                        .load_workflow_artifact(&sources[0].artifacts()[0])
-                        .map_err(|_| {
-                            ApplicationProblem::from(
-                                tracedecay_contracts::WorkAttemptStorageError::Unavailable,
-                            )
-                        })?;
+                    let payload =
+                        WorkflowArtifactStorePort::load(storage, &sources[0].artifacts()[0])
+                            .map_err(|_| {
+                                ApplicationProblem::from(
+                                    tracedecay_contracts::WorkAttemptStorageError::Unavailable,
+                                )
+                            })?;
                     Ok(format!(
                         "{}\n{}",
                         start.instructions,
