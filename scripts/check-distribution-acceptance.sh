@@ -592,8 +592,46 @@ assert_required_assets "$root_package" "$cli_package"
 [[ ! -e "$package_root/.git" && ! -L "$package_root/.git" ]] ||
   die "extracted package workspace unexpectedly contains .git metadata: $package_root/.git"
 
+# The Bazel release build compiles asupersync with the patches listed in
+# MODULE.bazel, which live in scripts/bazel/patches/asupersync-*.patch. Cargo
+# has no patch-file mechanism, so the extracted-crate build compiles a copy of
+# the same pinned source with those same files applied, in the sorted order
+# crate_universe applies them. scripts/test-bazel-dependency-patches.py keeps
+# the file set and the MODULE.bazel annotation identical.
+asupersync_source=$(
+  cargo metadata \
+    --manifest-path "$staged/Cargo.toml" \
+    --format-version 1 |
+    python3 -c '
+import json
+import os
+import sys
+
+manifests = [
+    package["manifest_path"]
+    for package in json.load(sys.stdin)["packages"]
+    if package["name"] == "asupersync"
+]
+if len(manifests) != 1:
+    sys.exit(f"expected exactly one asupersync package, found {len(manifests)}")
+print(os.path.dirname(manifests[0]))
+'
+) || die "could not locate the asupersync source"
+patched_asupersync="$work/patched-deps/asupersync"
+mkdir -p -- "$patched_asupersync"
+tar -C "$asupersync_source" --exclude=.git -cf - . | tar -C "$patched_asupersync" -xf -
+shopt -s nullglob
+asupersync_patches=("$repo"/scripts/bazel/patches/asupersync-*.patch)
+shopt -u nullglob
+[[ ${#asupersync_patches[@]} -gt 0 ]] ||
+  die "no asupersync patches found under scripts/bazel/patches"
+for asupersync_patch in "${asupersync_patches[@]}"; do
+  (cd -- "$patched_asupersync" && git apply -p1 "$asupersync_patch") ||
+    die "could not apply $asupersync_patch to asupersync"
+done
+
 patch_config="$work/packaged-crates.toml"
-python3 - "$metadata" "$packages" "$staged/Cargo.toml" >"$patch_config" <<'PY'
+python3 - "$metadata" "$packages" "$staged/Cargo.toml" "$patched_asupersync" >"$patch_config" <<'PY'
 import json
 import pathlib
 import sys
@@ -634,6 +672,17 @@ for name, spec in workspace_manifest.get("patch", {}).get("crates-io", {}).items
                 f"distribution acceptance: workspace path patch {name} is not staged at {patched}"
             )
         print(f'{json.dumps(name)} = {{ path = {json.dumps(str(patched))} }}')
+# The asupersync copy patched above replaces the pinned git source, so the
+# runtime the extracted build links is the one Bazel builds.
+asupersync_spec = workspace_manifest["workspace"]["dependencies"]["asupersync"]
+if "git" not in asupersync_spec:
+    raise SystemExit(
+        "distribution acceptance: asupersync is no longer a git dependency; "
+        "patch it through [patch.crates-io] here or drop its Bazel patches"
+    )
+print()
+print(f'[patch.{json.dumps(asupersync_spec["git"])}]')
+print(f'asupersync = {{ path = {json.dumps(sys.argv[4])} }}')
 # Extracted packages do not see workspace Cargo.toml profiles. Copy
 # [profile.dist] from that manifest so `--profile dist` matches shipping.
 dist_profile = workspace_manifest.get("profile", {}).get("dist")

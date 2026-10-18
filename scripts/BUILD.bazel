@@ -52,6 +52,17 @@ py_test(
 )
 
 py_test(
+    name = "bazel_dependency_patches_test",
+    size = "small",
+    srcs = ["test-bazel-dependency-patches.py"],
+    data = [
+        "check-distribution-acceptance.sh",
+        "//:MODULE.bazel",
+    ] + glob(["bazel/patches/*.patch"]),
+    main = "test-bazel-dependency-patches.py",
+)
+
+py_test(
     name = "ambient_tokio_check_test",
     size = "small",
     srcs = [
