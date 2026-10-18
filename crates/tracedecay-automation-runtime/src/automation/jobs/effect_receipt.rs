@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::path::{Component, Path};
+
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -262,28 +265,15 @@ pub(super) async fn deliver_job_output(
     match &job.delivery {
         JobDelivery::File { path } => {
             let target = file_target(dashboard_root, job, run_id, path.as_deref())?;
-            if let Some(parent) = target.parent() {
-                let directory = parent.to_path_buf();
-                crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
-                    .await
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("failed to create job output directory: {error}"),
-                    })?;
-            }
             let target_digest = sha256_bytes(target.display().to_string().as_bytes());
-            let mut file = crate::automation::blocking_fs(move || {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(target)
-            })
-            .await
-            .map_err(|error| {
-                AutomationRunError::Runtime(TraceDecayError::Config {
-                    message: format!("failed to open job output: {error}"),
-                })
-            })?;
+            let root = dashboard_root.to_path_buf();
+            let mut file = crate::automation::blocking_fs(move || open_job_output(&root, &target))
+                .await
+                .map_err(|error| {
+                    AutomationRunError::Runtime(TraceDecayError::Config {
+                        message: format!("failed to open job output: {error}"),
+                    })
+                })?;
             let output = response.output_text.clone();
             crate::automation::blocking_fs(move || {
                 use std::io::Write as _;
@@ -380,6 +370,46 @@ pub(super) fn delivery_context(
             "target_digest": sha256_bytes(url.as_bytes()),
         })),
     }
+}
+
+fn open_job_output(root: &Path, target: &Path) -> std::io::Result<std::fs::File> {
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "job output must stay beneath its directory",
+        )
+    };
+    let relative = target.strip_prefix(root).map_err(|_| invalid())?;
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name),
+            _ => Err(invalid()),
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let (name, parents) = components.split_last().ok_or_else(invalid)?;
+    let mut directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
+    for parent in parents {
+        directory = match directory.open_dir_nofollow(parent) {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match directory.create_dir(parent) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                directory.open_dir_nofollow(parent)?
+            }
+            Err(error) => return Err(error),
+        };
+    }
+    let mut options = OpenOptions::new();
+    options
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .follow(FollowSymlinks::No);
+    Ok(directory.open_with(name, &options)?.into_std())
 }
 
 fn file_target(
@@ -612,87 +642,25 @@ mod tests {
         ));
     }
 
-    /// Report whether this host offers a device that accepts an open and then
-    /// refuses every write.
-    ///
-    /// `/dev/full` is the only portable-enough way to force `ENOSPC` *after*
-    /// the delivery file is open. Linux has it; macOS does not, and there the
-    /// symlink made the failure land at open instead, an unattempted
-    /// delivery, which is a different outcome than the one under test. Probe
-    /// for the device rather than assuming every unix has it.
     #[cfg(unix)]
-    fn post_open_write_failure_device() -> Option<&'static str> {
-        let path = "/dev/full";
-        match std::fs::OpenOptions::new().write(true).open(path) {
-            Ok(mut file) => {
-                use std::io::Write as _;
-                let refuses_writes = file.write_all(b"probe").is_err();
-                refuses_writes.then_some(path)
-            }
-            Err(_) => None,
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn file_write_failure_after_open_is_a_bound_partial_effect() {
-        let Some(full_device) = post_open_write_failure_device() else {
-            println!(
-                "skipping file_write_failure_after_open_is_a_bound_partial_effect: \
-                 this host has no device that fails writes after a successful open"
-            );
-            return;
-        };
+    #[test]
+    fn file_output_refuses_symlink_destinations_and_parent_directories() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let output_root = temp.path().join(JOB_OUTPUT_DIR);
-        std::fs::create_dir_all(&output_root).expect("job output root");
-        std::os::unix::fs::symlink(full_device, output_root.join("sink")).expect("full device");
-        let job: AutomationJob = serde_json::from_value(json!({
-            "id": "private-file",
-            "name": "Private file",
-            "prompt": "write",
-            "delivery": {"mode": "file", "path": "job-output/sink"}
-        }))
-        .expect("job");
-        let response = AgentTaskResponse {
-            run_id: "run-file-attempt".to_owned(),
-            task: crate::automation::backend::AgentTaskKind::UserJob,
-            output_json: None,
-            output_text: "private delivery body".to_owned(),
-            model: None,
-            provider: None,
-            input_tokens: None,
-            output_tokens: None,
-        };
-        let error = deliver_job_output(
-            temp.path(),
-            &job,
-            "run-file-attempt",
-            &sha256_bytes(response.output_text.as_bytes()),
-            &response,
-        )
-        .await
-        .expect_err("the opened full device must reject the write");
-        let AutomationRunError::PartialEffect {
-            committed_receipt,
-            ledger_record,
-            ..
-        } = error
-        else {
-            panic!("post-open failure must be a partial effect")
-        };
-        let AutomationCommittedReceipt::UserJobDelivery(receipt) = *committed_receipt else {
-            panic!("post-open failure must carry a delivery receipt")
-        };
-        assert!(ledger_record.is_none());
-        assert_eq!(receipt.task_key(), "user_job:private-file");
-        assert!(matches!(
-            receipt.disposition(),
-            ExternalAutomationEffectDisposition::UserJobDeliveryIndeterminate { mode: "file", .. }
-        ));
-        let debug = format!("{receipt:?}");
-        assert!(!debug.contains("sink"));
-        assert!(!debug.contains("private delivery body"));
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("existing");
+        std::fs::write(&target, b"preserve").expect("seed");
+        std::os::unix::fs::symlink(&target, temp.path().join("sink")).expect("file symlink");
+        assert!(super::open_job_output(temp.path(), &temp.path().join("sink")).is_err());
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("directory"))
+            .expect("directory symlink");
+        assert!(
+            super::open_job_output(temp.path(), &temp.path().join("directory/existing")).is_err()
+        );
+        assert_eq!(std::fs::read(&target).expect("read"), b"preserve");
+        let file = super::open_job_output(temp.path(), &temp.path().join("nested/output"))
+            .expect("ordinary nested output");
+        drop(file);
+        assert!(temp.path().join("nested/output").is_file());
     }
 
     #[test]

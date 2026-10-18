@@ -53,3 +53,13 @@ BASE_URL=http://127.0.0.1:5195 node qa/loom-proximity.mjs
 ```
 
 Set `OUTPUT_DIR` to keep temporary captures out of the final screenshot collection.
+
+### Optional profile exports
+
+The app builds without `profile-pack`. Private exports are never compile-time
+imports. An operator may supply `window.TRACEDECAY_PROFILE_PACK` before the app
+module loads: an object mapping paths relative to `profile-pack/` (for example
+`ubuntu-main/proj_a5b3d7e3ebe14ca7/sessions.json`) to parsed JSON arrays.
+Absent exports are unavailable; the Ubuntu selector labels that state explicitly.
+Use `?data=fixture` for the tracked synthetic design example. Never commit real
+profile exports or embed them in a shared build.

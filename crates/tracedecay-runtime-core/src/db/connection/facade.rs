@@ -329,6 +329,18 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
+    pub async fn commit_with_on_commit<F>(self, on_commit: F) -> Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        match self {
+            Self::Read(_) => Err(TraceDecayError::Config {
+                message: "commit completion requires a write transaction".to_owned(),
+            }),
+            Self::Write(transaction) => transaction.commit_with_on_commit(on_commit).await,
+        }
+    }
+
     pub async fn commit(self) -> Result<()> {
         match self {
             Self::Read(snapshot) => {
@@ -448,6 +460,13 @@ impl DatabaseWriteTransaction<'_> {
     }
 
     pub async fn commit(self) -> Result<()> {
+        self.commit_with_on_commit(|| {}).await
+    }
+
+    pub async fn commit_with_on_commit<F>(self, on_commit: F) -> Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
         let Self {
             transaction,
             guard,
@@ -455,7 +474,7 @@ impl DatabaseWriteTransaction<'_> {
             ..
         } = self;
         advance_graph_transaction_generation(&transaction).await?;
-        let transaction = transaction.commit().await;
+        let transaction = transaction.commit_with_on_commit(on_commit).await;
         drop(guard);
         drop(_client_guard);
         transaction.map_err(|error| TraceDecayError::Database {

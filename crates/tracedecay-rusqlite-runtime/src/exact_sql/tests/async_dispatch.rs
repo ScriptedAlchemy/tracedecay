@@ -848,3 +848,57 @@ fn a_long_lease_job_renews_its_lease_after_each_statement() {
         "a bounded job outlives its one lease"
     );
 }
+
+#[test]
+fn abandoned_commit_retains_completion_until_writer_settlement() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Resource(Arc<AtomicUsize>);
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.0.fetch_add(10, Ordering::AcqRel);
+        }
+    }
+    for commit_succeeds in [true, false] {
+        current_thread().block_on(async {
+            let fixture = fixture('a', 'a');
+            let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+            base.execute_batch("CREATE TABLE owned_commit (value INTEGER UNIQUE)".to_owned())
+                .unwrap();
+            let (handle, accepted, release) = gated_handle(&fixture, ExactSqlWriteIntent::Commit);
+            let transaction = handle.begin_immediate_async().await.unwrap();
+            transaction
+                .execute_async(statement("INSERT INTO owned_commit VALUES (1)", vec![]))
+                .await
+                .unwrap();
+            let state = Arc::new(AtomicUsize::new(0));
+            let resource = Resource(Arc::clone(&state));
+            let mut pending = Box::pin(transaction.commit_async_with_on_commit(move || {
+                resource.0.fetch_add(1, Ordering::AcqRel);
+                drop(resource);
+            }));
+            assert!(poll_once(pending.as_mut()).await.is_pending());
+            accepted.await.unwrap();
+            drop(pending);
+            assert_eq!(state.load(Ordering::Acquire), 0);
+            if commit_succeeds {
+                release.send(()).unwrap();
+            } else {
+                drop(release);
+            }
+            base.execute_async(statement("INSERT INTO owned_commit VALUES (2)", vec![]))
+                .await
+                .unwrap();
+            assert_eq!(
+                state.load(Ordering::Acquire),
+                if commit_succeeds { 11 } else { 10 }
+            );
+            let rows = base
+                .query(
+                    statement("SELECT value FROM owned_commit ORDER BY value", vec![]),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+            assert_eq!(rows.rows.len(), if commit_succeeds { 2 } else { 1 });
+        });
+    }
+}

@@ -14,6 +14,7 @@ include = ["/src/**"]
 test-helpers = [
     "tracedecay-runtime-core/test-helpers",
     "tracedecay-session-temporal-store/test-helpers",
+    "dep:rusqlite",
     "dep:tempfile",
 ]
 
@@ -24,7 +25,7 @@ futures-util = "0.3.33"
 getrandom = "0.4"
 hex = "0.4"
 hmac = { version = "0.13.0", features = ["zeroize"] }
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+rusqlite = { version = "0.40.1", default-features = false, optional = true }
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,6 +53,7 @@ tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["async"] }
+rusqlite = { version = "0.40.1", default-features = false }
 tempfile = "3"
 # Test-only helper surfaces this crate's test targets reach across crate
 # boundaries: engine fixtures, session normalizers, and temporal page requests.

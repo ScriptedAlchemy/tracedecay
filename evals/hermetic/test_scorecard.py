@@ -189,5 +189,25 @@ class RenderAndCliTest(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("Fact-store adoption %: 0.00%", out)
 
+
+class RepetitionAccountingTests(unittest.TestCase):
+    def test_repetitions_share_the_same_opportunity_population(self):
+        corpus = [{"id": "w1", "category": "factstore-write"}, {"id": "w2", "category": "factstore-write"}]
+        rows = [row("w1", "factstore-write", True, rep=i) for i in (1, 2, 3)]
+        result = scorecard.aggregate(rows, corpus, reps=3)["overall"]
+        self.assertEqual(result["opportunities"], 6)
+        self.assertEqual(result["triggered"], 3)
+        self.assertEqual(result["adoption_pct"], 50.0)
+
+    def test_duplicate_repetition_refused(self):
+        record = row("w1", "factstore-write", True)
+        with self.assertRaises(ValueError):
+            scorecard.aggregate([record, record])
+
+    def test_missing_all_runs_still_counts_requested_repetitions(self):
+        result = scorecard.aggregate([], [{"id":"w1", "category":"factstore-write"}], reps=3)
+        self.assertEqual(result["overall"]["opportunities"], 3)
+        self.assertEqual(result["overall"]["triggered"], 0)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

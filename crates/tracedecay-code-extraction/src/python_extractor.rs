@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 /// Tree-sitter based Python source code extractor.
 ///
 /// Parses Python source files and emits nodes and edges for the code graph.
@@ -979,29 +980,120 @@ impl PythonExtractor {
     /// not a graph symbol, so calls in it (a decorator's `wrapper`, a closure)
     /// belong to the enclosing function, as lambda calls do.
     fn extract_call_sites(state: &mut ExtractionState<'_>, node: TsNode<'_>, fn_node_id: &str) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "call"
-                    && let Some(callee) = child.named_child(0)
-                {
-                    state.unresolved_refs.push(UnresolvedRef {
-                        from_node_id: fn_node_id.to_string(),
-                        reference_name: state.node_text(callee).to_string(),
-                        reference_kind: EdgeKind::Calls,
-                        line: child.start_position().row as u32,
-                        column: child.start_position().column as u32,
-                        file_path: state.file_path.clone(),
-                        unmodeled_import: None,
-                        argument_count: None,
-                    });
-                }
-                Self::extract_call_sites(state, child, fn_node_id);
-                if !cursor.goto_next_sibling() {
-                    break;
+        Self::extract_scoped_calls(state, node, fn_node_id, &HashSet::new());
+    }
+
+    fn binding_names(state: &ExtractionState<'_>, node: TsNode<'_>, names: &mut HashSet<String>) {
+        match node.kind() {
+            "identifier" => {
+                names.insert(state.node_text(node).to_owned());
+            }
+            "default_parameter" | "typed_default_parameter" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    Self::binding_names(state, name, names);
                 }
             }
+            "parameters"
+            | "lambda_parameters"
+            | "typed_parameter"
+            | "tuple_pattern"
+            | "list_pattern"
+            | "pattern_list"
+            | "list_splat_pattern"
+            | "dictionary_splat_pattern" => {
+                let mut cursor = node.walk();
+                for child in node.named_children(&mut cursor) {
+                    if child.kind() != "type" {
+                        Self::binding_names(state, child, names);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn local_binding_names(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        names: &mut HashSet<String>,
+    ) {
+        match node.kind() {
+            "function_definition" | "class_definition" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    Self::binding_names(state, name, names);
+                }
+                return;
+            }
+            "lambda" => return,
+            "assignment" | "augmented_assignment" | "for_statement" => {
+                if let Some(target) = node.child_by_field_name("left") {
+                    Self::binding_names(state, target, names);
+                }
+            }
+            "named_expression" => {
+                if let Some(target) = node.child_by_field_name("name") {
+                    Self::binding_names(state, target, names);
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            Self::local_binding_names(state, child, names);
+        }
+    }
+
+    fn extract_scoped_calls(
+        state: &mut ExtractionState<'_>,
+        node: TsNode<'_>,
+        owner: &str,
+        inherited: &HashSet<String>,
+    ) {
+        if matches!(node.kind(), "function_definition" | "lambda") {
+            let body = node.child_by_field_name("body");
+            // Defaults run in the enclosing scope, not the new callable's scope.
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if Some(child) != body {
+                    Self::extract_scoped_calls(state, child, owner, inherited);
+                }
+            }
+            if let Some(body) = body {
+                let mut bound = inherited.clone();
+                if let Some(parameters) = node.child_by_field_name("parameters") {
+                    Self::binding_names(state, parameters, &mut bound);
+                }
+                Self::local_binding_names(state, body, &mut bound);
+                Self::extract_scoped_calls(state, body, owner, &bound);
+            }
+            return;
+        }
+        if node.kind() == "call"
+            && let Some(callee) = node.named_child(0)
+        {
+            let name = state.node_text(callee).to_owned();
+            if !name.split('.').next().is_some_and(|head| {
+                inherited.contains(head)
+                    && state
+                        .imports
+                        .iter()
+                        .any(|import| import.local_name.as_deref() == Some(head))
+            }) {
+                state.unresolved_refs.push(UnresolvedRef {
+                    from_node_id: owner.to_owned(),
+                    reference_name: name,
+                    reference_kind: EdgeKind::Calls,
+                    line: node.start_position().row as u32,
+                    column: node.start_position().column as u32,
+                    file_path: state.file_path.clone(),
+                    unmodeled_import: None,
+                    argument_count: None,
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            Self::extract_scoped_calls(state, child, owner, inherited);
         }
     }
 
