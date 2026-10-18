@@ -194,7 +194,9 @@ fn ignored_dependency_candidates(
             "verified dependency import read exceeded its deadline",
         ));
     }
-    graph.external_type_import_candidates(query, scope_prefix, limit.clamp(1, 20))
+    graph
+        .external_type_import_candidates(query, scope_prefix, limit.clamp(1, 20))
+        .map_err(Into::into)
 }
 
 fn generation_advanced() -> TraceDecayError {
