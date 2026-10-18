@@ -28,8 +28,11 @@ vitest_bin.vitest_test(
         "e2e/**",
         "stories/**",
     ]),
-    args = ["run"],
+    # Leave CPU capacity for transforms and the coordinator beside the workers.
+    args = ["run", "--maxWorkers=2"],
     chdir = package_name(),
+    exec_properties = {"cpu_count": "4"},
+    tags = ["cpu:4"],
 )
 
 rsbuild_bin.rsbuild(
