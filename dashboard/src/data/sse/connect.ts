@@ -1,3 +1,4 @@
+import { dashboardFetch } from '../auth/credential.ts';
 import type { SseEventEnvelope } from './types.ts';
 import { createSseReducer, type SseReducer } from './reducer.ts';
 import { isRecord } from '../query/responseBody.ts';
@@ -151,7 +152,7 @@ export function connectEvents(url = '/api/events'): SseConnection {
 async function acknowledgeDelivery(url: string, receipt: string): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const response = await fetch(url, {
+      const response = await dashboardFetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ receipt }),

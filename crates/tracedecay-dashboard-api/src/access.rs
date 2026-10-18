@@ -2,15 +2,22 @@
 //!
 //! Loopback is reachable by every local account, so binding to 127.0.0.1 is
 //! not an access boundary. Each dashboard listener mints a random token that
-//! only its launch URL carries. A browser trades that URL once for an
-//! `HttpOnly`, `SameSite=Strict` cookie; programmatic clients send the token as
-//! the Basic-auth password.
+//! only its launch URL carries.
+//!
+//! The token is never stored in a cookie: browsers scope cookies by host, not
+//! port, so a cookie would ride along to every other service on the same
+//! loopback host. Instead the launch URL is traded for a redirect that moves
+//! the token into the URL fragment (never sent on the wire, never in a
+//! `Referer`); the page script keeps it in origin-scoped storage and sends it
+//! as the Basic-auth password on each request, as programmatic clients do.
+//! The embedded page shell carries no secret, so it is served without a
+//! credential; every `/api` route needs one.
 
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::http::{HeaderMap, HeaderValue, Method, Uri, header};
+use axum::http::{HeaderMap, Method, Uri, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -42,7 +49,8 @@ impl DashboardAccessToken {
         })
     }
 
-    /// The URL a person opens; the listener trades it for a session cookie.
+    /// The URL a person opens; the listener trades it for a redirect that
+    /// hands the token to the page through the URL fragment.
     pub fn launch_url(&self, addr: SocketAddr) -> String {
         format!("http://{addr}/?{LAUNCH_QUERY_KEY}={}", self.token)
     }
@@ -61,56 +69,44 @@ impl fmt::Debug for DashboardAccessToken {
 
 pub(crate) enum DashboardCredential {
     Admitted,
-    /// A valid launch URL: answer with a redirect that drops the token from
-    /// the address bar and sets the session cookie.
+    /// A valid launch URL on the page shell: answer with a redirect that drops
+    /// the token from the query and delivers it in the fragment.
     Launch {
         location: String,
-        set_cookie: HeaderValue,
     },
     Missing,
 }
 
 pub(crate) fn classify_credential(
     access: &DashboardAccessToken,
-    port: u16,
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
 ) -> DashboardCredential {
-    let cookie_name = session_cookie_name(port);
-    // A launch URL is exchanged even when a session already exists, so the
-    // token never stays in the address bar or history.
-    if let Some(launch) = launch_exchange(access, &cookie_name, method, uri) {
-        return launch;
+    if is_page_shell(method, uri) {
+        // A launch URL is exchanged even when the page already holds the
+        // token, so the token never stays in the query or history.
+        return launch_exchange(access, uri).unwrap_or(DashboardCredential::Admitted);
     }
     let basic = headers.get(header::AUTHORIZATION).is_some_and(|value| {
         constant_time_eq(value.as_bytes(), access.basic_authorization.as_bytes())
     });
-    let cookie = headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|pair| pair.trim().split_once('='))
-        .any(|(name, value)| {
-            name == cookie_name && constant_time_eq(value.as_bytes(), access.token.as_bytes())
-        });
-    if basic || cookie {
+    if basic {
         DashboardCredential::Admitted
     } else {
         DashboardCredential::Missing
     }
 }
 
-fn launch_exchange(
-    access: &DashboardAccessToken,
-    cookie_name: &str,
-    method: &Method,
-    uri: &Uri,
-) -> Option<DashboardCredential> {
-    if !matches!(*method, Method::GET | Method::HEAD) {
-        return None;
-    }
+/// The embedded single-page app (index, `/static/**`, client-side routes) is
+/// public code the browser must fetch before it can hold a token. Everything
+/// under `/api` is data and stays credentialed.
+fn is_page_shell(method: &Method, uri: &Uri) -> bool {
+    let path = uri.path();
+    matches!(*method, Method::GET | Method::HEAD) && path != "/api" && !path.starts_with("/api/")
+}
+
+fn launch_exchange(access: &DashboardAccessToken, uri: &Uri) -> Option<DashboardCredential> {
     let query = uri.query()?;
     let mut launch = false;
     let remaining: Vec<&str> = query
@@ -126,30 +122,17 @@ fn launch_exchange(
     if !launch {
         return None;
     }
+    let path = uri.path();
     let location = if remaining.is_empty() {
-        uri.path().to_owned()
+        format!("{path}#{LAUNCH_QUERY_KEY}={}", access.token)
     } else {
-        format!("{}?{}", uri.path(), remaining.join("&"))
+        format!(
+            "{path}?{}#{LAUNCH_QUERY_KEY}={}",
+            remaining.join("&"),
+            access.token
+        )
     };
-    let set_cookie = HeaderValue::from_str(&format!(
-        "{cookie_name}={}; Path=/; HttpOnly; SameSite=Strict",
-        access.token
-    ))
-    .ok()?;
-    Some(DashboardCredential::Launch {
-        location,
-        set_cookie,
-    })
-}
-
-/// Browsers scope cookies by host, not port, so the name carries the port to
-/// keep concurrent dashboards on one loopback host from overwriting each
-/// other's session.
-// ponytail: any listener on another 127.0.0.1 port that this browser visits
-// also receives the cookie; closing that needs per-request header tokens in
-// the SPA (EventSource cannot send headers), so the cookie stays until then.
-fn session_cookie_name(port: u16) -> String {
-    format!("tracedecay_dashboard_{port}")
+    Some(DashboardCredential::Launch { location })
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

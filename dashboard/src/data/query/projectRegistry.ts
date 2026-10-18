@@ -16,6 +16,7 @@
  * enumerate them, and a key added later is covered by construction rather than
  * by remembering to add it to the event handler.
  */
+import { dashboardFetch } from '../auth/credential.ts';
 import { useQuery } from '@tanstack/react-query';
 import {
   DashboardEnvelopeV1Schema,
@@ -75,7 +76,7 @@ export async function fetchProjectRegistry<T>(
 ): Promise<ProjectRegistryResult<T>> {
   let response: Response;
   try {
-    response = await fetch(url, { headers: { accept: 'application/json' }, ...init });
+    response = await dashboardFetch(url, { headers: { accept: 'application/json' }, ...init });
   } catch (err) {
     if (init?.signal?.aborted === true) throw err;
     return { outcome: 'transport', state: 'offline' };

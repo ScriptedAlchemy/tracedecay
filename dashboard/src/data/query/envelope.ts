@@ -1,3 +1,4 @@
+import { dashboardFetch } from '../auth/credential.ts';
 import { DashboardEnvelopeV1Schema, type DashboardDomainStateV1, type DashboardEnvelopeV1 } from '../../contracts/generated.ts';
 import { decodeJsonBody } from './responseBody.ts';
 import type { WireSchema } from './wireSchema.ts';
@@ -22,7 +23,7 @@ export async function fetchEnvelope<T>(
 ): Promise<EnvelopeResult<T>> {
   let response: Response;
   try {
-    response = await fetch(url, { headers: { accept: 'application/json' }, ...init });
+    response = await dashboardFetch(url, { headers: { accept: 'application/json' }, ...init });
   } catch (err) {
     if (init?.signal?.aborted === true) throw err;
     return { outcome: 'transport', state: 'offline' };

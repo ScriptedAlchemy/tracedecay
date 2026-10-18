@@ -1,3 +1,4 @@
+import { dashboardFetch } from '../auth/credential.ts';
 import { decodeJsonBody, UNDECODABLE } from './responseBody.ts';
 import type { WireSchema } from './wireSchema.ts';
 import { readOnlyScopeRefusal, type ReadOnlyScopeRefusal } from '../scope/store.ts';
@@ -74,7 +75,7 @@ async function readPayloadResponse<T>(
 ): Promise<PayloadWriteResult<T>> {
   let response: Response;
   try {
-    response = await fetch(url, { headers: { accept: 'application/json' }, ...init });
+    response = await dashboardFetch(url, { headers: { accept: 'application/json' }, ...init });
   } catch (err) {
     // A cancelled request is not a reading, and must not be laundered into
     // one. `fetch` rejects identically whether the network failed or this

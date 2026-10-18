@@ -15,6 +15,7 @@
  * a control state asserted rather than measured. A failed control leaves the
  * last real reading on screen and reports the failure beside it.
  */
+import { dashboardFetch } from '../auth/credential.ts';
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 
@@ -353,7 +354,7 @@ export async function runAutomaticCurator(
 ): Promise<AutomaticCuratorResult> {
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await dashboardFetch(url, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify({
