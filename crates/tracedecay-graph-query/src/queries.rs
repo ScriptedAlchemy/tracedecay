@@ -2,18 +2,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::{GraphQueryError, GraphQueryResult as Result};
 use tracedecay_code_index::graph_projection::{
     CodeGraphFileDependenciesV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
     CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::GraphCancellation;
 
-use super::map_projection_error;
+use super::CodeGraphReadError;
 use crate::test_classification::{
     TestClassification, classified_symbol, rust_module_declarer_candidates,
 };
@@ -96,9 +97,7 @@ impl<'a> GraphQueryManager<'a> {
                     page_size.max(1),
                     Arc::clone(&self.cancellation),
                 )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })?;
+                .map_err(GraphQueryError::from)?;
             if symbols.len().saturating_add(page.symbols.len()) > MAX_ANALYTICAL_SYMBOLS {
                 return Err(unavailable(overflow_detail));
             }
@@ -137,9 +136,7 @@ impl<'a> GraphQueryManager<'a> {
                     budget.saturating_add(1),
                     Arc::clone(&self.cancellation),
                 )
-                .map_err(|error| {
-                    super::map_code_graph_read_runtime_error(map_projection_error(error))
-                })?;
+                .map_err(GraphQueryError::from)?;
             if in_file.len() > budget {
                 return Err(budget_exhausted(
                     "verified graph file-symbol paging exceeded its scan budget",
@@ -214,9 +211,7 @@ impl<'a> GraphQueryManager<'a> {
                         MAX_ANALYTICAL_RELATIONS,
                         Arc::clone(&self.cancellation),
                     )
-                    .map_err(|error| {
-                        super::map_code_graph_read_runtime_error(map_projection_error(error))
-                    })
+                    .map_err(GraphQueryError::from)
             }
         }?;
         let contained = self.edges_among(&occurrences, &[RelationEdgeKindV1::Contains])?;
@@ -278,9 +273,7 @@ impl<'a> GraphQueryManager<'a> {
                         MAX_ANALYTICAL_SYMBOLS,
                         Arc::clone(&self.cancellation),
                     )
-                    .map_err(|error| {
-                        super::map_code_graph_read_runtime_error(map_projection_error(error))
-                    })
+                    .map_err(GraphQueryError::from)
             }
         }?;
         let seeds = symbols
@@ -302,9 +295,7 @@ impl<'a> GraphQueryManager<'a> {
         let unresolved_callers = self
             .reader
             .has_unresolved_callers(&seeds, None, Arc::clone(&self.cancellation))
-            .map_err(|error| {
-                super::map_code_graph_read_runtime_error(map_projection_error(error))
-            })?;
+            .map_err(GraphQueryError::from)?;
         let edges = {
             let _span = tracing::trace_span!("usecases.graph.file_neighbors.edges").entered();
             {
@@ -315,9 +306,7 @@ impl<'a> GraphQueryManager<'a> {
                         MAX_ANALYTICAL_RELATIONS,
                         Arc::clone(&self.cancellation),
                     )
-                    .map_err(|error| {
-                        super::map_code_graph_read_runtime_error(map_projection_error(error))
-                    })
+                    .map_err(GraphQueryError::from)
             }
         }?;
         let mut paths = edges
@@ -351,9 +340,7 @@ impl<'a> GraphQueryManager<'a> {
             {
                 super::scc::tarjan_scc_cancellable(&adjacency, self.cancellation.as_ref())
                     .map_err(|super::scc::SccCancelled| {
-                        super::map_code_graph_read_runtime_error(
-                            super::CodeGraphReadError::Cancelled,
-                        )
+                        GraphQueryError::from(super::CodeGraphReadError::Cancelled)
                     })?
                     .into_iter()
                     .filter(|component| super::scc::is_cyclic_scc(component, &adjacency))
@@ -385,7 +372,7 @@ impl<'a> GraphQueryManager<'a> {
     pub fn file_dependencies(&self) -> Result<CodeGraphFileDependenciesV1> {
         self.reader
             .file_dependencies(Arc::clone(&self.cancellation))
-            .map_err(|error| super::map_code_graph_read_runtime_error(map_projection_error(error)))
+            .map_err(GraphQueryError::from)
     }
 
     /// Folds every health input from one immutable graph generation. Symbol
@@ -398,9 +385,7 @@ impl<'a> GraphQueryManager<'a> {
             {
                 self.reader
                     .files(MAX_ANALYTICAL_SYMBOLS, Arc::clone(&self.cancellation))
-                    .map_err(|error| {
-                        super::map_code_graph_read_runtime_error(map_projection_error(error))
-                    })
+                    .map_err(GraphQueryError::from)
             }
         }?;
         let logical_paths = path_prefix.map(|prefix| {
@@ -557,7 +542,7 @@ impl<'a> GraphQueryManager<'a> {
                 Arc::clone(&self.cancellation),
             )
             .map(|edges| edges.into_iter().flatten().collect())
-            .map_err(|error| super::map_code_graph_read_runtime_error(map_projection_error(error)))
+            .map_err(GraphQueryError::from)
     }
 
     fn edges_among(
@@ -575,7 +560,7 @@ impl<'a> GraphQueryManager<'a> {
                 MAX_ANALYTICAL_RELATIONS,
                 Arc::clone(&self.cancellation),
             )
-            .map_err(|error| super::map_code_graph_read_runtime_error(map_projection_error(error)))
+            .map_err(GraphQueryError::from)
     }
 }
 
@@ -690,21 +675,28 @@ pub fn is_test_marker(record: &tracedecay_code_index::lineage::LineageSymbolReco
     tracedecay_code_index::is_test_marker(record)
 }
 
-fn unavailable(detail: &str) -> TraceDecayError {
+fn unavailable(detail: &str) -> GraphQueryError {
     TraceDecayError::ProjectRoute {
         reason_code: "verified-code-graph-evidence-unavailable".to_owned(),
         retryable: false,
         detail: detail.to_owned(),
         typed_detail: None,
     }
+    .into()
 }
 
-fn invalid_request(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("code-graph-invalid-request", false, detail)
+fn invalid_request(detail: &str) -> GraphQueryError {
+    CodeGraphReadError::InvalidRequest {
+        detail: detail.to_owned(),
+    }
+    .into()
 }
 
-fn budget_exhausted(detail: &str) -> TraceDecayError {
-    TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
+fn budget_exhausted(detail: &str) -> GraphQueryError {
+    CodeGraphReadError::BudgetExhausted {
+        detail: detail.to_owned(),
+    }
+    .into()
 }
 
 fn path_is_within(path: &str, directory: &str) -> bool {

@@ -24,6 +24,7 @@ use super::read_model::{
 };
 use super::util::{JsonPath, JsonQuery, query_rows};
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
+use crate::graph::GraphQueryError;
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
 use tracedecay_code_index::graph_projection::{
@@ -42,6 +43,10 @@ const TEST_CALLER_DEPTH: usize = 3;
 const FACT_MATCH_LIMIT: usize = 100;
 const STRATA_MAX_FILES: usize = 50_000;
 const STRATA_MAX_DEPENDENCY_EDGES: usize = 250_000;
+
+#[cfg(test)]
+#[path = "graph_structure_api_tests.rs"]
+mod tests;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CallChainParamsV1 {
@@ -424,7 +429,7 @@ async fn strata(
                     let dependencies = match match_result {
                         Ok(dependencies) => dependencies,
                         Err(error) => {
-                            return Err(graph_runtime_error_response::<StrataMeasurementV1>(
+                            return Err(graph_query_error_response::<StrataMeasurementV1>(
                                 &state, error,
                             ));
                         }
@@ -1207,14 +1212,16 @@ fn graph_error_response<T: Serialize>(
     }
 }
 
-fn graph_runtime_error_response<T: Serialize>(
+fn graph_query_error_response<T: Serialize>(
     state: &DashboardState,
-    error: tracedecay_domain::errors::TraceDecayError,
+    error: GraphQueryError,
 ) -> Response {
-    if let Some(graph_error) = crate::graph::code_graph_read_error_from_runtime(&error) {
-        return graph_error_response::<T>(state, graph_error);
+    match error {
+        GraphQueryError::Read(error) => graph_error_response::<T>(state, error),
+        GraphQueryError::Runtime(error) => {
+            failed_response::<T>(state, "strata_read_failed", error.to_string(), false)
+        }
     }
-    failed_response::<T>(state, "strata_read_failed", error.to_string(), false)
 }
 
 fn measured_response<T: Serialize>(
